@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>出片前台</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --ink:#1b1f24; --dim:#6b7280;
+    --accent:#1f6feb; --ok:#0f9960; --warn:#b7791f; --bad:#c53030; --soft:#f0f3f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif}
+  header{background:#fff;border-bottom:1px solid var(--line);padding:14px 22px;display:flex;
+    align-items:center;gap:16px;position:sticky;top:0;z-index:20}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.02em}
+  nav{display:flex;gap:4px;margin-left:12px}
+  nav button{background:none;border:none;padding:7px 14px;border-radius:7px;cursor:pointer;
+    font-size:14px;color:var(--dim)}
+  nav button.on{background:var(--soft);color:var(--ink);font-weight:600}
+  .spacer{flex:1}
+  .pill{font-size:12.5px;padding:4px 11px;border-radius:999px;background:var(--soft);color:var(--dim)}
+  .pill.run{background:#fff4e0;color:var(--warn)}
+  .pill.bad{background:#fdecec;color:var(--bad)}
+  #disk{cursor:pointer}
+  #disk:hover{background:#e6ebf2}
+  main{max-width:1000px;margin:0 auto;padding:26px 22px 90px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;margin-bottom:16px}
+  h2{font-size:15.5px;margin:0 0 16px;font-weight:650}
+  label{display:block;font-size:13px;color:var(--dim);margin:14px 0 5px;font-weight:500}
+  label:first-of-type{margin-top:0}
+  input[type=text],textarea,select{width:100%;padding:9px 11px;border:1px solid var(--line);
+    border-radius:8px;font:inherit;font-size:14px;background:#fff;color:var(--ink)}
+  textarea{min-height:200px;resize:vertical;line-height:1.75}
+  .tpl{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+  .tpl div{border:1.5px solid var(--line);border-radius:10px;padding:15px;cursor:pointer;
+    background:#fff;text-align:center;font-size:14.5px;font-weight:600}
+  .tpl div.on{border-color:var(--accent);background:#f2f7ff;color:var(--accent)}
+  .chk{display:flex;align-items:flex-start;gap:9px;margin:9px 0;font-size:14px;cursor:pointer}
+  .chk input{margin-top:3px;flex:none}
+  .chk small{display:block;color:var(--dim);font-size:12.5px;line-height:1.5}
+  button.go{background:var(--accent);color:#fff;border:none;padding:11px 24px;border-radius:9px;
+    font-size:15px;font-weight:600;cursor:pointer}
+  button.go:disabled{opacity:.45;cursor:default}
+  button.ghost{background:#fff;border:1px solid var(--line);padding:8px 15px;border-radius:8px;
+    cursor:pointer;font-size:13.5px;color:var(--ink)}
+  button.danger{color:var(--bad);border-color:#f2c9c9}
+  /* 標題輸入：輸入框本身就是預覽，打幾個字就是幾個字，不做自動斷行 */
+  .tline{position:relative;margin-bottom:9px}
+  .tline input{padding-right:96px}
+  .tline .cnt{position:absolute;right:11px;top:50%;transform:translateY(-50%);
+    font-size:12px;color:var(--dim);pointer-events:none;white-space:nowrap}
+  .tline .cnt.soft,.tline .cnt.over{color:var(--warn)}
+  .hint{font-size:12.5px;color:var(--dim);margin-top:-2px}
+  .vdrop{border:1.5px dashed var(--line);border-radius:9px;padding:15px;text-align:center;
+    cursor:pointer;background:#fcfdfe}
+  .vdrop:hover,.vdrop.hot{border-color:var(--accent);background:#f2f7ff}
+  .vdrop b{display:block;font-size:13.5px}
+  .vdrop span{font-size:12px;color:var(--dim)}
+  .vdrop.ok{border-style:solid;border-color:var(--ok);background:#f3fbf7}
+  /* 投廣品牌 */
+  .brands{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap}
+  .brands div{border:1.5px solid var(--line);border-radius:9px;padding:9px 18px;cursor:pointer;
+    font-size:14px;background:#fff}
+  .brands div.on{border-color:var(--accent);background:#f2f7ff;color:var(--accent);font-weight:600}
+  /* 圖片欄位 */
+  .slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
+  .slot{border:1.5px dashed var(--line);border-radius:10px;aspect-ratio:3/4;display:flex;
+    flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
+    background:#fcfdfe;position:relative;overflow:hidden;text-align:center;padding:10px}
+  .slot:hover{border-color:var(--accent);background:#f2f7ff}
+  .slot.hot{border-color:var(--accent);background:#eaf2ff}
+  .slot.filled{border-style:solid;border-color:var(--line);background:#fff;padding:0}
+  .slot img{width:100%;height:100%;object-fit:cover;object-position:top}
+  .slot .n{font-size:13.5px;color:var(--dim);font-weight:600}
+  .slot .h{font-size:11.5px;color:var(--dim);margin-top:3px}
+  .slot .tag{position:absolute;left:0;right:0;bottom:0;background:rgba(16,20,26,.82);color:#fff;
+    font-size:11.5px;padding:5px 8px;text-align:center}
+  .slot .tag b{font-weight:600}
+  /* 右上角小叉叉：上傳錯了直接刪（2026-08-17 使用者要求） */
+  .slot .x{position:absolute;top:6px;right:6px;width:22px;height:22px;border:none;
+    border-radius:50%;background:rgba(16,20,26,.72);color:#fff;cursor:pointer;
+    font-size:13px;line-height:22px;padding:0;text-align:center}
+  .slot .x:hover{background:#c53030}
+  .slot.add{border-style:dashed;color:var(--dim);font-size:26px;font-weight:300;aspect-ratio:3/4}
+  details.adv{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+  details.adv summary{cursor:pointer;font-size:13px;color:var(--dim);list-style:none}
+  details.adv summary::-webkit-details-marker{display:none}
+  details.adv summary::before{content:'▸ ';font-size:11px}
+  details.adv[open] summary::before{content:'▾ '}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th{text-align:left;font-size:12.5px;color:var(--dim);font-weight:500;padding:0 10px 9px;border-bottom:1px solid var(--line)}
+  td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .jobrow{cursor:pointer}
+  .jobrow:hover{background:#fafbfc}
+  .st{font-size:12.5px;padding:3px 10px;border-radius:999px;white-space:nowrap;display:inline-block}
+  .st.queued,.st.draft{background:var(--soft);color:var(--dim)}
+  .st.preparing,.st.rendering,.st.approved,.st.detached{background:#fff4e0;color:var(--warn)}
+  .st\\.detached-done,.st[class~="detached-done"]{background:#eef4ff;color:var(--accent)}
+  .st.review{background:#eef4ff;color:var(--accent);font-weight:600}
+  .st.done{background:#e7f6ee;color:var(--ok)}
+  .st.failed,.st.cancelled{background:#fdecec;color:var(--bad)}
+  pre.log{background:#12161c;color:#cfd6e0;padding:15px;border-radius:9px;font-size:12px;
+    line-height:1.6;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0}
+  .plan td{vertical-align:middle}
+  .plan img{width:120px;border-radius:6px;border:1px solid var(--line);display:block;cursor:zoom-in}
+  .plan .ph{font-size:13.5px}
+  .plan .sec{color:var(--dim);font-size:12.5px;white-space:nowrap}
+  .plan tr.del{opacity:.35}
+  .plan select{font-size:13px;padding:6px 8px}
+  /* 成品：一列排 2~3 支，不要一支就佔滿整個寬度（2026-08-17 使用者要求） */
+  .outs{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,290px));
+    gap:20px;align-items:start}
+  .outs figure{margin:0}
+  .outs video{width:100%;border-radius:9px;background:#000;display:block}
+  .outs figcaption{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .outs figcaption b{font-size:12.5px;font-weight:600;word-break:break-all;flex:1;min-width:0}
+  .outs figcaption span{font-size:11.5px;color:var(--dim)}
+  .outs figcaption a{font-size:12.5px;padding:5px 11px}
+  video{width:100%;border-radius:10px;background:#000;display:block}
+  .note{background:#fffbf0;border:1px solid #f0e2c0;border-radius:9px;padding:13px 15px;
+    font-size:13.5px;color:#7a5c14;line-height:1.65}
+  .empty{color:var(--dim);text-align:center;padding:38px;font-size:14px}
+  .lb{position:fixed;inset:0;background:rgba(10,12,16,.9);display:none;align-items:center;
+    justify-content:center;z-index:60;cursor:zoom-out;padding:30px}
+  .lb img{max-width:100%;max-height:100%;border-radius:8px}
+  a{color:var(--accent)}
+  /* 配圖預覽：圖＋比例定位的黃框，改完立刻反映，不用回伺服器重畫縮圖 */
+  .prev{position:relative;width:120px;border-radius:6px;overflow:hidden;
+    border:1px solid var(--line);cursor:pointer;background:#000;line-height:0}
+  .prev img{width:100%;display:block}
+  .prev .bx{position:absolute;border:2.5px solid #FFE600;border-radius:2px;
+    box-shadow:0 0 0 1px rgba(0,0,0,.5)}
+  .prev .bx.region{border-color:#3ba0ff;border-style:dashed;box-shadow:none}
+  .prev .hint{position:absolute;left:0;right:0;bottom:0;background:rgba(16,20,26,.8);
+    color:#fff;font-size:10.5px;text-align:center;padding:3px 0;line-height:1.3}
+  .prev.man .hint{background:rgba(31,111,235,.9)}
+  /* 框選編輯器 */
+  .ed{position:fixed;inset:0;background:rgba(10,12,16,.88);z-index:80;display:none;
+    align-items:center;justify-content:center;padding:26px}
+  .ed-in{background:var(--card);border-radius:13px;display:flex;gap:20px;padding:20px;
+    max-height:100%;max-width:1000px}
+  .ed-img{position:relative;line-height:0;cursor:crosshair;user-select:none;
+    background:#000;border-radius:8px;overflow:hidden;flex:none}
+  .ed-img img{display:block;max-height:76vh;width:auto}
+  .ed-img .bx{position:absolute;border:3px solid #FFE600;border-radius:3px;pointer-events:none}
+  .ed-img .bx.region{border-color:#3ba0ff;border-style:dashed}
+  .ed-side{width:320px;display:flex;flex-direction:column;gap:4px;overflow:auto}
+  /* 圖片列：全部圖都看得到，點一下換（不用下拉選檔名） */
+  .ed-strip{display:flex;gap:7px;margin-bottom:10px;flex-wrap:wrap}
+  .ed-strip div{width:52px;border:2px solid transparent;border-radius:6px;overflow:hidden;
+    cursor:pointer;line-height:0;background:#000}
+  .ed-strip div.on{border-color:var(--accent)}
+  .ed-strip img{width:100%;display:block}
+  /* 兩種框：顯示區域＝藍、黃框＝黃 */
+  .modes{display:flex;gap:7px}
+  .modes div{flex:1;text-align:center;border:1.5px solid var(--line);border-radius:8px;
+    padding:8px 0;cursor:pointer;font-size:13.5px}
+  .modes div.on{border-color:var(--accent);background:#f2f7ff;color:var(--accent);font-weight:600}
+  .rects{margin-top:11px;font-size:13px;display:flex;flex-direction:column;gap:7px}
+  .rects>div{display:flex;align-items:center;gap:7px}
+  .rects span{color:var(--dim);font-size:12.5px;flex:1}
+  .rects .sw{width:13px;height:13px;border-radius:3px;flex:none;display:inline-block}
+  .rects .sw.region{background:#3ba0ff}
+  .rects .sw.cell{background:#FFE600;border:1px solid #b9a600}
+  button.tiny{padding:3px 9px;font-size:12px}
+  .tip{font-size:12px;color:var(--dim);line-height:1.6;margin-top:8px}
+  /* 逐字選取：點一下選整個子句，拖曳選任意範圍（2026-08-17 使用者要求做到字級） */
+  .range{max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:8px;
+    padding:10px 11px;background:#fcfdfe;line-height:2.1;user-select:none;font-size:14px}
+  .range i{font-style:normal;cursor:pointer;padding:2px 0;border-radius:3px}
+  .range i:hover{background:#e3ebf5}
+  .range i.sel{background:#1f6feb;color:#fff}
+  .range i.br{margin-right:7px}
+  .ed-side h3{font-size:15px;margin:0 0 4px}
+  .ed-side .q{background:var(--soft);border-radius:8px;padding:10px 12px;font-size:13.5px;
+    line-height:1.6;margin-bottom:6px}
+  .ed-side label{margin:12px 0 5px}
+  .ed-act{display:flex;gap:9px;margin-top:auto;padding-top:18px}
+  /* 標注列表 */
+  .an{display:flex;gap:14px;align-items:flex-start;padding:14px 0;border-bottom:1px solid var(--line)}
+  .an:last-child{border-bottom:none}
+  .an .s{flex:1;min-width:0}
+  .an .s b{font-size:13.5px;font-weight:600;display:block;margin-bottom:3px}
+  .an .s span{font-size:12.5px;color:var(--dim);display:block;line-height:1.6}
+  .ed-act button{flex:1}
+  /* 改完檔案忘了重開伺服器的提醒 —— 這個坑第一次就踩到了 */
+  .stale{display:none;position:fixed;left:0;right:0;bottom:0;z-index:70;background:#8b2020;
+    color:#fff;padding:13px 22px;font-size:13.5px;line-height:1.7}
+  .stale code{background:rgba(255,255,255,.16);padding:2px 7px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎬 出片前台</h1>
+  <nav>
+    <button data-v="new" class="on">建立工作</button>
+    <button data-v="list">工作列表</button>
+    <button data-v="fix" id="navFix" hidden>修正紀錄</button>
+  </nav>
+  <span class="spacer"></span>
+  <span class="pill" id="disk" hidden title="點一下清掉保留期外的舊影片"></span>
+  <span class="pill" id="status">連線中…</span>
+</header>
+
+<main>
+  <!-- ── 建立工作 ── -->
+  <section id="v-new">
+    <div class="card">
+      <h2>1・選版型</h2>
+      <div class="tpl" id="tpl"></div>
+      <div class="brands" id="brands" style="display:none"></div>
+    </div>
+
+    <div class="card">
+      <h2>2・基本資料</h2>
+      <label>你是誰</label>
+      <input type="text" id="owner" placeholder="王小明">
+
+      <label>影片標題</label>
+      <div id="titleLines"></div>
+      <div class="hint" id="twhere"></div>
+
+      <label>腳本（直接貼上）</label>
+      <textarea id="body" placeholder="台股今天大漲逾900點，跌深股全面反彈。但投資人真正想知道的是：這波反彈，接下來哪些族群還有空間？
+
+今天最猛的是跌深股補漲。南亞科、華邦電漲逾9%、友達群創雙漲停。
+
+開啟籌碼K線，進「多方－噴發向上」，看今天量價同步爆發的標的。"></textarea>
+    </div>
+
+    <div class="card">
+      <h2>3・截圖</h2>
+      <div class="slots" id="slots"></div>
+      <input type="file" id="picker" accept="image/*" hidden>
+    </div>
+
+    <div class="card">
+      <h2>4・出片</h2>
+      <label class="chk"><input type="checkbox" id="autoApprove">
+        <span>直接出片，不用我確認<small>不勾的話，中間會停下來讓你看一次「哪句配哪張圖、框在哪」，確認後才出片。</small></span></label>
+      <label class="chk" id="wrapWithAd"><input type="checkbox" id="withAd">
+        <span>另外出一支投廣套框版<small>焦點股日報限定。預設只出客製版。</small></span></label>
+
+      <details class="adv" id="advBox" hidden>
+        <summary>進階（一般不用動）</summary>
+        <label class="chk"><input type="checkbox" id="skipGenerate">
+          <span>用現成的講者影片<small>不呼叫 HeyGen，改用你上傳的 heygen.mp4。測試用。</small></span></label>
+        <div id="heygenSlot" style="display:none;margin:8px 0 6px">
+          <div class="vdrop" id="vdrop">
+            <b>選擇或拖曳講者影片</b>
+            <span id="heygenName">支援 .mp4（會被存成 heygen.mp4）</span>
+          </div>
+          <input type="file" id="heygenPicker" accept="video/*,.mp4" hidden>
+        </div>
+        <label class="chk"><input type="checkbox" id="noSpeed">
+          <span>不要加速 120%<small>同一支影片重跑會重複加速，重跑時記得勾。</small></span></label>
+        <label>發音替換（一行一條，格式：原文→唸法）</label>
+        <textarea id="voice" style="min-height:80px" placeholder="櫃買→櫃賣&#10;台積電2330→台積電二三三零"></textarea>
+      </details>
+
+      <div style="margin-top:22px"><button class="go" id="submit">開始出片</button></div>
+    </div>
+  </section>
+
+  <!-- ── 工作列表 ── -->
+  <section id="v-list" hidden>
+    <div class="card"><h2>工作列表</h2><div id="jobs"></div></div>
+  </section>
+
+  <!-- ── 工作詳情 ── -->
+  <section id="v-job" hidden></section>
+
+  <!-- ── 修正紀錄 ── -->
+  <section id="v-fix" hidden>
+    <div class="card">
+      <h2>修正紀錄</h2>
+      <div class="note">
+        這頁記錄「AI 原本怎麼配，人改成什麼」。<br>
+        某一類修正一直出現 → 規則庫還缺那塊，值得回頭修。<br>
+        某一類連續兩三週都沒人改 → 那部分可以放心不用看了，離「不用檢查」又近一步。
+      </div>
+      <div id="fix"></div>
+    </div>
+  </section>
+</main>
+
+<div class="stale" id="stale">
+  程式碼已經更新，但伺服器還在跑舊版 —— 網頁上看到的還是舊設定。<br>
+  請到 Mac 上重開：<code>launchctl kickstart -k gui/$(id -u)/com.cmoney.marketing-video-studio</code>
+  　或終端機 Ctrl+C 後 <code>npm run studio</code>
+</div>
+
+<div class="ed" id="ed">
+  <div class="ed-in">
+    <div>
+      <div class="ed-strip" id="edStrip"></div>
+      <div class="ed-img" id="edImg"></div>
+    </div>
+    <div class="ed-side">
+      <h3 id="edTitle">標注</h3>
+
+      <label>現在要畫哪一種</label>
+      <div class="modes" id="edModes">
+        <div data-m="region">顯示區域</div>
+        <div data-m="cell">黃框</div>
+      </div>
+      <div class="rects">
+        <div><i class="sw region"></i>顯示區域<span id="edRegionState">沒有</span>
+          <button class="ghost tiny" id="edClearRegion">刪掉</button></div>
+        <div><i class="sw cell"></i>黃框<span id="edCellState">沒有</span>
+          <button class="ghost tiny" id="edClearCell">刪掉</button></div>
+      </div>
+      <div class="tip">在左圖拖曳就會畫出「現在要畫的那一種」。<br>
+        兩種可以只有一種、也可以都有；都沒有就是整張顯示。</div>
+
+      <label class="chk" style="margin-top:14px"><input type="checkbox" id="edPan">
+        <span>往下滑動<small>慢慢往下帶過內容，適合重點在圖片下方。</small></span></label>
+
+      <div id="edRangeWrap">
+        <label>出現在哪一段（點頭、再點尾）</label>
+        <div class="range" id="edRange"></div>
+        <div class="tip" id="edRangeText"></div>
+      </div>
+
+      <div class="ed-act">
+        <button class="ghost" id="edCancel">取消</button>
+        <button class="go" id="edOK">完成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="lb" id="lb"><img id="lbimg" alt=""></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (t, a = {}, ...kids) => {
+  const n = document.createElement(t);
+  for (const [k, v] of Object.entries(a)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'html') n.innerHTML = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v);
+  }
+  kids.flat().forEach((c) => n.append(c && c.nodeType ? c : document.createTextNode(c ?? '')));
+  return n;
+};
+const api = async (u, o) => {
+  const r = await fetch(u, o);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+};
+const fmt = (s) => (s == null ? '—' : s.toFixed(1) + 's');
+const STATUS_TEXT = { draft:'建立中', queued:'排隊中', preparing:'準備中', review:'待確認',
+  approved:'等待出片', rendering:'出片中', done:'完成', failed:'失敗', cancelled:'已取消',
+  // 伺服器重開前就開始跑的工作。run.js 是 detached 的，會自己跑完。
+  detached:'背景執行中', 'detached-done':'已在背景跑完' };
+
+let TPLS = {}, BRANDS = [], ADMIN = false, brand = null, tpl = 'focusstock', view = 'new', openJob = null;
+
+// ── 標題 ──────────────────────────────────
+// 四個版型的標題限制差很多（見 server/index.js 的 TEMPLATES.title 註解）：
+//   焦點股／投廣 一行；大盤／三大法人 兩行、而且兩行顏色不同。
+// 原本做的是「自動斷行＋預覽」，但斷在哪其實是編輯決定，不該讓系統猜
+//（2026-08-13 使用者：「我覺得這邊不用預覽」）。
+// 改成直接給對應數量的輸入框 —— 打什麼就是什麼，輸入框本身就是預覽。
+let titleVals = ['', ''];
+function titleCfg() {
+  return (TPLS[tpl] && TPLS[tpl].title) || { lines: 2, per: 12, where: '' };
+}
+function titleLines() {
+  return titleVals.slice(0, titleCfg().lines).map((v) => v.trim()).filter(Boolean);
+}
+function drawTitle() {
+  const cfg = titleCfg();
+  const wrap = $('#titleLines');
+  const rows = [];
+  for (let i = 0; i < cfg.lines; i++) {
+    // 會換行的模板（焦點股／大盤／三大法人）：字數只是「參考」，可以超過 —— 超過只是自動換行、字級不變。
+    // 只有不能換行的投廣模板（cfg.wrap === false）才用 maxlength 硬擋，因為上方 bar 沒換行空間。
+    //（2026-08-17 使用者：除投廣外，字數限制只是參考，為什麼不能輸入超過。）
+    if (!cfg.wrap) titleVals[i] = (titleVals[i] || '').slice(0, cfg.per);
+    const cnt = el('span', { class: 'cnt' });
+    const inp = el('input', {
+      type: 'text', value: titleVals[i] || '',
+      ...(cfg.wrap ? {} : { maxlength: cfg.per }),
+      placeholder: cfg.lines === 1 ? '' : (i === 0 ? '第一行' : '第二行'),
+      oninput: (e) => { titleVals[i] = e.target.value; paint(); },
+    });
+    const paint = () => {
+      const n = (titleVals[i] || '').trim().length;
+      const over = cfg.wrap && n > cfg.per;
+      cnt.textContent = n ? n + '/' + cfg.per + (over ? '・會換行' : '') : '';
+      cnt.classList.toggle('over', over);
+    };
+    paint();
+    rows.push(el('div', { class: 'tline' }, inp, cnt));
+  }
+  wrap.replaceChildren(...rows);
+  $('#twhere').textContent = cfg.where;
+}
+
+// ── 導覽 ──
+document.querySelectorAll('nav button').forEach((b) =>
+  b.onclick = () => { openJob = null; go(b.dataset.v); });
+function go(v) {
+  if (v !== 'job') jobSig = null;   // 換頁／換工作要重畫
+  view = v;
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  for (const id of ['new', 'list', 'job', 'fix']) $('#v-' + id).hidden = (id !== v);
+  if (v === 'list') loadJobs();
+  if (v === 'fix') loadFix();
+  if (v === 'job') loadJob();
+}
+
+// 強制解鎖（只有管理者點得動）
+$('#status').onclick = async () => {
+  if (!ADMIN || !$('#status').textContent.includes('佔用')) return;
+  if (!confirm('強制刪掉 .run.lock？\n\n只有在確定沒有任何 run.js 在跑的時候才做，'
+    + '否則兩個流程會同時寫 public/，兩支影片都會壞掉。')) return;
+  await api('/api/unlock', { method: 'POST' });
+  poll();
+};
+
+$('#disk').onclick = async () => {
+  if (!confirm('清掉保留期外的舊影片與素材？（工作紀錄與執行記錄會留著）')) return;
+  const r = await api('/api/prune', { method: 'POST' });
+  alert(r.freedMB ? `清出 ${r.freedMB} MB` : '沒有可以清的東西，目前都在保留期內');
+  poll();
+};
+$('#lb').onclick = () => ($('#lb').style.display = 'none');
+function zoom(src) { $('#lbimg').src = src; $('#lb').style.display = 'flex'; }
+
+// ── 截圖欄位 ──────────────────────────────
+// 預設三格＋一個「再新增」。比一個大拖曳區清楚：一眼看得出放了幾張、順序是什麼。
+let slots = [null, null, null];
+let pickingSlot = -1;
+
+$('#picker').onchange = (e) => {
+  const f = e.target.files[0];
+  if (f && pickingSlot >= 0) slots[pickingSlot] = f;
+  e.target.value = '';
+  drawSlots();
+};
+
+function setSlotFile(i, f) {
+  if (!f) return;
+  if (!/^image\//.test(f.type)) {
+    // 原本是靜靜忽略 —— 使用者把 mp4 拖進來會以為壞掉（2026-08-13 回報）
+    alert(/^video\//.test(f.type)
+      ? '這幾格是放 APP 截圖的。\n\n講者影片預設由系統自己生成，不用上傳；\n真的要用現成的影片，請展開下面的「進階」→ 勾「用現成的講者影片」。'
+      : `「${f.name}」不是圖片檔，這幾格只能放 png / jpg 截圖。`);
+    return;
+  }
+  slots[i] = f;
+  drawSlots();
+}
+
+function drawSlots() {
+  const wrap = $('#slots');
+  const nodes = slots.map((f, i) => {
+    const s = el('div', {
+      class: 'slot' + (f ? ' filled' : ''),
+      onclick: () => { pickingSlot = i; $('#picker').click(); },
+      ondragover: (e) => { e.preventDefault(); s.classList.add('hot'); },
+      ondragleave: () => s.classList.remove('hot'),
+      ondrop: (e) => { e.preventDefault(); s.classList.remove('hot'); setSlotFile(i, e.dataTransfer.files[0]); },
+    });
+    if (f) {
+      s.append(
+        el('img', { src: URL.createObjectURL(f), alt: '' }),
+        el('button', { class: 'x', title: '刪掉這張',
+          onclick: (e) => { e.stopPropagation(); slots.splice(i, 1); if (slots.length < 3) slots.push(null); drawSlots(); } }, '✕'),
+        el('div', { class: 'tag' }, el('b', {}, '截圖 ' + (i + 1))));
+    } else {
+      s.append(el('div', { class: 'n' }, '截圖 ' + (i + 1)), el('div', { class: 'h' }, '點擊或拖曳'));
+    }
+    return s;
+  });
+  nodes.push(el('div', {
+    class: 'slot add',
+    onclick: () => { slots.push(null); drawSlots(); },
+    title: '再新增一張',
+  }, '＋'));
+  wrap.replaceChildren(...nodes);
+}
+
+// ── 進階：現成講者影片 ──
+let heygenFile = null;
+$('#skipGenerate').onchange = (e) => {
+  $('#heygenSlot').style.display = e.target.checked ? 'block' : 'none';
+};
+function setHeygen(f) {
+  if (!f) return;
+  // accept 有時擋不住（有些系統 mp4 的 MIME 是空的），所以副檔名也認
+  if (!/^video\//.test(f.type) && !/\.(mp4|mov|m4v)$/i.test(f.name))
+    return alert(`「${f.name}」看起來不是影片檔。`);
+  heygenFile = f;
+  $('#vdrop').classList.add('ok');
+  $('#heygenName').textContent = `${f.name}　${(f.size / 1048576).toFixed(1)} MB　（點這裡可換掉）`;
+}
+$('#vdrop').onclick = () => $('#heygenPicker').click();
+['dragover', 'dragleave', 'drop'].forEach((ev) =>
+  $('#vdrop').addEventListener(ev, (e) => {
+    e.preventDefault();
+    $('#vdrop').classList.toggle('hot', ev === 'dragover');
+    if (ev === 'drop') setHeygen(e.dataTransfer.files[0]);
+  }));
+$('#heygenPicker').onchange = (e) => { setHeygen(e.target.files[0]); e.target.value = ''; };
+
+// ── 版型 ──
+async function boot() {
+  const h = await api('/api/health');
+  TPLS = h.templates;
+  BRANDS = h.brands || [];
+  // 修正紀錄與進階選項只給管理者（本機連進來的人）看。
+  // 同事看到「用現成的講者影片」「不要加速」只會困惑，那些是給 Leighly 測試用的。
+  ADMIN = !!h.admin;
+  $('#navFix').hidden = !ADMIN;
+  $('#advBox').hidden = !ADMIN;
+  $('#tpl').replaceChildren(...Object.entries(TPLS).map(([k, t]) =>
+    el('div', { class: k === tpl ? 'on' : '', onclick: () => { tpl = k; boot2(); } }, t.label)));
+  boot2();
+  drawSlots();
+  poll();
+  setInterval(poll, 3000);
+}
+function boot2() {
+  document.querySelectorAll('#tpl div').forEach((d, i) =>
+    d.classList.toggle('on', Object.keys(TPLS)[i] === tpl));
+  $('#wrapWithAd').style.display = TPLS[tpl].flags.includes('with-ad') ? 'flex' : 'none';
+  // 投廣模板要再選品牌（起漲K線／籌碼K線）—— 外框、logo、片尾、BGM 都不一樣
+  const showBrands = !!TPLS[tpl].brands && BRANDS.length > 0;
+  $('#brands').style.display = showBrands ? 'flex' : 'none';
+  if (showBrands) {
+    if (!BRANDS.includes(brand)) brand = BRANDS[0];
+    $('#brands').replaceChildren(...BRANDS.map((b) =>
+      el('div', { class: b === brand ? 'on' : '', onclick: () => { brand = b; boot2(); } }, b)));
+  } else brand = null;
+  drawTitle();   // 換版型 → 標題行數／字數限制不同
+}
+
+async function poll() {
+  try {
+    const h = await api('/api/health');
+    const s = $('#status');
+    // 檔案比伺服器啟動時間新 → 一定是改完忘了重開
+    $('#stale').style.display = h.codeChangedAt > h.startedAt ? 'block' : 'none';
+    // 磁碟用量只給管理者看。成品累積得很快（大盤一支就 138MB），要看得到才會有感
+    if (h.admin && h.diskMB != null) {
+      $('#disk').hidden = false;
+      $('#disk').textContent = `💾 ${h.diskMB} MB`;
+      $('#disk').title = `工作資料夾佔用。自動保留最近 ${h.keep.recent} 支或 ${h.keep.days} 天內，`
+        + '更舊的只留紀錄不留影片。點一下立刻清理。';
+    } else $('#disk').hidden = true;
+    // ⚠️ 順序：busy 要先判斷。run.js 一跑就會建立 .run.lock，
+    // 先看 locked 的話「每支影片跑的時候」都會顯示「被鎖住」，正常狀況長得像出事
+    //（2026-08-17 使用者回報）。
+    if (h.busy) { s.className = 'pill run'; s.textContent = '● 出片中'; }
+    else if (h.externalLock) {
+      s.className = 'pill bad';
+      s.textContent = `⚠️ 工作區被佔用${h.lockAgeMin != null ? '（' + h.lockAgeMin + ' 分鐘）' : ''}`;
+      s.title = '有其他流程在用工作區（可能是終端機在跑 run.js，或上次沒清乾淨）。'
+        + '新工作會排隊等，不會失敗。點一下可以強制解鎖。';
+      s.style.cursor = ADMIN ? 'pointer' : 'default';
+    } else { s.className = 'pill'; s.textContent = '○ 閒置'; s.title = ''; s.style.cursor = 'default'; }
+  } catch (_) {
+    const s = $('#status'); s.className = 'pill bad'; s.textContent = '✕ 主機離線';
+  }
+  if (view === 'list') loadJobs();
+  if (view === 'job' && openJob) loadJob();
+}
+
+// ── 送出 ──
+$('#submit').onclick = async () => {
+  const btn = $('#submit');
+  const imgs = slots.filter(Boolean);
+  const lines = titleLines();
+  if (!$('#body').value.trim()) return alert('腳本是空的');
+  if ($('#skipGenerate').checked && !heygenFile) return alert('勾了「用現成的講者影片」，請選擇 heygen.mp4');
+
+  btn.disabled = true;
+  try {
+    btn.textContent = '建立工作…';
+    const { job } = await api('/api/jobs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template: tpl, owner: $('#owner').value,
+        title: lines.join('\n'), body: $('#body').value, voice: $('#voice').value,
+        skipGenerate: $('#skipGenerate').checked, noSpeed: $('#noSpeed').checked,
+        withAd: $('#withAd').checked, autoApprove: $('#autoApprove').checked, brand,
+      }),
+    });
+    const ups = imgs.map((f, i) => ({ f, name: 'shot' + (i + 1) + (/\.jpe?g$/i.test(f.name) ? '.jpg' : '.png') }));
+    if (heygenFile) ups.push({ f: heygenFile, name: 'heygen.mp4' });
+    for (let i = 0; i < ups.length; i++) {
+      const mb = (ups[i].f.size / 1048576).toFixed(1);
+      btn.textContent = `上傳 ${i + 1}/${ups.length}（${mb} MB）…`;
+      // ⚠️ 一定要檢查結果。原本沒檢查 → 上傳失敗畫面照樣往下走，
+      //    最後才丟一個看不懂的錯（2026-08-13）。
+      const r = await fetch(`/api/jobs/${job.id}/upload?name=${ups[i].name}`,
+        { method: 'POST', body: ups[i].f });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(`上傳「${ups[i].f.name}」失敗（${r.status}）${j.error ? '：' + j.error : ''}`);
+      }
+    }
+    btn.textContent = '送出…';
+    await api(`/api/jobs/${job.id}/submit`, { method: 'POST' });
+    slots = [null, null, null]; heygenFile = null;
+    $('#vdrop').classList.remove('ok');
+    $('#heygenName').textContent = '支援 .mp4（會被存成 heygen.mp4）';
+    $('#body').value = ''; titleVals = ['', ''];
+    drawSlots(); drawTitle();
+    openJob = job.id; go('job');
+  } catch (e) { alert('出錯了：' + e.message); }
+  btn.disabled = false; btn.textContent = '開始出片';
+};
+
+// ── 列表 ──
+async function loadJobs() {
+  const { jobs } = await api('/api/jobs');
+  if (!jobs.length) return $('#jobs').replaceChildren(el('div', { class: 'empty' }, '還沒有任何工作'));
+  const t = el('table', {}, el('thead', {}, el('tr', {},
+    el('th', {}, '建立時間'), el('th', {}, '版型'), el('th', {}, '標題'),
+    el('th', {}, '建立者'), el('th', {}, '狀態'))));
+  const tb = el('tbody');
+  for (const j of jobs) {
+    let st = STATUS_TEXT[j.status] || j.status;
+    if (j.queuePosition > 0) st += `（前面還有 ${j.queuePosition} 支）`;
+    tb.append(el('tr', { class: 'jobrow', onclick: () => { openJob = j.id; go('job'); } },
+      el('td', {}, new Date(j.createdAt).toLocaleString('zh-TW', { hour12: false }).slice(5)),
+      el('td', {}, (TPLS[j.template] || {}).label || j.template),
+      el('td', {}, (j.title || '—').replace(/\n/g, ' ')),
+      el('td', {}, j.owner),
+      el('td', {}, el('span', { class: 'st ' + j.status }, st))));
+  }
+  t.append(tb);
+  $('#jobs').replaceChildren(t);
+}
+
+// ── 詳情 ──
+let edits = {};
+let jobSig = null;   // 上次畫出來的內容特徵
+async function loadJob() {
+  const { job } = await api('/api/jobs/' + openJob);
+  const { text } = await api(`/api/jobs/${openJob}/log`);
+  const box = $('#v-job');
+  // 詳情頁每 3 秒輪詢一次。以前不管有沒有變都整塊 replaceChildren，
+  // <video> 被重新建立就會重新載入 → 影片一直閃（2026-08-17 使用者回報）。
+  // 內容沒變就什麼都不做；工作跑完後特徵不再變動，畫面自然就穩住。
+  const sig = [job.id, job.status, (job.outputs || []).length, text.length, job.error || ''].join('|');
+  if (sig === jobSig && box.childElementCount) return;
+  jobSig = sig;
+  const keep = box.querySelector('pre.log');
+  const scrolled = keep ? keep.scrollTop + keep.clientHeight >= keep.scrollHeight - 40 : true;
+
+  const head = el('div', { class: 'card' },
+    el('div', { style: 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' },
+      el('h2', { style: 'margin:0' }, (TPLS[job.template] || {}).label + '　' + (job.title || '').replace(/\n/g, ' ')),
+      el('span', { class: 'st ' + job.status },
+        (STATUS_TEXT[job.status] || job.status) + (job.queuePosition > 0 ? `（前面還有 ${job.queuePosition} 支）` : '')),
+      el('span', { style: 'flex:1' }),
+      el('button', { class: 'ghost', onclick: () => { openJob = null; go('list'); } }, '← 回列表')),
+    el('div', { style: 'color:var(--dim);font-size:13px;margin-top:8px' },
+      `${job.owner}・${new Date(job.createdAt).toLocaleString('zh-TW', { hour12: false })}`),
+    job.error ? el('div', { class: 'note', style: 'margin-top:14px;background:#fdecec;border-color:#f2c9c9;color:#8b2020' }, job.error) : '');
+
+  const parts = [head];
+
+  if (job.status === 'detached' || job.status === 'detached-done') {
+    parts.push(el('div', { class: 'card' },
+      el('h2', {}, job.status === 'detached' ? '這支正在背景跑' : '這支已經在背景跑完'),
+      el('div', { class: 'note' },
+        (job.status === 'detached'
+          ? '伺服器在它跑到一半時重開過。它沒有被殺掉，會自己跑完 —— <b>HeyGen 點數不會浪費</b>。<br><br>'
+          : '它已經跑完了，但伺服器當時已經重開，所以沒有接回前台流程。<br><br>')
+        + '<b>怎麼零成本接回：</b><br>'
+        + '講者影片留在專案的 <code>public/heygen.mp4</code>。<br>'
+        + '重新建立一次工作 → 展開「進階」→ 勾「<b>用現成的講者影片</b>」→ 選那支 mp4。<br>'
+        + '這樣不會再呼叫 HeyGen，一毛錢都不用花。')));
+  }
+
+  // HeyGen 生成／準備中的時候就可以先標注 —— 不用乾等
+  //（2026-08-17 使用者：「等heygen生成時我順便手動標示」）
+  if (['queued', 'preparing', 'detached'].includes(job.status)) parts.push(annotCard(job));
+
+  if (job.status === 'review' && job.planView) parts.push(planCard(job));
+
+  if (job.status === 'done' && job.pruned) {
+    parts.push(el('div', { class: 'card' }, el('h2', {}, '成品'),
+      el('div', { class: 'note' }, '這支已經超過保留期限，影片檔案清掉了（工作紀錄還留著）。需要的話請重新出片。')));
+  } else if (job.status === 'done' && job.outputs) {
+    const grid = el('div', { class: 'outs' });
+    for (const o of job.outputs) {
+      grid.append(el('figure', {},
+        el('video', { controls: 'controls', src: `/api/jobs/${job.id}/file/${o.name}` }),
+        el('figcaption', {},
+          el('b', {}, o.name),
+          el('span', {}, (o.size / 1048576).toFixed(1) + ' MB'),
+          el('a', { class: 'ghost', href: `/api/jobs/${job.id}/file/${o.name}?dl=1`,
+            style: 'text-decoration:none' }, '下載'))));
+    }
+    const card = el('div', { class: 'card' }, el('h2', {}, '成品'), grid);
+    if (job.archived && job.archived.length)
+      card.append(el('div', { style: 'margin-top:16px;font-size:12.5px;color:var(--dim)' },
+        '也存進成品庫了（不會自動清）：　' + job.archived.join('　/　')));
+    parts.push(card);
+  }
+
+  const logCard = el('div', { class: 'card' },
+    el('div', { style: 'display:flex;align-items:center;margin-bottom:12px' },
+      el('h2', { style: 'margin:0;flex:1' }, '執行記錄'),
+      ['queued', 'review', 'failed', 'approved', 'detached-done'].includes(job.status)
+        ? el('button', { class: 'ghost danger', onclick: async () => {
+            if (confirm('確定取消這支工作？')) { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); loadJob(); }
+          } }, '取消工作') : ''),
+    el('pre', { class: 'log' }, text || '（還沒有輸出）'));
+  parts.push(logCard);
+
+  box.replaceChildren(...parts);
+  const pre = logCard.querySelector('pre');
+  if (scrolled) pre.scrollTop = pre.scrollHeight;
+}
+
+// ── 標注（HeyGen 還在跑的時候就能做）────────
+// 秒數要等語音轉字幕才有，所以這裡標的是「哪一句」。
+// HeyGen 跑完後系統自己把句子換算成秒數 —— 這也是既有 (shot:) 手動標記的運作方式。
+let ANNOTS = [];
+let UNITS = [];        // 子句清單（拉範圍用）
+let annotJobId = null;
+
+function annotCard(job) {
+  const c = el('div', { class: 'card' },
+    el('h2', {}, '先標注　—　不用等 HeyGen'),
+    el('div', { class: 'note' },
+      'HeyGen 生成要好幾分鐘，這段時間可以先把圖標好：<b>哪張圖配在哪一句、框哪裡、要不要滑動</b>。<br>'
+      + '你標的部分自動判定完全不會碰；沒標的才由 AI 補。<br>'
+      + '<b>標「哪一句」而不是「第幾秒」</b> —— 秒數要等語音轉完字幕才存在，系統會自己換算。'),
+    el('div', { id: 'annotList' }),
+    el('div', { style: 'margin-top:16px;display:flex;gap:10px;align-items:center' },
+      el('button', { class: 'ghost', onclick: () => addAnnot(job) }, '＋ 加一個標注'),
+      el('span', { id: 'annotSaved', style: 'font-size:12.5px;color:var(--dim)' })));
+
+  if (annotJobId !== job.id) {
+    annotJobId = job.id;
+    ANNOTS = []; UNITS = []; CHARS = [];
+    Promise.all([
+      api(`/api/jobs/${job.id}/sentences`).catch(() => ({ units: [] })),
+      api(`/api/jobs/${job.id}/annotations`).catch(() => ({ shots: [] })),
+    ]).then(([sv, av]) => {
+      UNITS = sv.units || [];
+      CHARS = sv.chars || [];
+      ANNOTS = av.shots || [];
+      drawAnnots(job);
+    });
+  } else setTimeout(() => drawAnnots(job), 0);
+  return c;
+}
+
+/** 把字元範圍還原成文字，給列表顯示 */
+function rangeText(a) {
+  if (a.startCharIdx == null || !CHARS.length) return '（未指定範圍）';
+  const lo = Math.min(a.startCharIdx, a.endCharIdx), hi = Math.max(a.startCharIdx, a.endCharIdx);
+  const t = CHARS.filter((c) => c.i >= lo && c.i <= hi).map((c) => c.c).join('');
+  return t || '（找不到這一段）';
+}
+
+function drawAnnots(job) {
+  const wrap = $('#annotList');
+  if (!wrap) return;
+  const imgs = (job.files || []).filter((f) => /\.(png|jpe?g)$/i.test(f));
+  if (!CHARS.length) return wrap.replaceChildren(
+    el('div', { style: 'color:var(--dim);font-size:13.5px;padding:14px 0' }, '正在讀腳本…'));
+
+  // 每張圖一列，各自獨立 —— 使用者原話：「每張圖的選取都是客製化的」（2026-08-17）
+  wrap.replaceChildren(...imgs.map((src) => {
+    const mine = ANNOTS.map((a, k) => ({ a, k })).filter((x) => x.a.src === src);
+    const rows = mine.map(({ a, k }) => {
+      const box = el('div', { class: 'prev man', onclick: () => editAnnot(job, k) });
+      box.append(el('img', { src: `/api/jobs/${job.id}/file/${src}`, alt: '' }));
+      const put = (r, cls) => {
+        if (!r || !(r.w > 0) || !a.imgW || !a.imgH) return;
+        box.append(el('div', { class: cls, style:
+          `left:${(r.x / a.imgW) * 100}%;top:${(r.y / a.imgH) * 100}%;`
+          + `width:${(r.w / a.imgW) * 100}%;height:${(r.h / a.imgH) * 100}%` }));
+      };
+      put(a.region, 'bx region');
+      put(a.cell, 'bx');
+      box.append(el('div', { class: 'hint' },
+        !a.region && !a.cell ? '整張顯示・點我改' : '點我改'));
+      return el('div', { class: 'an' }, box,
+        el('div', { class: 's' },
+          el('b', {}, '出現在：' + rangeText(a)),
+          el('span', {}, ([a.region ? '有顯示區域' : null, a.cell ? '有黃框' : null]
+            .filter(Boolean).join('＋') || '整張顯示') + '　' + (a.pan ? '往下滑動' : '定格'))),
+        el('button', { class: 'ghost danger', onclick: (ev) => {
+          ev.stopPropagation();
+          ANNOTS.splice(k, 1); saveAnnots(job); drawAnnots(job);
+        } }, '刪除'));
+    });
+
+    return el('div', { style: 'border-bottom:1px solid var(--line);padding:14px 0' },
+      el('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:4px' },
+        el('b', { style: 'font-size:13.5px' }, src),
+        el('span', { style: 'flex:1' }),
+        el('button', { class: 'ghost tiny', onclick: () => addAnnot(job, src) },
+          mine.length ? '＋ 再加一段' : '＋ 標注這張')),
+      ...(rows.length ? rows
+        : [el('div', { style: 'display:flex;gap:14px;align-items:center;padding-top:6px' },
+            el('div', { class: 'prev', style: 'opacity:.55',
+              onclick: () => addAnnot(job, src) },
+              el('img', { src: `/api/jobs/${job.id}/file/${src}`, alt: '' }),
+              el('div', { class: 'hint' }, '還沒標')),
+            el('span', { style: 'font-size:12.5px;color:var(--dim)' },
+              '沒標的話，這張圖交給 AI 自己判斷要不要用、放哪裡。'))]));
+  }));
+}
+
+async function saveAnnots(job) {
+  try {
+    await api(`/api/jobs/${job.id}/annotations`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shots: ANNOTS }),
+    });
+    const n = $('#annotSaved');
+    if (n) { n.textContent = `已儲存 ${ANNOTS.length} 筆`; setTimeout(() => { if (n) n.textContent = ''; }, 2500); }
+  } catch (e) { alert('儲存失敗：' + e.message); }
+}
+
+function addAnnot(job, src) {
+  if (!CHARS.length) return alert('腳本還在讀，等一下再試');
+  ANNOTS.push({ src, startCharIdx: null, endCharIdx: null, region: null, cell: null, pan: false });
+  drawAnnots(job);
+  editAnnot(job, ANNOTS.length - 1);
+}
+
+function editAnnot(job, k) {
+  const a = ANNOTS[k];
+  edCtx = { job, mode: 'annot', k, drag: null, src: a.src, mode2: 'region',
+    region: a.region ? { ...a.region } : null,
+    cell: a.cell ? { ...a.cell } : null,
+    from: a.startCharIdx ?? null, to: a.endCharIdx ?? null };
+  $('#edTitle').textContent = '標注　' + a.src;
+  $('#edPan').checked = !!a.pan;
+  setEdMode('region');
+  // ⚠️ 標注模式不給切換圖片。以前這裡放圖片列，切過去會把「這張圖的框跟範圍」
+  //    帶到別張圖上（2026-08-17 使用者回報：第一張圖選好的範圍出現在第二張圖）。
+  //    要標另一張圖，回列表按那張圖的「標注這張」。
+  $('#edStrip').replaceChildren();
+  loadEdImage(a.src);
+  drawRange();
+  $('#ed').style.display = 'flex';
+}
+
+function planCard(job) {
+  const pv = job.planView;
+  if (pv.kind !== 'shots')
+    return el('div', { class: 'card' }, el('h2', {}, '配圖計畫'),
+      el('div', { class: 'note' }, '三大法人是固定版面的自動聚焦，這一版還不支援線上調整。請看下方執行記錄裡的判定清單。'),
+      el('div', { style: 'margin-top:16px' },
+        el('button', { class: 'go', onclick: () => approve(job, []) }, '確認，開始出片')));
+
+  const c = el('div', { class: 'card' },
+    el('h2', {}, '配圖計畫　—　點預覽圖可以改，也可以自己加一段'),
+    el('div', { class: 'note' },
+      'AI 排的只是起點。<b>點左邊的預覽圖</b>就能拖框、改範圍、換圖。<br>'
+      + '下面「<b>全部截圖</b>」點一下就加一段用那張；<b>同一張可以用很多次</b>，各自標不同區塊。<br>'
+      + '你改的每一筆都會被記下來，之後拿來修規則 —— 讓你越改越少。'));
+
+  UNITS = pv.units || [];   // 點一下選整句用
+  CHARS = pv.chars || [];   // 逐字拖選用
+
+  edits = {};
+  let addSeq = 0;
+  for (const r of pv.rows) {
+    edits[r.i] = { i: r.i, src: r.src, pan: r.pan, deleted: false,
+      cell: r.cell || null, region: r.region || null, start: r.start, end: r.end, _manual: false,
+      startCharIdx: r.startCharIdx, endCharIdx: r.endCharIdx,
+      imgW: r.imageWidth, imgH: r.imageHeight,
+      _autoPhrase: r.phrase || '', _autoCellText: r.cellText || '' };
+  }
+
+  const tb = el('tbody');
+  const t = el('table', { class: 'plan' }, el('thead', {}, el('tr', {},
+    el('th', {}, '預覽（點我編輯）'), el('th', {}, '這段旁白'), el('th', {}, '設定'), el('th', {}, ''))), tb);
+  const unusedBar = el('div', { style: 'margin:12px 0' });
+
+  function buildRow(key) {
+    const e = edits[key];
+    const tr = el('tr');
+    if (e.deleted) tr.classList.add('del');
+    const cellTd = el('td'), infoTd = el('td'), setTd = el('td');
+    const paint = () => {
+      const done = () => { paint(); drawUnused(); };
+      cellTd.replaceChildren(preview(job, e, () =>
+        openEditor(job, pv, { i: key, phrase: e._added ? '新增的一段' : e._autoPhrase }, done)));
+      const ranged = e.startCharIdx != null;
+      infoTd.replaceChildren(
+        el('div', { class: 'ph' }, ranged ? rangeText(e) : (e._added ? '（還沒設定範圍）' : (e._autoPhrase || '—'))),
+        el('div', { class: 'sec' }, (e._manual || e._added)
+          ? '（範圍已設，秒數出片時算）'
+          : `${fmt(e.start)} – ${fmt(e.end)}　共 ${(e.end - e.start).toFixed(1)} 秒`),
+        el('div', { class: 'sec' }, e._added ? '人工新增' : (e._manual ? '人工調整過' : '自動：' + (e._autoCellText || '—'))));
+      setTd.replaceChildren(
+        el('div', { class: 'sec' }, e.src || '（未選圖）'),
+        el('div', { class: 'sec' }, e.pan ? '往下滑動' : '定格'),
+        el('div', { class: 'sec' }, [e.region ? '顯示區域' : null, e.cell ? '黃框' : null].filter(Boolean).join('＋') || '整張顯示'));
+    };
+    paint();
+    tr.append(cellTd, infoTd, setTd,
+      el('td', {}, el('button', { class: 'ghost danger', onclick: () => {
+        if (e._added) { delete edits[key]; renderTable(); }
+        else { e.deleted = !e.deleted; tr.classList.toggle('del', e.deleted); drawUnused(); }
+      } }, e._added ? '刪除' : '不要這段')));
+    return tr;
+  }
+
+  function renderTable() {
+    const keys = Object.keys(edits).sort((a, b) =>
+      (edits[a].startCharIdx ?? 1e9) - (edits[b].startCharIdx ?? 1e9));
+    tb.replaceChildren(...keys.map(buildRow));
+    drawUnused();
+  }
+
+  function addSeg(src) {
+    const key = 'a' + (addSeq++);
+    edits[key] = { i: key, _added: true, _manual: true, deleted: false,
+      src: src || pv.images[0] || '', pan: false, cell: null, region: null,
+      startCharIdx: null, endCharIdx: null, imgW: null, imgH: null };
+    renderTable();
+    openEditor(job, pv, { i: key, phrase: '新增的一段' }, () => renderTable());
+  }
+
+  // 全部截圖都列出來，點一下就加一段用那張。
+  // 同一張圖可以點很多次 → 出現很多次、各自標不同區塊
+  //（2026-08-18 使用者：同一張圖會用多次、標不同區塊）。
+  function drawUnused() {
+    const count = {};
+    Object.values(edits).filter((e) => !e.deleted).forEach((e) => { count[e.src] = (count[e.src] || 0) + 1; });
+    if (!pv.images.length) return unusedBar.replaceChildren();
+    unusedBar.replaceChildren(
+      el('span', { style: 'font-size:12.5px;color:var(--dim);margin-right:6px' },
+        '全部截圖（點一下就加一段用它；同一張可以點多次、標不同區塊）：'),
+      ...pv.images.map((n) => {
+        const c = count[n] || 0;
+        return el('button', { class: 'ghost tiny', style: 'margin:3px', onclick: () => addSeg(n) },
+          n + (c ? `　已用${c}次` : '　未用'));
+      }));
+  }
+
+  renderTable();
+  c.append(unusedBar, t);
+  c.append(el('div', { style: 'margin-top:20px;display:flex;gap:12px;align-items:center' },
+    el('button', { class: 'ghost', onclick: () => addSeg() }, '＋ 加一段'),
+    el('button', { class: 'go', onclick: () => approve(job, Object.values(edits)) }, '確認，開始出片'),
+    el('span', { style: 'color:var(--dim);font-size:13px' }, '沒改也可以直接按')));
+  return c;
+}
+
+/** 一列的預覽：原圖 ＋ 用比例畫上去的黃框（改完立刻反映，不用等伺服器重畫） */
+function preview(job, e, onclick) {
+  const box = el('div', { class: 'prev' + (e._manual ? ' man' : ''), onclick });
+  box.append(el('img', { src: `/api/jobs/${job.id}/file/${e.src}`, alt: '' }));
+  const put = (r, cls) => {
+    if (!r || !(r.w > 0) || !e.imgW || !e.imgH) return;
+    box.append(el('div', { class: cls, style:
+      `left:${(r.x / e.imgW) * 100}%;top:${(r.y / e.imgH) * 100}%;`
+      + `width:${(r.w / e.imgW) * 100}%;height:${(r.h / e.imgH) * 100}%` }));
+  };
+  put(e.region, 'bx region');
+  put(e.cell, 'bx');
+  // 沒有框就什麼線都不要畫 —— 以前這裡畫一個包住整張圖的黃框當「整張顯示」的標示，
+  // 結果被當成真的黃框，而且看不出怎麼刪（2026-08-17 使用者回報）。
+  box.append(el('div', { class: 'hint' },
+    !e.region && !e.cell ? '整張顯示・點我編輯' : (e._manual ? '已手動調整' : '點我編輯')));
+  return box;
+}
+
+// ── 框選編輯器 ────────────────────────────
+// 兩種框分開（2026-08-17 使用者指出的設計錯誤）：
+//   顯示區域（藍虛線）= 圖要捲到哪裡，不畫線
+//   黃框（黃實線）    = 要圈起來強調的地方，會壓暗周圍
+// 可以只有一種、也可以兩種都有、也可以都沒有（整張顯示）。
+let edCtx = null;
+
+function edMode() { return (edCtx && edCtx.mode2) || 'region'; }
+function setEdMode(m) {
+  edCtx.mode2 = m;
+  document.querySelectorAll('#edModes div').forEach((d) => d.classList.toggle('on', d.dataset.m === m));
+}
+document.querySelectorAll('#edModes div').forEach((d) =>
+  d.onclick = () => { if (edCtx) setEdMode(d.dataset.m); });
+
+function edRects() { return edCtx ? { region: edCtx.region, cell: edCtx.cell } : {}; }
+
+function drawEdBox() {
+  const wrap = $('#edImg');
+  wrap.querySelectorAll('.bx').forEach((n) => n.remove());
+  if (!edCtx || !edCtx.natW) return;
+  for (const [k, r] of Object.entries(edRects())) {
+    if (!r || !(r.w > 0)) continue;
+    wrap.append(el('div', { class: 'bx' + (k === 'region' ? ' region' : ''), style:
+      `left:${(r.x / edCtx.natW) * 100}%;top:${(r.y / edCtx.natH) * 100}%;`
+      + `width:${(r.w / edCtx.natW) * 100}%;height:${(r.h / edCtx.natH) * 100}%` }));
+  }
+  const hasR = !!(edCtx.region && edCtx.region.w > 0), hasC = !!(edCtx.cell && edCtx.cell.w > 0);
+  $('#edRegionState').textContent = hasR ? '已畫' : '沒有';
+  $('#edCellState').textContent = hasC ? '已畫' : '沒有';
+  $('#edClearRegion').disabled = !hasR;
+  $('#edClearCell').disabled = !hasC;
+  $('#edClearRegion').style.opacity = hasR ? 1 : 0.35;
+  $('#edClearCell').style.opacity = hasC ? 1 : 0.35;
+}
+
+function loadEdImage(src) {
+  edCtx.src = src;
+  const wrap = $('#edImg');
+  const img = el('img', { src: `/api/jobs/${edCtx.job.id}/file/${src}`, alt: '' });
+  wrap.replaceChildren(img);
+  img.onload = () => { edCtx.natW = img.naturalWidth; edCtx.natH = img.naturalHeight; drawEdBox(); };
+  document.querySelectorAll('#edStrip div').forEach((d) => d.classList.toggle('on', d.dataset.src === src));
+}
+
+function drawStrip(imgs) {
+  $('#edStrip').replaceChildren(...imgs.map((n) =>
+    el('div', { 'data-src': n, class: n === edCtx.src ? 'on' : '', title: n,
+      onclick: () => loadEdImage(n) },
+      el('img', { src: `/api/jobs/${edCtx.job.id}/file/${n}`, alt: '' }))));
+}
+
+// 拖曳畫框：一律換算成原圖像素座標存，換手機解析度也對
+$('#edImg').addEventListener('mousedown', (ev) => {
+  const img = $('#edImg').querySelector('img');
+  if (!img || !edCtx) return;
+  const b = img.getBoundingClientRect();
+  // X 與 Y 各自算縮放比例。以前 Y 也用 X 的比例（natW/b.width），
+  // 圖片等比例顯示時剛好相等看不出來，但不等比時框會上下錯位（2026-08-18）。
+  const scX = edCtx.natW / b.width, scY = edCtx.natH / b.height;
+  edCtx.drag = { x0: (ev.clientX - b.left) * scX, y0: (ev.clientY - b.top) * scY, b, scX, scY };
+  ev.preventDefault();
+});
+window.addEventListener('mousemove', (ev) => {
+  if (!edCtx || !edCtx.drag) return;
+  const { x0, y0, b, scX, scY } = edCtx.drag;
+  const x1 = Math.max(0, Math.min(edCtx.natW, (ev.clientX - b.left) * scX));
+  const y1 = Math.max(0, Math.min(edCtx.natH, (ev.clientY - b.top) * scY));
+  edCtx[edMode()] = { x: Math.min(x0, x1), y: Math.min(y0, y1),
+    w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) };
+  drawEdBox();
+});
+window.addEventListener('mouseup', () => {
+  if (!edCtx || !edCtx.drag) return;
+  edCtx.drag = null;
+  const r = edCtx[edMode()];
+  // 太小多半是誤點
+  if (r && (r.w < edCtx.natW * 0.02 || r.h < edCtx.natH * 0.008)) edCtx[edMode()] = null;
+  drawEdBox();
+});
+$('#edClearRegion').onclick = () => { edCtx.region = null; drawEdBox(); };
+$('#edClearCell').onclick = () => { edCtx.cell = null; drawEdBox(); };
+$('#edCancel').onclick = () => { $('#ed').style.display = 'none'; edCtx = null; };
+
+function openEditor(job, pv, row, done) {
+  const e = edits[row.i];
+  edCtx = { job, mode: 'shot', e, done, drag: null, src: e.src, mode2: 'cell',
+    region: e.region ? { ...e.region } : null,
+    cell: e.cell ? { ...e.cell } : null,
+    // 出現範圍用「在腳本上拖選」，不叫人填秒數
+    from: e.startCharIdx ?? null, to: e.endCharIdx ?? null };
+  $('#edTitle').textContent = row.phrase || '調整這一段';
+  $('#edPan').checked = !!e.pan;
+  setEdMode('cell');
+  drawStrip(pv.images);
+  loadEdImage(e.src);
+  drawRange();
+  $('#ed').style.display = 'flex';
+}
+
+$('#edOK').onclick = () => {
+  // 標注模式：存「哪一段子句範圍」，不是秒數（秒數要等語音轉字幕才存在）
+  if (edCtx.mode === 'annot') {
+    if (edCtx.from == null) return alert('還沒選範圍 —— 在下面的腳本上點一下或拖選');
+    const a = ANNOTS[edCtx.k];
+    a.src = edCtx.src;
+    a.startCharIdx = Math.min(edCtx.from, edCtx.to);
+    a.endCharIdx = Math.max(edCtx.from, edCtx.to);
+    a.region = edCtx.region; a.cell = edCtx.cell;
+    a.imgW = edCtx.natW; a.imgH = edCtx.natH;
+    a.pan = $('#edPan').checked;
+    const job = edCtx.job;
+    $('#ed').style.display = 'none'; edCtx = null;
+    drawAnnots(job); saveAnnots(job);
+    return;
+  }
+  const { e, done } = edCtx;
+  if (edCtx.from == null) return alert('還沒選範圍 —— 在下面的腳本上點一下或拖選');
+  const a0 = Math.min(edCtx.from, edCtx.to), b0 = Math.max(edCtx.from, edCtx.to);
+  const changed = JSON.stringify([edCtx.region, edCtx.cell]) !== JSON.stringify([e.region, e.cell])
+    || a0 !== e.startCharIdx || b0 !== e.endCharIdx
+    || edCtx.src !== e.src || $('#edPan').checked !== e.pan;
+  e.region = edCtx.region; e.cell = edCtx.cell;
+  e.imgW = edCtx.natW; e.imgH = edCtx.natH;
+  e.startCharIdx = a0; e.endCharIdx = b0;
+  e.src = edCtx.src; e.pan = $('#edPan').checked;
+  if (changed) e._manual = true;
+  $('#ed').style.display = 'none'; edCtx = null;
+  done();
+};
+
+// 送出配圖計畫 → 開始出片。
+// ⚠️ 2026-08-18：這個函式一度在改編輯器時被連帶刪掉，導致「確認，開始出片」
+//    按下去是 ReferenceError、完全沒反應。務必保留。
+async function approve(job, e) {
+  try {
+    await api(`/api/jobs/${job.id}/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ edits: e, by: $('#owner').value }),
+    });
+    loadJob();
+  } catch (err) { alert('出錯了：' + err.message); }
+}
+
+// ── 逐字選取 ──────────────────────────────
+// 點一下 = 選中那個字所在的整個子句（快）；按住拖曳 = 選任意範圍（精準）。
+// 再點一次已選中的地方 = 取消。
+// 做到字級是因為「友達群創雙漲停。」是一個子句卻要配兩張圖
+//（2026-08-17 使用者：「有可能真的要細分到文字」）。
+let CHARS = [];
+function drawRange() {
+  const wrap = $('#edRange');
+  if (!wrap) return;
+  if (!CHARS.length) return wrap.replaceChildren(el('span', {}, '（腳本還在讀…）'));
+  const a = edCtx.from, b = edCtx.to;
+  const lo = a == null ? -1 : Math.min(a, b), hi = a == null ? -2 : Math.max(a, b);
+  wrap.replaceChildren(...CHARS.map((c) =>
+    el('i', {
+      'data-i': c.i,
+      class: (c.i >= lo && c.i <= hi ? 'sel' : '') + (c.b ? ' br' : ''),
+    }, c.c)));
+  const txt = CHARS.filter((c) => c.i >= lo && c.i <= hi).map((c) => c.c).join('');
+  $('#edRangeText').textContent = txt
+    ? `選了：${txt}`
+    : '點一下選整句，或按住拖曳選任意範圍。再點一次取消。';
+}
+
+/** 這個字屬於哪個子句（點一下就選整句用的） */
+function clauseAt(i) {
+  return UNITS.find((u) => u.startCharIdx != null && i >= u.startCharIdx && i <= u.endCharIdx);
+}
+
+{
+  const idxOf = (t) => (t && t.dataset && t.dataset.i != null ? +t.dataset.i : null);
+  let dragging = false, moved = false, anchor = null;
+  const wrap = () => $('#edRange');
+  document.addEventListener('mousedown', (ev) => {
+    const w = wrap();
+    if (!edCtx || !w || !w.contains(ev.target)) return;
+    const i = idxOf(ev.target);
+    if (i == null) return;
+    dragging = true; moved = false; anchor = i;
+    ev.preventDefault();
+  });
+  document.addEventListener('mousemove', (ev) => {
+    if (!dragging || !edCtx) return;
+    const i = idxOf(ev.target);
+    if (i == null) return;
+    if (i !== anchor) moved = true;
+    edCtx.from = anchor; edCtx.to = i;
+    drawRange();
+  });
+  document.addEventListener('mouseup', (ev) => {
+    if (!dragging || !edCtx) return;
+    dragging = false;
+    if (moved) return;                     // 拖曳過 → 範圍已經在 mousemove 設好
+    const i = anchor;
+    const lo = edCtx.from == null ? -1 : Math.min(edCtx.from, edCtx.to);
+    const hi = edCtx.from == null ? -2 : Math.max(edCtx.from, edCtx.to);
+    const cl = clauseAt(i);
+    if (i >= lo && i <= hi) { edCtx.from = null; edCtx.to = null; }   // 點已選中的 → 取消
+    else if (cl) { edCtx.from = cl.startCharIdx; edCtx.to = cl.endCharIdx; }
+    else { edCtx.from = i; edCtx.to = i; }
+    drawRange();
+  });
+}
+
+
+// ── 修正紀錄 ──
+async function loadFix() {
+  const d = await api('/api/corrections');
+  const wrap = $('#fix');
+  if (!d.total) return wrap.replaceChildren(el('div', { class: 'empty' },
+    '還沒有人改過任何配圖 —— 目前為止 AI 排的都被直接採用了'));
+  const sum = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;margin:18px 0' },
+    ...Object.entries(d.byType).map(([k, v]) => el('span', { class: 'pill' }, `${k}　${v} 次`)));
+  const t = el('table', {}, el('thead', {}, el('tr', {},
+    el('th', {}, '類型'), el('th', {}, '那一段旁白'), el('th', {}, '原本'), el('th', {}, '改成'))));
+  const tb = el('tbody');
+  const fmtCell = (c, sz) => !c ? '—'
+    : sz ? `${Math.round(c.x / sz.w * 100)},${Math.round(c.y / sz.h * 100)}% `
+         + `${Math.round(c.w / sz.w * 100)}×${Math.round(c.h / sz.h * 100)}%`
+         : `${Math.round(c.x)},${Math.round(c.y)} ${Math.round(c.w)}×${Math.round(c.h)}`;
+  for (const r of d.rows) {
+    let before = r.from || '—', after = r.to || '—';
+    if (r.type === '改框') { before = `${r.autoCellText || ''} ${fmtCell(r.autoCell, r.size)}`;
+      after = fmtCell(r.manualCell, r.size); }
+    if (r.type === '改時間') { before = r.auto; after = r.manual; }
+    tb.append(el('tr', {}, el('td', {}, r.type), el('td', {}, r.phrase),
+      el('td', { style: 'color:var(--dim);font-size:12.5px' }, before),
+      el('td', { style: 'font-size:12.5px' }, after)));
+  }
+  t.append(tb);
+  wrap.replaceChildren(sum, t);
+}
+
+boot();
+</script>
+</body>
+</html>

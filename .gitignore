@@ -1,0 +1,71 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Local media source pack. In this workspace, assets is a symlink to ../data/assets.
+/assets
+
+# Build & render outputs
+out/
+build/
+.remotion/
+.data/
+runtime-data/
+.cache/
+.dual-tmp/
+.verify-dual-tmp/
+_frames_check/
+成品/
+docs/diagrams/*.png
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env
+.env
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# TypeScript
+*.tsbuildinfo
+public/heygen.mp4
+public/minimax.mp3
+public/heygen_fast.mp4
+public/annotations.json
+public/script.txt
+public/shot*.png
+public/shot*.jpg
+public/image*.png
+public/image*.jpg
+public/*-bgm.wav
+public/*-bgm.mp3
+public/*-header-overlay.png
+public/*-intro-frame.jpg
+public/*-intro-frame-horizontal.png
+public/outro.mp4
+
+# Google service account credentials
+.google-creds.json
+.google-creds*.json
+*service-account*.json
+*service_account*.json
+
+# Auto-backups of job files (script/heygen/image)
+backups/
+jobs/

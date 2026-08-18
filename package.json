@@ -1,0 +1,63 @@
+{
+  "name": "marketing-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Localhost marketing-video workflow with HeyGen and Remotion adapters",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "node server/index.js",
+    "dev:server": "node server/index.js",
+    "studio": "npm run dev:server",
+    "doctor": "node scripts/doctor.js",
+    "doctor:full": "node scripts/doctor.js --full",
+    "smoke": "node scripts/smoke-server.js",
+    "cleanup:plan": "node scripts/cleanup-plan.js",
+    "start": "remotion studio",
+    "build": "remotion render MarketingVideo out/output.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "render": "remotion render MarketingVideo out/output.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "render:hq": "remotion render MarketingVideo out/output.mp4 --concurrency=2 --timeout=300000 --crf 18",
+    "upgrade": "remotion upgrade",
+    "typecheck": "tsc --noEmit",
+    "transcribe": "bash scripts/transcribe.sh",
+    "parse-script": "node scripts/parse-script.js",
+    "correct-subtitles": "node scripts/correct-subtitles.js",
+    "list": "node scripts/list-articles.js",
+    "check-voices": "node scripts/check-voices.js",
+    "test:v3": "node scripts/test-v3-videos.js",
+    "use-dapan-assets": "node scripts/use-dapan-assets.js",
+    "parse-script:dapan": "node scripts/parse-dapan-script.js",
+    "render:dapan": "remotion render DapanXiaobao out/output-dapan.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "render:dapan-landscape": "remotion render DapanXiaobaoLandscape out/output-dapan-landscape.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "use-institution-assets": "node scripts/use-institution-assets.js",
+    "parse-script:institution": "node scripts/parse-institution-script.js",
+    "analyze:institution": "node scripts/analyze-institution-image.js",
+    "analyze:app-images": "node scripts/analyze-app-images.js",
+    "auto-shot": "node scripts/auto-shot.js --write",
+    "auto-shot:preview": "node scripts/auto-shot.js",
+    "auto-shot:dapan": "node scripts/auto-shot.js --write --out src/DapanXiaobao/dapan-shots.generated.json",
+    "auto-shot:default": "node scripts/auto-shot.js --write --out src/marketing-shots.generated.json",
+    "auto-focus": "node scripts/auto-focus.js --write",
+    "auto-focus:preview": "node scripts/auto-focus.js",
+    "render:institution": "remotion render Institution out/output-institution.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "use-focusstock-assets": "node scripts/use-focusstock-assets.js",
+    "use-focusstock-ad-assets": "node scripts/use-focusstock-ad-assets.js",
+    "parse-script:focusstock": "node scripts/parse-focusstock-script.js",
+    "render:focusstock": "remotion render Focusstock out/output-focusstock.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "render:focusstock-ad": "remotion render FocusstockAd out/output-focusstock-ad.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.512",
+    "dotenv": "^17.4.2",
+    "opencc-js": "^1.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "4.0.512"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/web": "^0.0.150",
+    "typescript": "^5.4.5"
+  }
+}
