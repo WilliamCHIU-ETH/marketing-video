@@ -24,6 +24,17 @@ const ISO_VIDEO_BRANDS = new Set([
   'M4V ', 'M4VH', 'M4VP', 'qt  ', '3gp4', '3gp5', '3g2a', 'dash', 'cmfc', 'cmfs',
 ]);
 const MAX_CONTAINER_ELEMENTS = 50_000;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1)
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
 
 function invalidContainer() {
   const error = new Error('invalid media container');
@@ -45,6 +56,122 @@ function readExactly(fd, position, length) {
 function takeContainerElement(budget) {
   budget.count += 1;
   if (budget.count > MAX_CONTAINER_ELEMENTS) throw invalidContainer();
+}
+
+function updatePngCrc(crc, bytes) {
+  let value = crc >>> 0;
+  for (const byte of bytes) value = PNG_CRC_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return value >>> 0;
+}
+
+function pngChunkCrc(fd, typeBytes, dataStart, length) {
+  let crc = updatePngCrc(0xffffffff, typeBytes);
+  if (!length) return (crc ^ 0xffffffff) >>> 0;
+  const buffer = Buffer.allocUnsafe(Math.min(length, 64 * 1024));
+  let position = dataStart;
+  let remaining = length;
+  while (remaining > 0) {
+    const wanted = Math.min(remaining, buffer.length);
+    const read = fs.readSync(fd, buffer, 0, wanted, position);
+    if (read !== wanted) throw invalidContainer();
+    crc = updatePngCrc(crc, buffer.subarray(0, read));
+    position += read;
+    remaining -= read;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function isPngChunkType(typeBytes) {
+  const isLetter = (byte) => (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a);
+  // PNG chunk names are four ASCII letters; the reserved third bit must remain uppercase.
+  return [...typeBytes].every(isLetter) && !(typeBytes[2] & 0x20);
+}
+
+function readPngHeader(fd, dataStart) {
+  const data = readExactly(fd, dataStart, 13);
+  const width = data.readUInt32BE(0);
+  const height = data.readUInt32BE(4);
+  const bitDepth = data[8];
+  const colorType = data[9];
+  const allowedDepths = {
+    0: [1, 2, 4, 8, 16],
+    2: [8, 16],
+    3: [1, 2, 4, 8],
+    4: [8, 16],
+    6: [8, 16],
+  };
+  if (!width || width > 0x7fffffff || !height || height > 0x7fffffff
+      || !allowedDepths[colorType] || !allowedDepths[colorType].includes(bitDepth)
+      || data[10] !== 0 || data[11] !== 0 || ![0, 1].includes(data[12])) {
+    throw invalidContainer();
+  }
+  return { bitDepth, colorType };
+}
+
+/**
+ * Validate the PNG container without decoding pixels. CRC is checked for every chunk so a
+ * signature plus a forged/truncated IHDR cannot be accepted as a reusable Project asset.
+ */
+function inspectPng(fd, fileSize) {
+  const budget = { count: 0 };
+  let offset = PNG_SIGNATURE.length;
+  let header = null;
+  let seenPalette = false;
+  let seenImageData = false;
+  let imageDataClosed = false;
+  let imageDataBytes = 0;
+  try {
+    if (fileSize < PNG_SIGNATURE.length + 12
+        || !readExactly(fd, 0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return null;
+    while (offset < fileSize) {
+      takeContainerElement(budget);
+      if (fileSize - offset < 12) throw invalidContainer();
+      const chunkHeader = readExactly(fd, offset, 8);
+      const length = chunkHeader.readUInt32BE(0);
+      const typeBytes = chunkHeader.subarray(4, 8);
+      if (length > 0x7fffffff || !isPngChunkType(typeBytes)) throw invalidContainer();
+      const type = typeBytes.toString('ascii');
+      const dataStart = offset + 8;
+      const crcStart = dataStart + length;
+      const chunkEnd = crcStart + 4;
+      if (!Number.isSafeInteger(chunkEnd) || chunkEnd > fileSize) throw invalidContainer();
+      const expectedCrc = readExactly(fd, crcStart, 4).readUInt32BE(0);
+      if (pngChunkCrc(fd, typeBytes, dataStart, length) !== expectedCrc) throw invalidContainer();
+
+      if (!header && type !== 'IHDR') throw invalidContainer();
+      if (seenImageData && type !== 'IDAT' && type !== 'IEND') imageDataClosed = true;
+      if (type === 'IHDR') {
+        if (header || offset !== PNG_SIGNATURE.length || length !== 13) throw invalidContainer();
+        header = readPngHeader(fd, dataStart);
+      } else if (type === 'PLTE') {
+        if (!header || seenPalette || seenImageData || [0, 4].includes(header.colorType)
+            || length < 3 || length > 768 || length % 3 !== 0
+            || (header.colorType === 3 && length / 3 > 2 ** header.bitDepth)) {
+          throw invalidContainer();
+        }
+        seenPalette = true;
+      } else if (type === 'IDAT') {
+        if (!header || imageDataClosed || (header.colorType === 3 && !seenPalette))
+          throw invalidContainer();
+        seenImageData = true;
+        imageDataBytes += length;
+      } else if (type === 'IEND') {
+        if (!header || length !== 0 || !seenImageData || imageDataBytes < 1
+            || (header.colorType === 3 && !seenPalette) || chunkEnd !== fileSize) {
+          throw invalidContainer();
+        }
+        return { kind: 'image', mediaType: 'image/png', extension: '.png' };
+      } else if (!(typeBytes[0] & 0x20)) {
+        // A decoder cannot safely ignore an unknown critical chunk.
+        throw invalidContainer();
+      }
+      offset = chunkEnd;
+    }
+  } catch (error) {
+    if (error.code === 'INVALID_MEDIA_CONTAINER') return null;
+    throw error;
+  }
+  return null;
 }
 
 function readIsoBoxHeader(fd, offset, scopeEnd, fileEnd, budget) {
@@ -275,11 +402,9 @@ function inspectMediaFile(file) {
     tailSize = fs.readSync(fd, tail, 0, Math.min(tail.length, fileSize), tailStart);
     const bytes = head.subarray(0, headSize);
     const tailBytes = tail.subarray(0, tailSize);
-    if (bytes.length >= 24 && bytes.subarray(0, 8).equals(
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-        && bytes.subarray(12, 16).toString('latin1') === 'IHDR') {
-      return { kind: 'image', mediaType: 'image/png', extension: '.png' };
-    }
+    if (bytes.length >= PNG_SIGNATURE.length
+        && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE))
+      return inspectPng(fd, fileSize);
     if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
         && tailBytes.includes(Buffer.from([0xff, 0xd9]))) {
       return { kind: 'image', mediaType: 'image/jpeg', extension: '.jpg' };

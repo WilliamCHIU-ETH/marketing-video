@@ -17,12 +17,53 @@ let child;
 
 // 1x1 PNG 與一幀 H.264 MP4；MP4 是可解碼的完整容器，不用外部服務生成。
 const PNG_FIXTURE = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
   'base64');
+
+// Test-side CRC deliberately uses a small bitwise implementation rather than the production table.
+function fixtureCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1)
+      crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  chunk.write(type, 4, 'ascii');
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(fixtureCrc32(chunk.subarray(4, 8 + data.length)), 8 + data.length);
+  return chunk;
+}
+
+// Keep a second, structurally valid PNG for kind-aware dedupe/rollback tests.
+const ALT_PNG_FIXTURE = Buffer.concat([
+  PNG_FIXTURE.subarray(0, -12),
+  pngChunk('tEXt', Buffer.from('fixture\0revision-abort', 'latin1')),
+  PNG_FIXTURE.subarray(-12),
+]);
+const TRUNCATED_PNG_FIXTURE = Buffer.from(PNG_FIXTURE.subarray(0, 24));
+const BAD_PNG_CRC_FIXTURE = Buffer.from(PNG_FIXTURE);
+BAD_PNG_CRC_FIXTURE[29] ^= 0x01;
+const ZERO_WIDTH_PNG_FIXTURE = Buffer.from(PNG_FIXTURE);
+ZERO_WIDTH_PNG_FIXTURE.writeUInt32BE(0, 16);
+ZERO_WIDTH_PNG_FIXTURE.writeUInt32BE(
+  fixtureCrc32(ZERO_WIDTH_PNG_FIXTURE.subarray(12, 29)), 29);
+const MISSING_IEND_PNG_FIXTURE = Buffer.from(PNG_FIXTURE.subarray(0, -12));
+const TRAILING_DATA_PNG_FIXTURE = Buffer.concat([PNG_FIXTURE, Buffer.from('trailing-data')]);
+const NO_IDAT_PNG_FIXTURE = Buffer.concat([PNG_FIXTURE.subarray(0, 33), PNG_FIXTURE.subarray(-12)]);
+const OUT_OF_BOUNDS_PNG_FIXTURE = Buffer.from(PNG_FIXTURE);
+const idatTypeOffset = OUT_OF_BOUNDS_PNG_FIXTURE.indexOf(Buffer.from('IDAT', 'ascii'));
+assert.ok(idatTypeOffset > 4);
+OUT_OF_BOUNDS_PNG_FIXTURE.writeUInt32BE(0x7fffffff, idatTypeOffset - 4);
+
 const MP4_FIXTURE = Buffer.from(
   'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMVbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAj90cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAG3bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABYm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASJzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAABYoAAAAAAAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAANFAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4xMi4xMDIAAAAIZnJlZQAAAs1tZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAQZYiEABX//vfJ78Cm69vfgQ==',
   'base64');
-const ALT_PNG_FIXTURE = Buffer.concat([PNG_FIXTURE, Buffer.from('revision-abort-fixture')]);
 const AVIF_DISGUISED_AS_MP4 = Buffer.from(MP4_FIXTURE);
 AVIF_DISGUISED_AS_MP4.write('avif', 8, 'latin1');
 const WEBM_VIDEO_FIXTURE = Buffer.from(
@@ -156,6 +197,15 @@ async function request(base, pathname, options) {
 
 async function main() {
   const containerFixtures = [
+    ['valid.png', PNG_FIXTURE, 'image/png'],
+    ['valid-ancillary.png', ALT_PNG_FIXTURE, 'image/png'],
+    ['truncated-ihdr.png', TRUNCATED_PNG_FIXTURE, null],
+    ['bad-crc.png', BAD_PNG_CRC_FIXTURE, null],
+    ['zero-width.png', ZERO_WIDTH_PNG_FIXTURE, null],
+    ['missing-iend.png', MISSING_IEND_PNG_FIXTURE, null],
+    ['trailing-data.png', TRAILING_DATA_PNG_FIXTURE, null],
+    ['missing-idat.png', NO_IDAT_PNG_FIXTURE, null],
+    ['out-of-bounds.png', OUT_OF_BOUNDS_PNG_FIXTURE, null],
     ['late-moov.mp4', LATE_MOOV_MP4_FIXTURE, 'video/mp4'],
     ['video.webm', WEBM_VIDEO_FIXTURE, 'video/webm'],
     ['audio-only.webm', WEBM_AUDIO_ONLY_FIXTURE, null],
@@ -295,6 +345,12 @@ async function main() {
   });
   assert.equal(disguisedImage.status, 415);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot9.png')), false);
+  const truncatedPng = await fetch(base + `/api/jobs/${id}/upload?name=shot7.png`, {
+    method: 'POST',
+    body: TRUNCATED_PNG_FIXTURE,
+  });
+  assert.equal(truncatedPng.status, 415);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot7.png')), false);
   const mismatchedImage = await fetch(base + `/api/jobs/${id}/upload?name=shot8.png`, {
     method: 'POST',
     body: MP4_FIXTURE,
@@ -493,6 +549,7 @@ async function main() {
   console.log('✅ 同一 Project 建立 V1/V2，Revision 不複製成新專案');
   console.log('✅ Project 圖片與 B-Roll 可跨 Revision 重用，SHA-256 相同角色內容只保存一次');
   console.log('✅ B-Roll 與講者影片角色分離，影片預覽支援 Range／416');
+  console.log('✅ PNG 逐 chunk 驗證邊界、IHDR／IDAT／IEND 與 CRC，截斷／偽裝結構被拒絕');
   console.log('✅ MP4/MOV/WebM 依 video track 驗證；late-moov 合法，純音訊與偽裝內容拒絕');
   console.log('✅ 非法 brand、upload 檔名與偽裝媒體內容被拒絕');
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');

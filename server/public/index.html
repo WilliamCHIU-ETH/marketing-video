@@ -873,11 +873,17 @@ function revisionAssetCard(projectDetail, job) {
 }
 
 async function loadJob() {
-  const { job } = await api('/api/jobs/' + openJob);
-  const { text } = await api(`/api/jobs/${openJob}/log`);
+  const requestedJobId = openJob;
+  if (!requestedJobId) return;
+  const { job } = await api('/api/jobs/' + requestedJobId);
+  if (openJob !== requestedJobId) return;
+  const { text } = await api(`/api/jobs/${requestedJobId}/log`);
+  if (openJob !== requestedJobId) return;
   const projectDetail = job.projectId
     ? await api(`/api/projects/${job.projectId}${job.revisionId
       ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`).catch(() => null) : null;
+  // poll 與手動切版可能同時發出請求；舊版本回得比較慢時，不得覆蓋目前詳情。
+  if (openJob !== requestedJobId) return;
   const box = $('#v-job');
   // 詳情頁每 3 秒輪詢一次。以前不管有沒有變都整塊 replaceChildren，
   // <video> 被重新建立就會重新載入 → 影片一直閃（2026-08-17 使用者回報）。
