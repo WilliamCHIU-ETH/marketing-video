@@ -104,6 +104,7 @@ whisper-cli \
   -m "$WHISPER_MODEL_PATH" \
   -f "$TMP_AUDIO" \
   -l zh \
+  -ml 1 \
   -ojf \
   -of "$RAW_PREFIX" \
   -np
