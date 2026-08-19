@@ -891,6 +891,83 @@ async function main() {
   assert.deepEqual(timestampState(stableAfterSecondRestart), stableTimestamps);
   assert.deepEqual(timestampState(recoveryAfterSecondRestart), recoveredTimestamps);
 
+  // 模擬 server 在 spawn 後、pid 持久化前關閉：job 只有 intent token，child 稍後才取得
+  // lock 並留下 owner marker。先證明 intent 不會被誤當 ownership，再補 matching marker，
+  // 驗證 Avatar 會在放行 shared workspace 前收入原 Project。
+  const detachedRecovery = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-detached-recovery',
+      title: '背景 Avatar 保存測試',
+      body: '重啟後先保存付費 Avatar，再放行共用工作區。',
+      skipGenerate: false,
+    }),
+  });
+  await stopTestServer(child);
+  const detachedPid = 2147483647;
+  const detachedRunToken = '00000000-0000-4000-8000-000000000001';
+  const detachedJobFile = path.join(DATA_DIR, 'jobs', detachedRecovery.job.id, 'job.json');
+  const detachedJobJson = JSON.parse(fs.readFileSync(detachedJobFile, 'utf8'));
+  detachedJobJson.status = 'preparing';
+  detachedJobJson.pid = detachedPid;
+  detachedJobJson.workspaceRunPid = detachedPid;
+  detachedJobJson.workspaceRunStatus = 'preparing';
+  detachedJobJson.workspaceRunStartedAt = new Date().toISOString();
+  detachedJobJson.workspaceRunToken = detachedRunToken;
+  fs.writeFileSync(detachedJobFile, JSON.stringify(detachedJobJson, null, 2));
+  const detachedOwnerFile = path.join(DATA_DIR, '.run.owner.json');
+  fs.writeFileSync(detachedOwnerFile, JSON.stringify({
+    pid: detachedPid - 1,
+    startedAt: new Date(Date.now() - 60000).toISOString(),
+    token: '00000000-0000-4000-8000-000000000002',
+  }));
+  const detachedWorkspacePublic = path.join(DATA_DIR, 'workspace', 'public');
+  fs.mkdirSync(detachedWorkspacePublic, { recursive: true });
+  fs.writeFileSync(path.join(detachedWorkspacePublic, 'heygen.mp4'), MP4_FIXTURE);
+
+  child = startTestServer();
+  const detachedRestartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${detachedRestartReady.port}`;
+  const detachedCancel = await fetch(base + `/api/jobs/${detachedRecovery.job.id}/cancel`, {
+    method: 'POST',
+  });
+  assert.equal(detachedCancel.status, 400);
+  await request(base, '/api/health');
+  const unownedDetachedJob = await request(base, `/api/jobs/${detachedRecovery.job.id}`);
+  const unownedDetachedProject = await request(base,
+    `/api/projects/${detachedRecovery.job.projectId}?revision=${detachedRecovery.job.revisionId}`);
+  assert.equal(unownedDetachedJob.job.status, 'detached');
+  assert.equal(
+    JSON.parse(fs.readFileSync(detachedJobFile, 'utf8')).detachedWorkspaceContested,
+    undefined,
+  );
+  assert.equal(unownedDetachedProject.project.assets.some((asset) => asset.kind === 'speaker-video'), false);
+
+  // Spawn token alone only keeps the recovery gate closed. Once run.js writes the matching owner
+  // marker after atomic lock acquisition, the same live server can attach the child pid and recover.
+  fs.writeFileSync(detachedOwnerFile, JSON.stringify({
+    pid: detachedPid,
+    startedAt: detachedJobJson.workspaceRunStartedAt,
+    token: detachedRunToken,
+  }));
+  await request(base, '/api/health');
+  const detachedRecoveredJob = await request(base, `/api/jobs/${detachedRecovery.job.id}`);
+  const detachedRecoveredProject = await request(base,
+    `/api/projects/${detachedRecovery.job.projectId}?revision=${detachedRecovery.job.revisionId}`);
+  assert.equal(detachedRecoveredJob.job.status, 'detached-done');
+  const detachedSpeakers = detachedRecoveredProject.project.assets
+    .filter((asset) => asset.kind === 'speaker-video');
+  assert.equal(detachedSpeakers.length, 1);
+  assert.deepEqual(detachedRecoveredProject.revision.assetRefs, [detachedSpeakers[0].id]);
+  const detachedSpeakerResponse = await fetch(base
+    + `/api/projects/${detachedRecovery.job.projectId}/assets/${detachedSpeakers[0].id}`);
+  assert.equal(detachedSpeakerResponse.status, 200);
+  assert.deepEqual(Buffer.from(await detachedSpeakerResponse.arrayBuffer()), MP4_FIXTURE);
+  assert.deepEqual(timestampState(await request(base,
+    `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`)), stableTimestamps);
+
   fs.writeFileSync(path.join(DATA_DIR, '.run.lock'), String(Date.now()));
   const unsafeUnlock = await fetch(base + '/api/unlock', { method: 'POST' });
   assert.equal(unsafeUnlock.status, 409);
@@ -917,6 +994,7 @@ async function main() {
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');
   console.log('✅ submit 後不可重複排隊或覆寫 input');
   console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
+  console.log('✅ detached 不可取消；spawn intent 不誤收，owner token 相符才保存 Avatar 並放行');
   console.log('✅ 未知／活躍 lock 不可由 API 強制刪除');
   console.log('✅ LAN bind 未明確 opt-in 時拒絕啟動');
   console.log('✅ TEST_MODE 拒絕 repo 內路徑與 symlink 回指');

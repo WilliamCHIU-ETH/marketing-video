@@ -69,6 +69,15 @@ const PORT = Number(process.env.PORT || 4000);
 const TEST_MODE = envFlag('TEST_MODE');
 const DISABLE_WORKER = TEST_MODE || envFlag('DISABLE_WORKER');
 const DATA_DIR = resolveFromRoot(process.env.DATA_DIR || 'runtime-data');
+const LOCK = TEST_MODE ? path.join(DATA_DIR, '.run.lock') : path.join(ROOT, '.run.lock');
+const WORKSPACE_OWNER_FILE = TEST_MODE
+  ? path.join(DATA_DIR, '.run.owner.json')
+  : path.join(ROOT, '.run.owner.json');
+// Detached recovery must never inspect the real repo workspace in TEST_MODE. Tests get a fixed,
+// DATA_DIR-scoped stand-in; production continues to use the one shared public/ workspace.
+const WORKSPACE_PUBLIC_DIR = TEST_MODE
+  ? path.join(DATA_DIR, 'workspace', 'public')
+  : path.join(ROOT, 'public');
 
 if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) {
   throw new Error(`PORT 不合法：${process.env.PORT}`);
@@ -272,9 +281,21 @@ function loadJobs() {
       // run.js 是 detached 的，所以它很可能還活著 —— 那就不是「中斷」，
       // 是「在背景繼續跑」。標成失敗會讓人以為 HeyGen 點數白花了（其實沒有）。
       if (j.status === 'preparing' || j.status === 'rendering') {
-        if (isRunJs(j.pid)) {
+        const detachedFromStatus = j.status;
+        const recordedIntent = hasRecordedWorkspaceIntent(j, detachedFromStatus);
+        const lockOwner = readLockOwner();
+        const matchingLock = lockBelongsToJob(lockOwner, j);
+        const workspaceOwner = readWorkspaceOwner();
+        const matchingWorkspaceOwner = workspaceOwnerBelongsToJob(workspaceOwner, j);
+        if (!isPidValue(j.pid) && (matchingLock || matchingWorkspaceOwner))
+          j.pid = (matchingLock ? lockOwner : workspaceOwner).pid;
+        if (recordedIntent || matchingLock || matchingWorkspaceOwner || isRunJs(j.pid)) {
           j.status = 'detached';
           j.error = null;
+          j.detachedFromStatus = detachedFromStatus;
+          // The spawn record only proves intent. Actual ownership requires evidence written by
+          // run.js after it acquired the shared lock.
+          if (matchingLock || matchingWorkspaceOwner) markDetachedOwnership(j);
         } else {
           j.status = 'failed';
           j.error = '伺服器重新啟動，這支工作中斷了。請重新建立。';
@@ -297,8 +318,7 @@ let JOBS = startupJobs.jobs;
 startupJobs.recovered.forEach(saveJob);
 
 function saveJob(j) {
-  ensureDir(jobDir(j.id));
-  fs.writeFileSync(jobFile(j.id), JSON.stringify(j, null, 2));
+  writeJobRecord(j);
   if (j.projectId && j.revisionId) {
     PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
       jobId: j.id,
@@ -315,24 +335,272 @@ function saveJob(j) {
   }
 }
 
+// Recovery bookkeeping is internal job metadata. Persist it without making the Project look newly
+// edited; only saveJob() is allowed to synchronize an actual status/asset change to the Revision.
+function writeJobRecord(j) {
+  ensureDir(jobDir(j.id));
+  fs.writeFileSync(jobFile(j.id), JSON.stringify(j, null, 2));
+}
+
 function getJob(id) { return JOBS.find((j) => j.id === id); }
 
-/**
- * 更新「重開前就在跑、現在在背景」的那些工作。
- * 伺服器沒有接回它們（那是方案 B），只負責把狀態顯示對，
- * 並告訴使用者怎麼零成本接回（講者影片還在 public/heygen.mp4）。
- */
-function refreshDetached() {
-  for (const j of JOBS) {
-    if (j.status !== 'detached') continue;
-    if (isRunJs(j.pid)) continue;
-    j.status = 'detached-done';
-    j.pid = null;
-    appendLog(j, '\n🔚 這支在背景跑完了（伺服器當時已重開，沒有接回流程）。\n'
-      + '   講者影片留在 public/heygen.mp4 —— 重新建立工作並勾「用現成的講者影片」，\n'
-      + '   就能零成本接著出片，不用再花 HeyGen 點數。\n');
-    saveJob(j);
+const DETACHED_CAPTURE_RETRY_BASE_MS = 2000;
+const DETACHED_CAPTURE_RETRY_MAX_MS = 30000;
+
+function hasRecordedWorkspaceIntent(job, runStatus = job.detachedFromStatus) {
+  return isWorkspaceRunToken(job.workspaceRunToken) && job.workspaceRunStatus === runStatus;
+}
+
+function isPidValue(value) {
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid > 0;
+}
+
+function isWorkspaceRunToken(value) {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function readWorkspaceOwner() {
+  if (!fs.existsSync(WORKSPACE_OWNER_FILE)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(WORKSPACE_OWNER_FILE, 'utf8'));
+    return isPidValue(parsed.pid)
+      ? {
+          pid: Number(parsed.pid),
+          startedAt: parsed.startedAt || null,
+          token: isWorkspaceRunToken(parsed.token) ? parsed.token : null,
+        }
+      : null;
+  } catch (_) {
+    return null;
   }
+}
+
+function workspaceOwnerBelongsToJob(owner, job) {
+  return !!owner && isWorkspaceRunToken(job.workspaceRunToken)
+    && owner.token === job.workspaceRunToken
+    && (!isPidValue(job.workspaceRunPid) || Number(job.workspaceRunPid) === owner.pid);
+}
+
+function lockBelongsToJob(owner, job) {
+  const pid = Number(job.pid);
+  if (!owner) return false;
+  if (isWorkspaceRunToken(job.workspaceRunToken)) {
+    return owner.token === job.workspaceRunToken
+      && (!isPidValue(job.workspaceRunPid) || Number(job.workspaceRunPid) === owner.pid);
+  }
+  if (!isPidValue(pid) || Number(owner.pid) !== pid) return false;
+  const lockStartedAt = Date.parse(owner.startedAt || '');
+  const jobStartedAt = Date.parse(job.workspaceRunStartedAt || job.startedAt || '');
+  // Current run.js always records startedAt. Requiring a close launch window avoids accepting a
+  // recycled PID from an unrelated later run as proof of workspace ownership.
+  return Number.isFinite(lockStartedAt) && Number.isFinite(jobStartedAt)
+    && lockStartedAt >= jobStartedAt - 10000
+    && lockStartedAt <= jobStartedAt + 120000;
+}
+
+function markDetachedOwnership(job) {
+  const pid = Number(job.pid);
+  if (!isPidValue(pid)) return false;
+  if (job.detachedOwnerPid === pid) return false;
+  job.detachedOwnerPid = pid;
+  return true;
+}
+
+function markDetachedContested(job, reason) {
+  if (job.detachedWorkspaceContested === reason) return;
+  job.detachedWorkspaceContested = reason;
+  writeJobRecord(job);
+  appendLog(job, `\n⚠️ 背景工作結束後，工作區 ownership 無法確認（${reason}）；`
+    + '為避免把別支影片歸錯專案，已暫停後續佇列。\n');
+}
+
+function completeDetached(job, message) {
+  const previousStatus = job.status;
+  const previousPid = job.pid;
+  const previousError = job.error;
+  const previousRetryAt = job.detachedCaptureRetryAt;
+  const previousAttempts = job.detachedCaptureAttempts;
+  job.status = 'detached-done';
+  job.pid = null;
+  job.error = null;
+  delete job.detachedCaptureRetryAt;
+  delete job.detachedCaptureAttempts;
+  try {
+    saveJob(job);
+  } catch (error) {
+    // Keep the in-memory gate closed when durable status synchronization failed.
+    job.status = previousStatus;
+    job.pid = previousPid;
+    job.error = previousError;
+    if (previousRetryAt === undefined) delete job.detachedCaptureRetryAt;
+    else job.detachedCaptureRetryAt = previousRetryAt;
+    if (previousAttempts === undefined) delete job.detachedCaptureAttempts;
+    else job.detachedCaptureAttempts = previousAttempts;
+    // saveJob writes job.json before synchronizing the Project. Roll the on-disk gate back too, so
+    // a crash/restart cannot observe detached-done and clear the workspace after a partial save.
+    try { writeJobRecord(job); } catch (_) {}
+    throw error;
+  }
+  try { appendLog(job, message); } catch (_) {}
+}
+
+function deferDetachedCapture(job, message) {
+  const attempts = Number(job.detachedCaptureAttempts || 0) + 1;
+  const delay = Math.min(
+    DETACHED_CAPTURE_RETRY_MAX_MS,
+    DETACHED_CAPTURE_RETRY_BASE_MS * (2 ** Math.min(attempts - 1, 4)),
+  );
+  job.detachedCaptureAttempts = attempts;
+  job.detachedCaptureRetryAt = new Date(Date.now() + delay).toISOString();
+  job.error = message;
+  writeJobRecord(job);
+  // Avoid turning a persistent disk/Project failure into an unbounded log file.
+  if (attempts === 1 || (attempts & (attempts - 1)) === 0)
+    appendLog(job, `\n⚠️ ${message}；保留工作區並在稍後重試（第 ${attempts} 次）。\n`);
+}
+
+/**
+ * Reconcile one job whose detached run outlived the server.
+ *
+ * Ordering is deliberately strict: child exit -> lock release -> ownership proof -> validate ->
+ * durable Project capture -> status transition. Returning false means tick must not let another
+ * job clear the shared workspace.
+ */
+function reconcileDetached(job) {
+  let pid = Number(job.pid);
+  let lockExists = fs.existsSync(LOCK);
+  let lockOwner = lockExists ? readLockOwner() : null;
+  const workspaceOwner = readWorkspaceOwner();
+  // The lock may disappear between existsSync/readFileSync as run.js exits.
+  if (lockExists && !lockOwner && !fs.existsSync(LOCK)) lockExists = false;
+
+  const matchingLock = lockExists && lockBelongsToJob(lockOwner, job);
+  const matchingWorkspaceOwner = workspaceOwnerBelongsToJob(workspaceOwner, job);
+  let ownershipChanged = false;
+  if (!isPidValue(pid) && (matchingLock || matchingWorkspaceOwner)) {
+    pid = (matchingLock ? lockOwner : workspaceOwner).pid;
+    job.pid = pid;
+    job.workspaceRunPid = pid;
+    ownershipChanged = true;
+  }
+  if ((matchingLock || matchingWorkspaceOwner) && markDetachedOwnership(job))
+    ownershipChanged = true;
+  if (ownershipChanged) writeJobRecord(job);
+
+  const running = isRunJs(pid);
+
+  if (running) {
+    if (lockExists && lockOwner && !matchingLock) {
+      markDetachedContested(job, `lock owner pid ${lockOwner.pid} != detached pid ${pid}`);
+    }
+    return false;
+  }
+
+  // Even a dead child is not settled until its exit handler has released the shared lock. If a
+  // different/unknown lock appears, remember that the workspace may have been overwritten.
+  if (lockExists) {
+    if (!lockOwner) markDetachedContested(job, 'unknown lock owner');
+    else if (Number(lockOwner.pid) !== pid)
+      markDetachedContested(job, `lock owner pid ${lockOwner.pid} != detached pid ${pid}`);
+    return false;
+  }
+
+  // Once another/unknown owner has been observed, the shared workspace can no longer be safely
+  // attributed even after its lock disappears. Keep the queue closed for every run type.
+  if (job.detachedWorkspaceContested) return false;
+
+  // The spawn record says which run was intended; this persistent marker is written by run.js only
+  // after it actually acquires the shared workspace. A missing/different marker is not ownership.
+  if (isWorkspaceRunToken(job.workspaceRunToken)) {
+    if (!workspaceOwnerBelongsToJob(workspaceOwner, job)) {
+      const intentAt = Date.parse(job.workspaceRunStartedAt || '');
+      const intentGraceActive = Number.isFinite(intentAt) && Date.now() < intentAt + 30000;
+      const hasOwnershipProof = isPidValue(job.detachedOwnerPid)
+        || matchingLock;
+      // .run.owner.json deliberately survives a completed run. During the narrow spawn-before-pid
+      // crash window, a foreign marker is therefore normally just the previous run's stale marker;
+      // give the new child time to acquire the lock and replace it before declaring a conflict.
+      if (!hasOwnershipProof && intentGraceActive) return false;
+      if (workspaceOwner) {
+        markDetachedContested(job, 'workspace owner token changed');
+        return false;
+      }
+    } else {
+      if (Number(job.pid) !== workspaceOwner.pid) {
+        markDetachedContested(job, 'workspace owner pid changed');
+        return false;
+      }
+      if (markDetachedOwnership(job)) writeJobRecord(job);
+    }
+  }
+
+  const fromStatus = job.detachedFromStatus || (job.preparedAt ? 'rendering' : 'preparing');
+  // render-only and skip-generate runs cannot have bought a new speaker output. Finalize them
+  // without inspecting a possibly unrelated staging copy left in the shared workspace.
+  if (fromStatus !== 'preparing' || job.skipGenerate) {
+    completeDetached(job, '\n🔚 背景工作已結束；本輪沒有新的付費 Avatar 需要保存。\n');
+    return true;
+  }
+
+  const retryAt = Date.parse(job.detachedCaptureRetryAt || '');
+  if (Number.isFinite(retryAt) && retryAt > Date.now()) return false;
+
+  const speakerFile = path.join(WORKSPACE_PUBLIC_DIR, 'heygen.mp4');
+  let speakerState = 'missing';
+  try {
+    if (fs.existsSync(speakerFile)) {
+      const stat = fs.statSync(speakerFile);
+      if (stat.isFile() && stat.size > 0) {
+        const media = inspectMediaFile(speakerFile);
+        speakerState = media && media.kind === 'video' ? 'valid' : 'invalid';
+      } else speakerState = 'empty';
+    }
+  } catch (error) {
+    deferDetachedCapture(job, `無法檢查背景工作的講者影片：${error.message}`);
+    return false;
+  }
+
+  if (speakerState !== 'valid') {
+    completeDetached(job,
+      '\n🔚 背景工作已結束，沒有可保存的有效 heygen.mp4；未新增 Project 素材。\n');
+    return true;
+  }
+
+  // A valid shared-workspace file is destructive to clear. Without ownership proof, preserving it
+  // and stopping the queue is safer than either losing a paid output or assigning it to the wrong Project.
+  if (Number(job.detachedOwnerPid) !== pid) {
+    deferDetachedCapture(job, '有效的背景 Avatar ownership 尚未驗證');
+    return false;
+  }
+
+  const captured = capturePaidSpeakerAfterFailure({
+    job,
+    speakerFile,
+    projectStore: PROJECT_STORE,
+    saveJob,
+    // Detached recovery reports its own accurate lifecycle message below.
+    appendLog: () => {},
+  });
+  if (!captured) {
+    deferDetachedCapture(job, '有效的背景 Avatar 尚未能保存到原 Project／Revision');
+    return false;
+  }
+  completeDetached(job,
+    '\n🛟 背景工作已結束；已先把付費產生的 heygen.mp4 保存到原 Project／Revision。\n');
+  return true;
+}
+
+/** Update detached jobs and report whether it is safe for tick() to reuse the workspace. */
+function refreshDetached() {
+  const detached = JOBS.filter((job) => job.status === 'detached');
+  if (!detached.length) return true;
+  if (detached.length > 1) {
+    for (const job of detached) markDetachedContested(job, 'multiple detached jobs');
+    return false;
+  }
+  return reconcileDetached(detached[0]);
 }
 
 function appendLog(job, line) {
@@ -351,11 +619,9 @@ function newId() {
 }
 
 // ── 工作區（public/ 與 src/ 產出物）──────────
-const LOCK = TEST_MODE ? path.join(DATA_DIR, '.run.lock') : path.join(ROOT, '.run.lock');
-
 /** 把 public/ 裡上一支工作留下的東西清掉（套版素材與字型保留） */
 function clearWorkspaceInputs() {
-  const pub = path.join(ROOT, 'public');
+  const pub = WORKSPACE_PUBLIC_DIR;
   if (!fs.existsSync(pub)) return;
   for (const n of fs.readdirSync(pub)) {
     if (TEMPLATE_ASSET.test(n)) continue;
@@ -387,7 +653,7 @@ function restoreWorkspace(job) {
  */
 function captureProjectAssets(job) {
   if (!job.projectId) return;
-  const publicDir = path.join(ROOT, 'public');
+  const publicDir = WORKSPACE_PUBLIC_DIR;
   if (!fs.existsSync(publicDir)) return;
   for (const name of fs.readdirSync(publicDir)) {
     if (TEMPLATE_ASSET.test(name)) continue;
@@ -451,7 +717,11 @@ function readLockOwner() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LOCK, 'utf8'));
     return Number.isInteger(Number(parsed.pid)) && Number(parsed.pid) > 0
-      ? { pid: Number(parsed.pid), startedAt: parsed.startedAt || null }
+      ? {
+          pid: Number(parsed.pid),
+          startedAt: parsed.startedAt || null,
+          token: isWorkspaceRunToken(parsed.token) ? parsed.token : null,
+        }
       : null;
   } catch (_) {
     return null;
@@ -472,10 +742,18 @@ function readLockOwner() {
  *     就會連 run.js 一起殺掉，HeyGen 生成到一半的點數就白花了。
  *
  * 合起來的效果：伺服器可以隨時關、隨時重開，正在跑的那支會自己跑完，
- * 講者影片會留在 public/heygen.mp4，重新建立工作勾「用現成的講者影片」就零成本接回。
+ * 重開後會先把已產生的講者影片保存到原 Project，再讓下一支使用共用工作區。
  */
 function runPipeline(job, args) {
   return new Promise((resolve, reject) => {
+    const workspaceRunToken = crypto.randomUUID();
+    job.workspaceRunToken = workspaceRunToken;
+    job.workspaceRunPid = null;
+    job.workspaceRunStatus = job.status;
+    job.workspaceRunStartedAt = nowISO();
+    // Persist the job-specific token before spawn. It is only intent until run.js writes the same
+    // token into the workspace-owner marker after acquiring .run.lock.
+    writeJobRecord(job);
     appendLog(job, `\n$ node run.js ${args.join(' ')}\n`);
     const logPath = path.join(jobDir(job.id), 'log.txt');
     ensureDir(path.dirname(logPath));
@@ -484,7 +762,7 @@ function runPipeline(job, args) {
     try {
       child = spawn(process.execPath, ['run.js', ...args], {
         cwd: ROOT,
-        env: { ...process.env, FORCE_COLOR: '0' },
+        env: { ...process.env, FORCE_COLOR: '0', WORKSPACE_RUN_TOKEN: workspaceRunToken },
         detached: true,
         stdio: ['ignore', fd, fd],
       });
@@ -493,7 +771,8 @@ function runPipeline(job, args) {
     }
     job.pid = child.pid;
     job.pidArgs = args.join(' ');
-    saveJob(job);
+    job.workspaceRunPid = child.pid;
+    writeJobRecord(job);
     child.unref(); // 不要讓子程序撐住父程序的 event loop
     child.on('error', reject);
     child.on('close', (code) => {
@@ -813,6 +1092,18 @@ let lockWaitLogged = null;
 function tick() {
   if (DISABLE_WORKER) return;
   if (busy) return;
+  // Detached reconciliation owns the shared public/ workspace until it has either durably saved a
+  // valid paid Avatar or proved that no valid output exists. Never pick/clear for the next job first.
+  let detachedSettled = false;
+  try {
+    detachedSettled = refreshDetached();
+  } catch (error) {
+    console.error(`⚠️ 背景工作 recovery 失敗，保留工作區稍後重試：${error.message}`);
+  }
+  if (!detachedSettled) {
+    setTimeout(tick, 2000);
+    return;
+  }
   const job = pickNext();
   if (!job) return;
   // .run.lock 存在但伺服器沒在跑東西 → 鎖是「外面」造成的：
@@ -865,7 +1156,7 @@ async function doPrepare(job) {
   } catch (error) {
     capturePaidSpeakerAfterFailure({
       job,
-      speakerFile: path.join(ROOT, 'public', 'heygen.mp4'),
+      speakerFile: path.join(WORKSPACE_PUBLIC_DIR, 'heygen.mp4'),
       projectStore: PROJECT_STORE,
       saveJob,
       appendLog,
@@ -1142,7 +1433,13 @@ function sendFile(req, res, file, download) {
 }
 
 function publicJob(j) {
-  const { pid, pendingEdits, autoPlan, createdAssetRefs, ...rest } = j;
+  const {
+    pid, pendingEdits, autoPlan, createdAssetRefs,
+    workspaceRunPid, workspaceRunStatus, workspaceRunStartedAt, workspaceRunToken,
+    detachedFromStatus, detachedOwnerPid, detachedWorkspaceContested,
+    detachedCaptureAttempts, detachedCaptureRetryAt,
+    ...rest
+  } = j;
   return { ...rest, queuePosition: queuePosition(j) };
 }
 
@@ -1487,8 +1784,8 @@ const server = http.createServer(async (req, res) => {
     if (seg[0] === 'api' && seg[1] === 'jobs' && seg[3] === 'cancel' && req.method === 'POST') {
       const job = getJob(seg[2]);
       if (!job) return send(res, 404, { error: '找不到工作' });
-      if (['preparing', 'rendering'].includes(job.status))
-        return send(res, 400, { error: '正在跑的工作不能取消，請等它結束' });
+      if (['preparing', 'rendering', 'detached'].includes(job.status))
+        return send(res, 400, { error: '正在執行或等待背景復原的工作不能取消，請等它結束' });
       job.status = 'cancelled';
       rmrf(path.join(jobDir(job.id), 'state'));
       saveJob(job);
@@ -1612,7 +1909,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     if (busy) {
       console.log('');
       console.log('  ⚠️  有工作正在跑 —— 它會繼續在背景完成，HeyGen 點數不會浪費。');
-      console.log('     重開後那支會顯示「背景執行中」，跑完會告訴你怎麼接回。');
+      console.log('     重開後會先保存背景產生的 Avatar，再讓下一支使用工作區。');
     }
     console.log('\n  伺服器已關閉\n');
     process.exit(0);

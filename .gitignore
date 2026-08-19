@@ -12,6 +12,7 @@ build/
 .remotion/
 .data/
 runtime-data/
+.run.owner.json
 .cache/
 .dual-tmp/
 .verify-dual-tmp/
