@@ -55,7 +55,7 @@ npm run dev:server
 
 ## 環境變數
 
-Server 與 `doctor` 都會讀取 repo root 的 `.env`；既有 shell／launchd 環境變數優先，不會被 `.env` 覆蓋。需要自訂設定時可複製 `.env.example`，將 `.env` 權限設為 `600`，且不要加入 Git。
+Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo root 的 `.env`；既有 shell／launchd 環境變數優先，不會被 `.env` 覆蓋。需要自訂設定時可複製 `.env.example`，將 `.env` 權限設為 `600`，且不要加入 Git。
 
 | 名稱 | 用途 | localhost 是否必要 |
 |---|---|---|

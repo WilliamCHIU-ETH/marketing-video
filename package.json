@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit",
     "setup:whisper": "bash scripts/setup-whisper-model.sh",
     "transcribe": "bash scripts/transcribe.sh",
-    "test:transcription": "node scripts/normalize-whispercpp.test.js",
+    "test:transcription": "node scripts/read-asr-env.test.js && node scripts/normalize-whispercpp.test.js",
     "parse-script": "node scripts/parse-script.js",
     "correct-subtitles": "node scripts/correct-subtitles.js",
     "list": "node scripts/list-articles.js",

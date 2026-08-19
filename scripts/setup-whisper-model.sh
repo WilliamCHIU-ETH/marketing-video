@@ -4,9 +4,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL_DIR="$ROOT/.cache/whisper"
-MODEL_PATH="${WHISPER_MODEL_PATH:-$MODEL_DIR/ggml-base-q5_1.bin}"
+ENV_MODEL_PATH="$(node "$ROOT/scripts/read-asr-env.js" WHISPER_MODEL_PATH)"
+ENV_MODEL_SHA256="$(node "$ROOT/scripts/read-asr-env.js" WHISPER_MODEL_SHA256)"
+MODEL_PATH="${WHISPER_MODEL_PATH:-${ENV_MODEL_PATH:-$MODEL_DIR/ggml-base-q5_1.bin}}"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin"
-EXPECTED_SHA256="${WHISPER_MODEL_SHA256:-422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898}"
+EXPECTED_SHA256="${WHISPER_MODEL_SHA256:-${ENV_MODEL_SHA256:-422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898}}"
 
 case "$MODEL_PATH" in
   /*) ;;
