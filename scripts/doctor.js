@@ -34,6 +34,21 @@ function requireFromRoot(name) {
   }
 }
 
+function sha256File(file) {
+  const hash = crypto.createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const fd = fs.openSync(file, 'r');
+  try {
+    let bytesRead;
+    while ((bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
 function validFontFile(file) {
   if (!fs.existsSync(file)) return false;
   const fd = fs.openSync(file, 'r');
@@ -75,7 +90,7 @@ const expectedModelSha = process.env.WHISPER_MODEL_SHA256 || DEFAULT_WHISPER_MOD
 if (!fs.existsSync(whisperModel)) {
   add('pipeline', 'fail', 'whisper:model', `找不到 ${whisperModel}；請執行 npm run setup:whisper`);
 } else {
-  const actualModelSha = crypto.createHash('sha256').update(fs.readFileSync(whisperModel)).digest('hex');
+  const actualModelSha = sha256File(whisperModel);
   add('pipeline', actualModelSha === expectedModelSha ? 'pass' : 'fail', 'whisper:model',
     actualModelSha === expectedModelSha
       ? `${path.basename(whisperModel)}；SHA-256 校驗通過`
