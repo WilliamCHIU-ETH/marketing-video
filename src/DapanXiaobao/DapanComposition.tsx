@@ -34,8 +34,8 @@ import videoMeta from '../video-meta.json';
  *   - 截圖段 v1：只做「全螢幕切換」，不含 OCR 黃框標註 / 鏡頭推進放大（留待下一輪）
  *   - 無 PIP、無主畫面模糊、無 outro CTA（大盤小報單純講內容、不催下載）
  *
- * 跟 ../MarketingVideo.tsx 是完全獨立的兩條 composition（天條 #4 #8 精神延伸，
- * 不共用容易互相拖累的渲染邏輯檔），只共用 ../Subtitles.tsx（原樣重用、未修改）。
+ * 跟 ../MarketingVideo.tsx 是完全獨立的兩條 composition；為避免版型互相拖累，
+ * 不共用渲染邏輯檔，只共用 ../Subtitles.tsx（原樣重用、未修改）。
  */
 
 function fadeProgress(
@@ -197,7 +197,7 @@ const DateBadge: React.FC<{ top: number }> = ({ top }) => {
 // 標題卡：只在開場卡（intro-frame.jpg）顯示，讀 video-meta.json.titleText
 // （parse-dapan-script.js 從 script.txt 標題段寫入）。第一句白色、其餘黃色（2026-08-07 使用者要求）。
 // 位置目前放在 header bar 下方的空白深色區（y 900~1300 一帶），沒有參考影片可以核對，
-// 是第一版預設，等使用者看過實際渲染再調（見 docs/tasks.md 未決事項）。
+// 是第一版預設，尚未經實際渲染確認；後續仍要以人工檢視結果調整。
 const TITLE_COLORS = ['#ffffff', '#FFE600']; // 2026-08-10 使用者要求第二句更飽和更亮（原本 #FFD700）
 
 const TitleCard: React.FC<{ topOffset?: number }> = ({ topOffset = 0 }) => {

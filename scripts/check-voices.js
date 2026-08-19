@@ -72,7 +72,7 @@ async function main() {
 判讀：
   support_pause  = 是 → 可以在 script.txt 裡插 <break time="0.3s"/> 強制停頓
                         ⚠️ 但目前 cleanBodyWithIndex 沒遮罩這個標籤，直接寫會漏進字幕，
-                           要先做天條 #5 的三處同步（詳見 docs/tasks.md）
+                           要先補齊 TTS／字幕清理與索引對齊測試，避免標籤進字幕
   support_locale = 是 → run.js 的 HEYGEN_VOICE_LOCALE 可以填 "zh-TW"（台灣國語腔）
 `);
 }

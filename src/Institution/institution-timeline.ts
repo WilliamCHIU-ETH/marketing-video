@@ -1,7 +1,7 @@
 /**
  * 三大法人專用時間軸設定。
  *
- * 跟大盤小報（./DapanXiaobao/dapan-timeline.ts）一樣、只是各自獨立（天條 #4 精神延伸）：
+ * 跟大盤小報（../DapanXiaobao/dapan-timeline.ts）使用相同模式，但維持獨立設定：
  *   - dapan-timeline.ts        讀 dapan-shots.generated.json
  *   - institution-timeline.ts  讀 institution-shots.generated.json（三大法人 (shot:) 專用）
  *

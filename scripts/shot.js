@@ -143,7 +143,7 @@ function openDeeplink(name) {
     process.exit(1);
   }
   // deeplinks.json 存的是 https universal link（CMoney 正式 prod URL），
-  // 但 simulator 不認 AASA universal link 驗證（詳見 docs/tasks.md 第 5 節雷區）。
+  // 但 simulator 不會通過 AASA universal link 驗證。
   // 替換成 SuperTrendK 專案 DEBUG-only AppDelegate 攔截的 custom URL scheme。
   const simUrl = url.replace(
     /^https:\/\/www\.cmoney\.tw\//,

@@ -33,8 +33,8 @@ const INSTITUTION_IMAGE_FILE =
 /**
  * 三大法人 composition（直式 1080×1920）。
  *
- * 跟大盤小報（../DapanXiaobao/DapanComposition.tsx）是**同一個模子、各自獨立**的兩條產線
- * （天條 #4 精神：不共用容易互相拖累的渲染邏輯檔），只共用 ../Subtitles.tsx。
+ * 跟大盤小報（../DapanXiaobao/DapanComposition.tsx）是**同一個模子、各自獨立**的兩條產線；
+ * 為避免版型互相拖累，不共用渲染邏輯檔，只共用 ../Subtitles.tsx。
  * 差異：金橘配色版型、固定主播 avatar、以及日期/標題在版面上的座標不同。
  *
  * 版型（2026-08-10 使用者提供參考圖量測）：
@@ -190,7 +190,7 @@ export const InstitutionComposition: React.FC = () => {
 
 /**
  * 聚焦段：把三大法人資訊圖（public/image.png）依 OCR 抓到的區塊位置捲到聚焦區、壓暗其餘、
- * 在指定的數字格畫黃框。圖片底下露出的地方壓純黑（不出現講者，天條：三大法人固定這樣做）。
+ * 在指定的數字格畫黃框。圖片底下露出的地方壓純黑（不出現講者，三大法人固定採用此規格）。
  *
  * 座標換算（跟 mockup 一致）：
  *   sc     = 畫布寬 / 圖片寬（貼齊寬度）

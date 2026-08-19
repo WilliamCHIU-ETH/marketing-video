@@ -1,7 +1,7 @@
 /**
  * 大盤小報專用時間軸設定。
  *
- * 跟 ../timeline.ts 是平行的兩份設定，不共用 overlay 來源（天條 #4 精神延伸）：
+ * 跟 ../timeline.ts 是平行的兩份設定，不共用 overlay 來源，避免不同版型互相污染：
  *   - ../timeline.ts   讀 overlays.generated.json（現有模板 (imageN)/(shot:)/(logo)）
  *   - dapan-timeline.ts 讀 dapan-shots.generated.json（大盤小報 (shot:) 專用）
  *
@@ -37,8 +37,8 @@ export const DAPAN_BGM = {
   fadeOutSec: 2.0,
 };
 
-// ---------------- char-index → 秒數（複製自 ../timeline.ts 的 resolveByCharIdx，
-// 因為那支沒 export、且天條 #4 精神延伸不共用同一份渲染邏輯檔） ----------------
+// ---------------- char-index → 秒數（複製自 ../timeline.ts 的 resolveByCharIdx；
+// 原函式未 export，且各版型維持獨立的渲染邏輯） ----------------
 type ScriptCharTime = { start: number; end: number };
 type WhisperOutput = { _scriptCharTimes?: ScriptCharTime[] };
 const subtitles = subtitleData as WhisperOutput;

@@ -10,7 +10,7 @@
 //  用法：node scripts/use-focusstock-ad-assets.js
 //  註：outro 要用 public/outro.mp4 這個標準名，transcribe.sh 才會偵測它、寫進
 //      video-meta.outroDurationSec，FocusstockAd 的時長才會含片尾。此步驟要在 transcribe 之前跑。
-//  註：複製一律走 fs.copyFileSync（不要用 fs.cpSync，見 docs/tasks.md 第 5 節雷區）。
+//  註：複製一律走 fs.copyFileSync；fs.cpSync 覆蓋掛載碟檔案時可能留下 0 byte 壞檔。
 // ─────────────────────────────────────────
 
 const fs = require("fs");
