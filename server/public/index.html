@@ -482,8 +482,8 @@ $('#status').onclick = async () => {
 };
 
 $('#disk').onclick = async () => {
-  if (!confirm('清理可移除的 Run 暫存檔？\n\n會移除不再需要的快照，以及保留期外的 Run 上傳副本與未封存保險副本；'
-    + '影片專案、版本、專案素材、已封存成品與執行記錄都會保留。')) return;
+  if (!confirm('清理可移除的 Run 暫存檔？\n\n會移除不再需要的快照，以及保留期外的 Run 上傳副本與縮圖；'
+    + '影片專案、版本、專案素材、已封存成品、未封存成品保險副本與執行記錄都會保留。')) return;
   const r = await api('/api/prune', { method: 'POST' });
   alert(r.freedMB ? `清出 ${r.freedMB} MB` : '沒有可以清的東西，目前都在保留期內');
   poll();
@@ -720,7 +720,7 @@ async function poll() {
       $('#disk').hidden = false;
       $('#disk').textContent = `💾 ${h.diskMB} MB`;
       $('#disk').title = `Run 工作區佔用。暫存檔保留最近 ${h.keep.recent} 支或 ${h.keep.days} 天內；`
-        + 'Project 素材與已封存成品不會清除。點一下檢查並清理。';
+        + 'Project 素材、已封存成品與未封存 fallback 不會清除。點一下檢查並清理。';
     } else $('#disk').hidden = true;
     // ⚠️ 順序：busy 要先判斷。run.js 一跑就會建立 .run.lock，
     // 先看 locked 的話「每支影片跑的時候」都會顯示「被鎖住」，正常狀況長得像出事
