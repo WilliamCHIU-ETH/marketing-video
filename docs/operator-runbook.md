@@ -34,8 +34,9 @@ npm run dev:server
 
 - UI：<http://localhost:4000>
 - Health：<http://localhost:4000/api/health>
-- Runtime data：`runtime-data/jobs/`
-- Archive：`runtime-data/archive/`
+- 影片專案：`runtime-data/projects/`（Project、Revision、共用素材與新格式成品）
+- Run 工作區：`runtime-data/jobs/`（每次執行隔離，依保留策略清理）
+- Legacy archive：`runtime-data/archive/`（舊格式 Job 成品，不自動搬移）
 - 大型品牌素材：workspace `data/assets/`，透過 ignored 的 repo-local `assets` symlink 使用
 
 正常 health 至少應包含：
@@ -58,7 +59,7 @@ Server 與 `doctor` 都會讀取 repo root 的 `.env`；既有 shell／launchd �
 |---|---|---|
 | `HOST` | 預設 `127.0.0.1` | 否 |
 | `PORT` | 預設 `4000` | 否 |
-| `DATA_DIR` | jobs 與 archive 根目錄 | 否 |
+| `DATA_DIR` | projects、jobs 與 legacy archive 根目錄 | 否 |
 | `DISABLE_WORKER` | 只啟動 UI/API，不執行 queued job | 否 |
 | `AUTO_PRUNE_ON_START` | 啟動時套用 retention；預設關閉 | 否 |
 | `HEYGEN_API_KEY` | 付費 HeyGen 工作 | 否 |
@@ -75,6 +76,11 @@ npm run cleanup:plan -- --root='/Users/chiu/Downloads/marketing-video 2'
 這個命令只有讀取能力，不提供 apply 或 force。若回傳 exit code 2，JSON 會是 `complete=false`、`safeToApply=false`，代表資料完整性異常，任何清理都必須停止。沒有 archive digest 證據的 terminal job payload 也只會列為 manual。
 
 ## 已知邊界
+
+- 新建立的影片使用 `Project → Revision → Run`；既有 Job 不會自動 migration，也不會被搬移或刪除。
+- Project Asset 分成圖片、一般 B-Roll 影片與講者影片。前台接受 PNG／JPEG 及 MP4／MOV／M4V／WebM，會驗證實際檔案內容、保存 durable copy 並支援跨 Revision 引用；一般 B-Roll 不會被當成 `heygen.mp4`。相同內容與角色依 SHA-256 去重，Run 暫時副本被清理後仍保留 Project 素材。
+- 前端若在素材上傳或送出前失敗，會回收剛建立的 draft Revision；全新影片會連同空 Project 一起回收，既有 Project 則保留先前版本與既有素材，不讓重試直接跳號。
+- 目前自動 OCR／素材配置／Remotion 合成仍只消費圖片；B-Roll 已可加入、預覽及沿用，但「保存於 Project」不等於「已自動剪入成片」。
 
 - `npm start` 是 Remotion Studio，不是 localhost 使用者前台。
 - 完整 pipeline 仍需要 `ffmpeg`、`ffprobe`、`whisper` 與 `tesseract`。

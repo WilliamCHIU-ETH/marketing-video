@@ -26,10 +26,12 @@
 'use strict';
 
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
+const { createProjectStore, extensionForMediaType, inspectMediaFile } = require('./project-store');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -82,6 +84,11 @@ if (TEST_MODE && isWithin(fs.realpathSync(ROOT), resolvedPathIncludingMissing(DA
 }
 
 const JOBS_DIR = path.join(DATA_DIR, 'jobs');
+const PROJECT_STORE = createProjectStore({
+  dataDir: DATA_DIR,
+  nowISO: () => new Date().toISOString(),
+  idFactory: newId,
+});
 
 // ── 保留策略 ──────────────────────────────
 // 一支工作的成品：焦點股約 45MB、大盤約 138MB（兩支）、三大法人約 67MB。
@@ -282,6 +289,20 @@ JOBS.forEach(saveJob);
 function saveJob(j) {
   ensureDir(jobDir(j.id));
   fs.writeFileSync(jobFile(j.id), JSON.stringify(j, null, 2));
+  if (j.projectId && j.revisionId) {
+    PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
+      jobId: j.id,
+      runId: j.id,
+      status: j.status,
+      owner: j.owner,
+      title: j.title,
+      assetRefs: j.assetRefs || [],
+      files: j.files || [],
+      outputs: j.outputs || [],
+      archived: j.archived || [],
+      finishedAt: j.finishedAt || null,
+    });
+  }
 }
 
 function getJob(id) { return JOBS.find((j) => j.id === id); }
@@ -328,7 +349,7 @@ function clearWorkspaceInputs() {
   if (!fs.existsSync(pub)) return;
   for (const n of fs.readdirSync(pub)) {
     if (TEMPLATE_ASSET.test(n)) continue;
-    if (/\.(png|jpg|jpeg|mp4|txt|wav|mp3|m4a|aac)$/i.test(n)) rmrf(path.join(pub, n));
+    if (/\.(png|jpg|jpeg|mp4|mov|m4v|webm|txt|wav|mp3|m4a|aac)$/i.test(n)) rmrf(path.join(pub, n));
   }
   // 標注檔要指名清掉。不能用 *.json 一律清 —— deeplinks.json 是投廣品牌素材。
   rmrf(path.join(pub, 'annotations.json'));
@@ -351,11 +372,37 @@ function restoreWorkspace(job) {
 }
 
 /**
+ * 把本次 Run 產生、之後可能會重用的素材收回 Project library。
+ * 固定品牌素材由 assets/ 管理，不重複收入 Project；腳本與中間 JSON 也不算素材。
+ */
+function captureProjectAssets(job) {
+  if (!job.projectId) return;
+  const publicDir = path.join(ROOT, 'public');
+  if (!fs.existsSync(publicDir)) return;
+  for (const name of fs.readdirSync(publicDir)) {
+    if (TEMPLATE_ASSET.test(name)) continue;
+    let kind = null;
+    if (/^heygen\.mp4$/i.test(name)) kind = 'speaker-video';
+    else if (/\.(png|jpe?g)$/i.test(name)) kind = 'image';
+    else if (/^broll\d+\.(mp4|mov|m4v|webm)$/i.test(name)) kind = 'video';
+    if (!kind) continue;
+    const file = path.join(publicDir, name);
+    if (!fs.statSync(file).isFile() || fs.statSync(file).size === 0) continue;
+    const asset = PROJECT_STORE.ingestAsset(job.projectId, file, { originalName: name, kind });
+    if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+  }
+  saveJob(job);
+}
+
+/**
  * 把成品另存到成品庫，檔名取成人看得懂的：
  *   成品/2026-08/0817-大盤小報-台股反彈-橫式.mp4
  * jobs/ 會被自動清掉，這裡不會 —— 這才是「以後還找得到」的那一份。
  */
 function archivePath(job, outName) {
+  if (job.projectId && job.revisionId) {
+    return PROJECT_STORE.outputPath(job.projectId, job.revisionId, outName);
+  }
   const cfg = TEMPLATES[job.template];
   const d = new Date(job.finishedAt || Date.now());
   const pad = (n) => String(n).padStart(2, '0');
@@ -802,6 +849,7 @@ async function doPrepare(job) {
   if (job.withAd) args.push('--with-ad');
   await runPipeline(job, args);
 
+  captureProjectAssets(job);
   snapshotWorkspace(job);
   job.planView = buildPlanView(job);
   job.preparedAt = nowISO();
@@ -913,20 +961,29 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   });
 }
 
-function receiveFile(req, dest, limit) {
+function receiveFile(req, dest, limit, validate) {
   return new Promise((resolve, reject) => {
-    const temp = `${dest}.upload-${process.pid}-${Date.now()}`;
-    const ws = fs.createWriteStream(temp, { flags: 'wx' });
+    const temp = `${dest}.upload-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+    let fd;
+    try {
+      fd = fs.openSync(temp, 'wx');
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const ws = fs.createWriteStream(temp, { fd, autoClose: true });
     let size = 0;
     let settled = false;
+    let failed = false;
     const cleanup = () => { try { fs.unlinkSync(temp); } catch (_) {} };
     const fail = (error) => {
       if (settled) return;
       settled = true;
+      failed = true;
       req.unpipe(ws);
       req.resume();
       ws.destroy();
-      cleanup();
+      if (ws.closed) cleanup();
       reject(error);
     };
     req.on('data', (chunk) => {
@@ -939,12 +996,14 @@ function receiveFile(req, dest, limit) {
     });
     req.on('error', fail);
     ws.on('error', fail);
+    ws.on('close', () => { if (failed) cleanup(); });
     ws.on('finish', () => {
       if (settled) return;
       try {
+        const validation = validate ? validate(temp) : null;
         fs.renameSync(temp, dest);
         settled = true;
-        resolve(size);
+        resolve({ size, validation });
       } catch (error) {
         fail(error);
       }
@@ -956,8 +1015,43 @@ function receiveFile(req, dest, limit) {
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg', '.mp4': 'video/mp4', '.json': 'application/json',
+  '.jpeg': 'image/jpeg', '.mp4': 'video/mp4', '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime', '.webm': 'video/webm', '.json': 'application/json',
 };
+
+const UPLOAD_LIMITS = Object.freeze({ image: 25 * 1024 * 1024, video: 500 * 1024 * 1024 });
+
+function uploadSpec(name) {
+  if (/^heygen\.mp4$/i.test(name)) return { kind: 'speaker-video', mediaKind: 'video', limit: UPLOAD_LIMITS.video };
+  if (/^shot\d{1,3}\.(png|jpe?g)$/i.test(name)) return { kind: 'image', mediaKind: 'image', limit: UPLOAD_LIMITS.image };
+  if (/^broll\d{1,3}\.(mp4|mov|m4v|webm)$/i.test(name)) return { kind: 'video', mediaKind: 'video', limit: UPLOAD_LIMITS.video };
+  return null;
+}
+
+function allowedExtensions(mediaType) {
+  if (mediaType === 'image/png') return ['.png'];
+  if (mediaType === 'image/jpeg') return ['.jpg', '.jpeg'];
+  if (mediaType === 'video/mp4') return ['.mp4', '.m4v'];
+  if (mediaType === 'video/quicktime') return ['.mov'];
+  if (mediaType === 'video/webm') return ['.webm'];
+  return [];
+}
+
+function validateUpload(file, name, spec) {
+  const media = inspectMediaFile(file);
+  const fail = (message) => {
+    const error = new Error(message);
+    error.statusCode = 415;
+    throw error;
+  };
+  if (!media) fail('無法辨識檔案內容；支援 PNG、JPEG、MP4、MOV、M4V 與 WebM');
+  if (media.kind !== spec.mediaKind) fail('檔案內容與素材類型不一致');
+  if (spec.kind === 'speaker-video' && media.mediaType !== 'video/mp4')
+    fail('講者影片必須是 MP4；一般 MOV、M4V 或 WebM 請放在 B-Roll 素材欄位');
+  const ext = path.extname(name).toLowerCase();
+  if (!allowedExtensions(media.mediaType).includes(ext)) fail('檔案內容與副檔名不一致');
+  return media;
+}
 
 function sendFile(req, res, file, download) {
   if (!fs.existsSync(file)) return send(res, 404, { error: '找不到檔案' });
@@ -966,12 +1060,30 @@ function sendFile(req, res, file, download) {
   const headers = { 'Content-Type': type, 'Cache-Control': 'no-store' };
   if (download) headers['Content-Disposition'] = `attachment; filename="${path.basename(file)}"`;
 
-  // 影片要支援拖時間軸 → Range
+  // 影片要支援拖時間軸 → Range。無效或超界範圍必須明確回 416，
+  // 否則瀏覽器會把錯誤長度當成可播放資料，預覽會卡住。
   const range = req.headers.range;
-  if (range && /^bytes=\d*-\d*$/.test(range)) {
-    const [a, b] = range.replace('bytes=', '').split('-');
-    const start = a ? parseInt(a, 10) : 0;
-    const end = b ? parseInt(b, 10) : st.size - 1;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+    let start;
+    let end;
+    if (match && (match[1] || match[2])) {
+      if (!match[1]) {
+        const suffixLength = Number(match[2]);
+        if (suffixLength > 0) {
+          start = Math.max(st.size - suffixLength, 0);
+          end = st.size - 1;
+        }
+      } else {
+        start = Number(match[1]);
+        end = match[2] ? Math.min(Number(match[2]), st.size - 1) : st.size - 1;
+      }
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+        || start < 0 || start >= st.size || end < start) {
+      res.writeHead(416, { ...headers, 'Content-Range': `bytes */${st.size}`, 'Accept-Ranges': 'bytes' });
+      return res.end();
+    }
     res.writeHead(206, {
       ...headers,
       'Content-Range': `bytes ${start}-${end}/${st.size}`,
@@ -985,8 +1097,15 @@ function sendFile(req, res, file, download) {
 }
 
 function publicJob(j) {
-  const { pid, pendingEdits, autoPlan, ...rest } = j;
+  const { pid, pendingEdits, autoPlan, createdAssetRefs, ...rest } = j;
   return { ...rest, queuePosition: queuePosition(j) };
+}
+
+function publicProject(project) {
+  return {
+    ...project,
+    assets: (project.assets || []).map(({ path: _path, ...asset }) => asset),
+  };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1022,6 +1141,23 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { jobs: JOBS.slice(0, 50).map(publicJob), busy });
     }
 
+    if (p === '/api/projects' && req.method === 'GET') {
+      return send(res, 200, { projects: PROJECT_STORE.list().map(publicProject) });
+    }
+
+    if (seg[0] === 'api' && seg[1] === 'projects' && seg[2] && seg.length === 3 && req.method === 'GET') {
+      const detail = PROJECT_STORE.detail(seg[2], url.searchParams.get('revision'));
+      if (!detail) return send(res, 404, { error: '找不到影片專案' });
+      return send(res, 200, { project: publicProject(detail.project), revision: detail.revision });
+    }
+
+    if (seg[0] === 'api' && seg[1] === 'projects' && seg[2] && seg[3] === 'assets'
+        && seg[4] && req.method === 'GET') {
+      const file = PROJECT_STORE.assetPath(seg[2], seg[4]);
+      if (!file || !fs.existsSync(file)) return send(res, 404, { error: '找不到素材' });
+      return sendFile(req, res, file, url.searchParams.get('dl') === '1');
+    }
+
     if (p === '/api/jobs' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
@@ -1035,22 +1171,99 @@ const server = http.createServer(async (req, res) => {
       const title = String(body.title || '').split('\n')
         .map((l) => (tcfg.wrap ? l.trim() : l.trim().slice(0, tcfg.per))).filter(Boolean)
         .slice(0, tcfg.lines).join('\n');
-      const job = {
-        id: newId(),
-        template: body.template,
-        owner: (body.owner || '').trim() || '未署名',
-        title,
-        status: 'draft', // 上傳完檔案才轉 queued
-        createdAt: nowISO(),
-        skipGenerate: !!body.skipGenerate,
-        noSpeed: !!body.noSpeed,
-        withAd: !!body.withAd,
-        brand,
-        autoApprove: !!body.autoApprove,
-      };
-      ensureDir(path.join(jobDir(job.id), 'input'));
-      fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
-        buildScript({ voice: body.voice, title, body: body.body }));
+      const id = newId();
+      const reuseAssetIds = Array.isArray(body.reuseAssetIds)
+        ? [...new Set(body.reuseAssetIds.map(String))].slice(0, 50) : [];
+      if (!body.projectId && reuseAssetIds.length)
+        return send(res, 400, { error: '建立新影片時不能引用其他專案的素材' });
+      let project;
+      if (body.projectId) {
+        project = PROJECT_STORE.get(body.projectId);
+        if (!project) return send(res, 404, { error: '找不到要迭代的影片專案' });
+        if (project.template !== body.template)
+          return send(res, 409, { error: '同一影片專案的版型不可在版本間變更' });
+        if ((project.brand || null) !== (brand || null))
+          return send(res, 409, { error: '同一影片專案的品牌不可在版本間變更' });
+      } else {
+        project = PROJECT_STORE.create({
+          name: title || TEMPLATES[body.template].label,
+          template: body.template,
+          brand,
+          owner: (body.owner || '').trim() || '未署名',
+        });
+      }
+      const invalidReuse = reuseAssetIds.find((assetId) => {
+        const asset = (project.assets || []).find((item) => item.id === assetId);
+        return !asset || !['image', 'video'].includes(asset.kind);
+      });
+      if (invalidReuse) return send(res, 400, { error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用` });
+      let revision;
+      let job;
+      try {
+        revision = PROJECT_STORE.addRevision(project.id, {
+          jobId: id,
+          runId: id,
+          title,
+          owner: (body.owner || '').trim() || '未署名',
+          script: {
+            title,
+            body: String(body.body || ''),
+            voice: String(body.voice || ''),
+          },
+          options: {
+            skipGenerate: !!body.skipGenerate,
+            noSpeed: !!body.noSpeed,
+            withAd: !!body.withAd,
+            autoApprove: !!body.autoApprove,
+          },
+        });
+        job = {
+          id,
+          projectId: project.id,
+          projectName: project.name,
+          revisionId: revision.id,
+          revisionNumber: revision.number,
+          template: body.template,
+          owner: (body.owner || '').trim() || '未署名',
+          title,
+          status: 'draft', // 上傳完檔案才轉 queued
+          createdAt: nowISO(),
+          skipGenerate: !!body.skipGenerate,
+          noSpeed: !!body.noSpeed,
+          withAd: !!body.withAd,
+          brand,
+          autoApprove: !!body.autoApprove,
+          assetRefs: [],
+          createdAssetRefs: [],
+        };
+        ensureDir(path.join(jobDir(job.id), 'input'));
+        fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
+          buildScript({ voice: body.voice, title, body: body.body }));
+        let shotIndex = 1;
+        let brollIndex = 1;
+        for (const assetId of reuseAssetIds) {
+          const asset = (project.assets || []).find((item) => item.id === assetId);
+          let ext = extensionForMediaType(asset.mediaType);
+          if (!ext) {
+            const originalExt = path.extname(asset.originalName || '').toLowerCase();
+            ext = asset.kind === 'image'
+              ? (/^\.jpe?g$/.test(originalExt) ? '.jpg' : '.png')
+              : (/^\.(mp4|mov|m4v|webm)$/.test(originalExt) ? originalExt : '.mp4');
+          }
+          const name = asset.kind === 'image'
+            ? `shot${shotIndex++}${ext}` : `broll${brollIndex++}${ext}`;
+          PROJECT_STORE.materializeAsset(project.id, assetId,
+            path.join(jobDir(job.id), 'input', name));
+          job.assetRefs.push(assetId);
+        }
+      } catch (error) {
+        rmrf(jobDir(id));
+        if (revision) {
+          try { PROJECT_STORE.abortRevision(project.id, revision.id); }
+          catch (rollbackError) { error.message += `；版本回收也失敗：${rollbackError.message}`; }
+        }
+        throw error;
+      }
       JOBS.unshift(job);
       saveJob(job);
       return send(res, 200, { job: publicJob(job) });
@@ -1063,15 +1276,46 @@ const server = http.createServer(async (req, res) => {
       if (job.status !== 'draft') return send(res, 409, { error: '只有草稿工作可以上傳素材' });
       const name = path.basename(url.searchParams.get('name') || '');
       if (!name) return send(res, 400, { error: '缺少檔名' });
-      if (!/^heygen\.mp4$/i.test(name) && !/^shot\d+\.(png|jpe?g)$/i.test(name))
-        return send(res, 400, { error: '不允許的上傳檔名' });
-      const limit = /^heygen\.mp4$/i.test(name) ? 500 * 1024 * 1024 : 25 * 1024 * 1024;
+      const spec = uploadSpec(name);
+      if (!spec) return send(res, 400, { error: '不允許的上傳檔名' });
+      const limit = spec.limit;
       const declared = Number(req.headers['content-length'] || 0);
       if (declared > limit) return send(res, 413, { error: `上傳檔案超過 ${Math.round(limit / 1048576)} MB 上限` });
       const dest = path.join(jobDir(job.id), 'input', name);
       ensureDir(path.dirname(dest));
-      await receiveFile(req, dest, limit);
-      return send(res, 200, { ok: true, name, size: fs.statSync(dest).size });
+      const received = await receiveFile(req, dest, limit, (temp) => validateUpload(temp, name, spec));
+      let publicAsset = null;
+      if (job.projectId) {
+        job.createdAssetRefs ||= [];
+        const requestedOriginalName = url.searchParams.get('originalName') || name;
+        const existingAssetIds = new Set((PROJECT_STORE.get(job.projectId).assets || []).map((item) => item.id));
+        const asset = PROJECT_STORE.ingestAsset(job.projectId, dest, {
+          originalName: requestedOriginalName,
+          kind: spec.kind,
+        });
+        if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+        if (!existingAssetIds.has(asset.id) && !job.createdAssetRefs.includes(asset.id))
+          job.createdAssetRefs.push(asset.id);
+        saveJob(job);
+        const { path: _path, ...safeAsset } = asset;
+        publicAsset = safeAsset;
+      }
+      return send(res, 200, { ok: true, name, size: received.size, asset: publicAsset });
+    }
+
+    // 前端在素材上傳失敗時回收剛建立的草稿，避免留下空 Project 或跳號 Revision。
+    if (seg[0] === 'api' && seg[1] === 'jobs' && seg[3] === 'abort' && req.method === 'POST') {
+      const job = getJob(seg[2]);
+      if (!job) return send(res, 404, { error: '找不到工作' });
+      if (job.status !== 'draft') return send(res, 409, { error: '只有尚未送出的草稿可以回收' });
+      const result = PROJECT_STORE.abortRevision(job.projectId, job.revisionId, {
+        pruneAssetIds: job.createdAssetRefs || [],
+      });
+      if (!result) return send(res, 409, { error: '草稿版本已不存在，請重新整理' });
+      const index = JOBS.indexOf(job);
+      if (index >= 0) JOBS.splice(index, 1);
+      rmrf(jobDir(job.id));
+      return send(res, 200, { ok: true, ...result });
     }
 
     // 上傳完成 → 排進佇列
@@ -1196,7 +1440,7 @@ const server = http.createServer(async (req, res) => {
       const arc = (job.outputs || []).find((o) => o.name === name && o.archive);
       if (arc) {
         const f = path.resolve(ROOT, arc.archive);
-        if (f.startsWith(path.resolve(ARCHIVE_DIR)) && fs.existsSync(f))
+        if ((isWithin(path.resolve(ARCHIVE_DIR), f) || isWithin(PROJECT_STORE.projectsDir, f)) && fs.existsSync(f))
           return sendFile(req, res, f, url.searchParams.get('dl') === '1');
       }
       for (const d of ['out', 'thumbs', 'state/public', 'input']) {

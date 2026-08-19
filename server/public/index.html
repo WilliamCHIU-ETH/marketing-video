@@ -53,37 +53,66 @@
     font-size:12px;color:var(--dim);pointer-events:none;white-space:nowrap}
   .tline .cnt.soft,.tline .cnt.over{color:var(--warn)}
   .hint{font-size:12.5px;color:var(--dim);margin-top:-2px}
-  .vdrop{border:1.5px dashed var(--line);border-radius:9px;padding:15px;text-align:center;
-    cursor:pointer;background:#fcfdfe}
+  .vdrop{width:100%;border:1.5px dashed var(--line);border-radius:9px;padding:15px;text-align:center;
+    cursor:pointer;background:#fcfdfe;appearance:none;font:inherit;color:inherit}
   .vdrop:hover,.vdrop.hot{border-color:var(--accent);background:#f2f7ff}
+  .vdrop:focus-visible{outline:3px solid rgba(31,111,235,.3);outline-offset:2px;border-color:var(--accent)}
   .vdrop b{display:block;font-size:13.5px}
   .vdrop span{font-size:12px;color:var(--dim)}
   .vdrop.ok{border-style:solid;border-color:var(--ok);background:#f3fbf7}
+  .avatar-field{border:1px solid var(--line);border-radius:10px;padding:16px;background:#fafbfc}
+  .avatar-intro{margin-bottom:12px}
+  .avatar-intro b{display:block;font-size:14px}
+  .avatar-intro span{display:block;color:var(--dim);font-size:12.5px;margin-top:2px}
+  .avatar-actions{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-top:10px;flex-wrap:wrap}
+  .avatar-actions .chk{margin:0}
   /* 投廣品牌 */
   .brands{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap}
   .brands div{border:1.5px solid var(--line);border-radius:9px;padding:9px 18px;cursor:pointer;
     font-size:14px;background:#fff}
   .brands div.on{border-color:var(--accent);background:#f2f7ff;color:var(--accent);font-weight:600}
-  /* 圖片欄位 */
+  /* 圖片與 B-Roll 素材欄位 */
   .slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px}
   .slot{border:1.5px dashed var(--line);border-radius:10px;aspect-ratio:3/4;display:flex;
     flex-direction:column;align-items:center;justify-content:center;cursor:pointer;
-    background:#fcfdfe;position:relative;overflow:hidden;text-align:center;padding:10px}
+    background:#fcfdfe;position:relative;overflow:hidden;text-align:center;padding:10px;
+    font:inherit;color:inherit}
   .slot:hover{border-color:var(--accent);background:#f2f7ff}
+  .slot:focus-visible{outline:3px solid rgba(31,111,235,.3);outline-offset:2px;border-color:var(--accent)}
   .slot.hot{border-color:var(--accent);background:#eaf2ff}
   .slot.filled{border-style:solid;border-color:var(--line);background:#fff;padding:0}
-  .slot img{width:100%;height:100%;object-fit:cover;object-position:top}
+  .slot img,.slot video{width:100%;height:100%;object-fit:cover;background:#000}
+  .slot img{object-position:top}
+  .slot video{object-position:center;object-fit:contain;border-radius:0}
   .slot .n{font-size:13.5px;color:var(--dim);font-weight:600}
   .slot .h{font-size:11.5px;color:var(--dim);margin-top:3px}
   .slot .tag{position:absolute;left:0;right:0;bottom:0;background:rgba(16,20,26,.82);color:#fff;
-    font-size:11.5px;padding:5px 8px;text-align:center}
+    font-size:11.5px;padding:5px 8px;text-align:center;z-index:1;border:0;font-family:inherit}
   .slot .tag b{font-weight:600}
+  .slot .tag.replace{cursor:pointer}
+  .slot .tag.replace:hover,.slot .tag.replace:focus-visible{background:rgba(31,111,235,.94);outline:none}
+  .slot.video .tag{left:6px;right:auto;top:6px;bottom:auto;border-radius:6px;padding:3px 7px}
+  .slot.preview-error::after{content:'瀏覽器無法播放此影片';position:absolute;left:10px;right:10px;
+    top:50%;transform:translateY(-50%);background:rgba(197,48,48,.92);color:#fff;border-radius:7px;
+    padding:8px;font-size:12px;line-height:1.4;z-index:1}
   /* 右上角小叉叉：上傳錯了直接刪（2026-08-17 使用者要求） */
   .slot .x{position:absolute;top:6px;right:6px;width:22px;height:22px;border:none;
     border-radius:50%;background:rgba(16,20,26,.72);color:#fff;cursor:pointer;
-    font-size:13px;line-height:22px;padding:0;text-align:center}
+    font-size:13px;line-height:22px;padding:0;text-align:center;z-index:2}
   .slot .x:hover{background:#c53030}
-  .slot.add{border-style:dashed;color:var(--dim);font-size:26px;font-weight:300;aspect-ratio:3/4}
+  .slot.add{border-style:dashed;color:var(--dim);font-size:26px;font-weight:300;aspect-ratio:3/4;
+    appearance:none}
+  .project-context{background:#eef4ff;border-color:#c8daf8;color:#214f91}
+  .project-context h2{color:#173e76;margin-bottom:8px}
+  .version{font-size:12px;padding:3px 8px;border-radius:999px;background:#eef4ff;color:var(--accent);white-space:nowrap}
+  .asset-summary{display:grid;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .asset-summary-row{display:grid;grid-template-columns:145px minmax(0,1fr);gap:18px;padding:13px 15px;background:#fff}
+  .asset-summary-row+.asset-summary-row{border-top:1px solid var(--line)}
+  .asset-summary-kind{font-size:13px;font-weight:650}
+  .asset-summary-files{display:flex;flex-direction:column;gap:5px;min-width:0}
+  .asset-summary-file{display:flex;align-items:baseline;gap:8px;min-width:0}
+  .asset-summary-file b{font-size:13.5px;overflow-wrap:anywhere}
+  .asset-summary-file span,.asset-summary-empty{font-size:12px;color:var(--dim);white-space:nowrap}
   details.adv{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
   details.adv summary{cursor:pointer;font-size:13px;color:var(--dim);list-style:none}
   details.adv summary::-webkit-details-marker{display:none}
@@ -114,6 +143,9 @@
   .outs{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,290px));
     gap:20px;align-items:start}
   .outs figure{margin:0}
+  @media(max-width:600px){
+    .asset-summary-row{grid-template-columns:1fr;gap:4px}
+  }
   .outs video{width:100%;border-radius:9px;background:#000;display:block}
   .outs figcaption{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .outs figcaption b{font-size:12.5px;font-weight:600;word-break:break-all;flex:1;min-width:0}
@@ -197,8 +229,8 @@
 <header>
   <h1>🎬 出片前台</h1>
   <nav>
-    <button data-v="new" class="on">建立工作</button>
-    <button data-v="list">工作列表</button>
+    <button data-v="new" class="on">建立影片</button>
+    <button data-v="list">影片專案</button>
     <button data-v="fix" id="navFix" hidden>修正紀錄</button>
   </nav>
   <span class="spacer"></span>
@@ -209,6 +241,7 @@
 <main>
   <!-- ── 建立工作 ── -->
   <section id="v-new">
+    <div class="card project-context" id="projectContext" hidden></div>
     <div class="card">
       <h2>1・選版型</h2>
       <div class="tpl" id="tpl"></div>
@@ -233,13 +266,35 @@
     </div>
 
     <div class="card">
-      <h2>3・截圖</h2>
-      <div class="slots" id="slots"></div>
-      <input type="file" id="picker" accept="image/*" hidden>
+      <h2>3・講者 Avatar</h2>
+      <div class="avatar-field">
+        <div class="avatar-intro">
+          <b>現成講者影片（選填）</b>
+          <span>有已完成的 Avatar 影片就放這裡；留空時會由 HeyGen 產生。Avatar 不會混進 B-Roll 素材。</span>
+        </div>
+        <button type="button" class="vdrop" id="vdrop">
+          <b>選擇或拖曳 Avatar MP4</b>
+          <span id="heygenName">尚未選擇，將由 HeyGen 產生</span>
+        </button>
+        <div class="avatar-actions">
+          <label class="chk" id="noSpeedWrap" style="display:none"><input type="checkbox" id="noSpeed">
+            <span>這支已經加速過<small>不要再套用 120% 加速。</small></span></label>
+          <button type="button" class="ghost" id="heygenRemove" hidden>移除 Avatar</button>
+        </div>
+        <input type="checkbox" id="skipGenerate" hidden>
+        <input type="file" id="heygenPicker" accept=".mp4,video/mp4" hidden>
+      </div>
     </div>
 
     <div class="card">
-      <h2>4・出片</h2>
+      <h2>4・圖片與 B-Roll 影片素材</h2>
+      <div class="hint" id="assetHint" style="margin-bottom:12px"></div>
+      <div class="slots" id="slots"></div>
+      <input type="file" id="picker" accept=".png,.jpg,.jpeg,.mp4,.mov,.m4v,.webm,image/png,image/jpeg,video/mp4,video/quicktime,video/webm" hidden>
+    </div>
+
+    <div class="card">
+      <h2>5・出片</h2>
       <label class="chk"><input type="checkbox" id="autoApprove">
         <span>直接出片，不用我確認<small>不勾的話，中間會停下來讓你看一次「哪句配哪張圖、框在哪」，確認後才出片。</small></span></label>
       <label class="chk" id="wrapWithAd"><input type="checkbox" id="withAd">
@@ -247,17 +302,6 @@
 
       <details class="adv" id="advBox" hidden>
         <summary>進階（一般不用動）</summary>
-        <label class="chk"><input type="checkbox" id="skipGenerate">
-          <span>用現成的講者影片<small>不呼叫 HeyGen，改用你上傳的 heygen.mp4。測試用。</small></span></label>
-        <div id="heygenSlot" style="display:none;margin:8px 0 6px">
-          <div class="vdrop" id="vdrop">
-            <b>選擇或拖曳講者影片</b>
-            <span id="heygenName">支援 .mp4（會被存成 heygen.mp4）</span>
-          </div>
-          <input type="file" id="heygenPicker" accept="video/*,.mp4" hidden>
-        </div>
-        <label class="chk"><input type="checkbox" id="noSpeed">
-          <span>不要加速 120%<small>同一支影片重跑會重複加速，重跑時記得勾。</small></span></label>
         <label>發音替換（一行一條，格式：原文→唸法）</label>
         <textarea id="voice" style="min-height:80px" placeholder="櫃買→櫃賣&#10;台積電2330→台積電二三三零"></textarea>
       </details>
@@ -268,7 +312,7 @@
 
   <!-- ── 工作列表 ── -->
   <section id="v-list" hidden>
-    <div class="card"><h2>工作列表</h2><div id="jobs"></div></div>
+    <div class="card"><h2>影片專案</h2><div id="jobs"></div></div>
   </section>
 
   <!-- ── 工作詳情 ── -->
@@ -356,12 +400,20 @@ const api = async (u, o) => {
   return j;
 };
 const fmt = (s) => (s == null ? '—' : s.toFixed(1) + 's');
+const fileSize = (bytes) => {
+  const n = Number(bytes || 0);
+  if (!n) return '0 KB';
+  if (n < 1048576) return Math.max(1, Math.round(n / 1024)) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+};
 const STATUS_TEXT = { draft:'建立中', queued:'排隊中', preparing:'準備中', review:'待確認',
   approved:'等待出片', rendering:'出片中', done:'完成', failed:'失敗', cancelled:'已取消',
   // 伺服器重開前就開始跑的工作。run.js 是 detached 的，會自己跑完。
   detached:'背景執行中', 'detached-done':'已在背景跑完' };
 
 let TPLS = {}, BRANDS = [], ADMIN = false, brand = null, tpl = 'focusstock', view = 'new', openJob = null;
+let activeProject = null, reusedAssets = [];
+let iterationReturn = null;
 
 // ── 標題 ──────────────────────────────────
 // 四個版型的標題限制差很多（見 server/index.js 的 TEMPLATES.title 註解）：
@@ -410,6 +462,7 @@ document.querySelectorAll('nav button').forEach((b) =>
   b.onclick = () => { openJob = null; go(b.dataset.v); });
 function go(v) {
   if (v !== 'job') jobSig = null;   // 換頁／換工作要重畫
+  if (view !== v) window.scrollTo(0, 0);
   view = v;
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
   for (const id of ['new', 'list', 'job', 'fix']) $('#v-' + id).hidden = (id !== v);
@@ -436,73 +489,156 @@ $('#disk').onclick = async () => {
 $('#lb').onclick = () => ($('#lb').style.display = 'none');
 function zoom(src) { $('#lbimg').src = src; $('#lb').style.display = 'flex'; }
 
-// ── 截圖欄位 ──────────────────────────────
-// 預設三格＋一個「再新增」。比一個大拖曳區清楚：一眼看得出放了幾張、順序是什麼。
+// ── 圖片與 B-Roll 素材欄位 ───────────────
+// 預設三格＋一個「再新增」。圖片與影片共用同一個 Project Asset 入口，
+// 但一般 B-Roll 永遠不會被當成進階區的 HeyGen 講者影片。
 let slots = [null, null, null];
 let pickingSlot = -1;
 
 $('#picker').onchange = (e) => {
   const f = e.target.files[0];
-  if (f && pickingSlot >= 0) slots[pickingSlot] = f;
+  if (f && pickingSlot >= 0) setSlotFile(pickingSlot, f);
   e.target.value = '';
-  drawSlots();
 };
+
+function classifyMediaFile(f) {
+  const match = String(f && f.name || '').match(/\.(png|jpe?g|mp4|mov|m4v|webm)$/i);
+  if (!match) return null;
+  const kind = /^(png|jpe?g)$/i.test(match[1]) ? 'image' : 'video';
+  const declared = String(f.type || '');
+  if (declared && declared !== 'application/octet-stream' && !declared.startsWith(kind + '/')) return null;
+  return { kind, extension: '.' + match[1].toLowerCase().replace('jpeg', 'jpg') };
+}
+
+function releaseSlot(slot) {
+  if (slot && slot.previewUrl) URL.revokeObjectURL(slot.previewUrl);
+}
+
+function clearLocalSlots() {
+  slots.filter(Boolean).forEach(releaseSlot);
+  slots = [null, null, null];
+}
 
 function setSlotFile(i, f) {
   if (!f) return;
-  if (!/^image\//.test(f.type)) {
-    // 原本是靜靜忽略 —— 使用者把 mp4 拖進來會以為壞掉（2026-08-13 回報）
-    alert(/^video\//.test(f.type)
-      ? '這幾格是放 APP 截圖的。\n\n講者影片預設由系統自己生成，不用上傳；\n真的要用現成的影片，請展開下面的「進階」→ 勾「用現成的講者影片」。'
-      : `「${f.name}」不是圖片檔，這幾格只能放 png / jpg 截圖。`);
-    return;
-  }
-  slots[i] = f;
+  const media = classifyMediaFile(f);
+  if (!media) return alert(`「${f.name}」不是支援的素材。\n\n圖片支援 PNG、JPG；B-Roll 影片支援 MP4、MOV、M4V、WebM。`);
+  releaseSlot(slots[i]);
+  slots[i] = {
+    file: f,
+    kind: media.kind,
+    extension: media.extension,
+    previewUrl: URL.createObjectURL(f),
+    previewStatus: media.kind === 'video' ? 'loading' : 'ready',
+  };
   drawSlots();
+}
+
+function mediaPreview(kind, src, state) {
+  if (kind === 'video' && state && !state.previewStatus) state.previewStatus = 'loading';
+  const name = (state && ((state.file && state.file.name) || state.originalName)) || '';
+  if (kind === 'video') return el('video', {
+    src, controls: 'controls', preload: 'metadata', playsinline: 'playsinline',
+    'aria-label': `B-Roll 影片預覽${name ? '：' + name : ''}`,
+    onclick: (e) => e.stopPropagation(),
+    onloadedmetadata: (e) => {
+      const playableVideo = e.currentTarget.videoWidth > 0 && e.currentTarget.videoHeight > 0;
+      if (state) state.previewStatus = playableVideo ? 'ready' : 'error';
+      e.currentTarget.closest('.slot')?.classList.toggle('preview-error', !playableVideo);
+    },
+    onerror: (e) => {
+      if (state) state.previewStatus = 'error';
+      e.currentTarget.closest('.slot')?.classList.add('preview-error');
+    },
+  });
+  return el('img', { src, alt: name ? `圖片預覽：${name}` : '圖片預覽' });
+}
+
+function openMaterialPicker(i) {
+  pickingSlot = i;
+  $('#picker').click();
 }
 
 function drawSlots() {
   const wrap = $('#slots');
-  const nodes = slots.map((f, i) => {
-    const s = el('div', {
-      class: 'slot' + (f ? ' filled' : ''),
-      onclick: () => { pickingSlot = i; $('#picker').click(); },
+  const nodes = reusedAssets.map((asset, i) => {
+    const kind = asset.kind === 'video' ? 'video' : 'image';
+    const s = el('div', { class: 'slot filled ' + kind });
+    s.append(
+      mediaPreview(kind, `/api/projects/${activeProject.id}/assets/${asset.id}`, asset),
+      el('button', { type: 'button', class: 'x', title: '這個版本不使用',
+        'aria-label': `這個版本不使用${kind === 'video' ? ' B-Roll 影片' : '圖片'} ${asset.originalName || ''}`.trim(),
+        onclick: (e) => {
+        e.stopPropagation(); reusedAssets.splice(i, 1); drawSlots();
+      } }, '✕'),
+      el('div', { class: 'tag', title: asset.originalName || '' },
+        el('b', {}, kind === 'video' ? 'B-Roll 影片' : '專案圖片')));
+    return s;
+  });
+  nodes.push(...slots.map((slot, i) => {
+    const common = {
+      class: 'slot' + (slot ? ' filled ' + slot.kind : ''),
       ondragover: (e) => { e.preventDefault(); s.classList.add('hot'); },
       ondragleave: () => s.classList.remove('hot'),
       ondrop: (e) => { e.preventDefault(); s.classList.remove('hot'); setSlotFile(i, e.dataTransfer.files[0]); },
-    });
-    if (f) {
+    };
+    const s = slot
+      ? el('div', common)
+      : el('button', { ...common, type: 'button', 'aria-label': `加入素材 ${i + 1}`,
+        onclick: () => openMaterialPicker(i) });
+    if (slot) {
       s.append(
-        el('img', { src: URL.createObjectURL(f), alt: '' }),
-        el('button', { class: 'x', title: '刪掉這張',
-          onclick: (e) => { e.stopPropagation(); slots.splice(i, 1); if (slots.length < 3) slots.push(null); drawSlots(); } }, '✕'),
-        el('div', { class: 'tag' }, el('b', {}, '截圖 ' + (i + 1))));
+        mediaPreview(slot.kind, slot.previewUrl, slot),
+        el('button', { type: 'button', class: 'x', title: '移除這個素材',
+          'aria-label': `移除${slot.kind === 'video' ? ' B-Roll 影片' : '圖片'} ${slot.file.name}`,
+          onclick: (e) => {
+            e.stopPropagation(); releaseSlot(slot); slots.splice(i, 1);
+            if (slots.length < 3) slots.push(null); drawSlots();
+          } }, '✕'),
+        el('button', { type: 'button', class: 'tag replace', title: `更換 ${slot.file.name}`,
+          'aria-label': `更換${slot.kind === 'video' ? ' B-Roll 影片' : '圖片'} ${slot.file.name}`,
+          onclick: (e) => { e.stopPropagation(); openMaterialPicker(i); } },
+        el('b', {}, (slot.kind === 'video' ? 'B-Roll 影片' : '圖片 ' + (i + 1)) + '・更換')));
     } else {
-      s.append(el('div', { class: 'n' }, '截圖 ' + (i + 1)), el('div', { class: 'h' }, '點擊或拖曳'));
+      s.append(el('div', { class: 'n' }, '素材 ' + (i + 1)),
+        el('div', { class: 'h' }, '圖片或 B-Roll 影片'));
     }
     return s;
-  });
-  nodes.push(el('div', {
-    class: 'slot add',
+  }));
+  nodes.push(el('button', {
+    type: 'button', class: 'slot add',
     onclick: () => { slots.push(null); drawSlots(); },
-    title: '再新增一張',
+    title: '再新增一個素材', 'aria-label': '再新增一個素材',
   }, '＋'));
   wrap.replaceChildren(...nodes);
+  $('#assetHint').textContent = activeProject
+    ? `已帶入 ${reusedAssets.length} 個專案素材；可以移除不需要的素材，或繼續新增圖片與 B-Roll。`
+    : '圖片與 B-Roll 會保存為專案素材，下一個版本可以直接沿用。';
 }
 
-// ── 進階：現成講者影片 ──
+// ── 講者 Avatar ──
 let heygenFile = null;
-$('#skipGenerate').onchange = (e) => {
-  $('#heygenSlot').style.display = e.target.checked ? 'block' : 'none';
-};
+function clearHeygen() {
+  heygenFile = null;
+  $('#skipGenerate').checked = false;
+  $('#noSpeed').checked = false;
+  $('#noSpeedWrap').style.display = 'none';
+  $('#vdrop').classList.remove('ok', 'hot');
+  $('#heygenName').textContent = '尚未選擇，將由 HeyGen 產生';
+  $('#heygenRemove').hidden = true;
+  $('#heygenPicker').value = '';
+}
 function setHeygen(f) {
   if (!f) return;
-  // accept 有時擋不住（有些系統 mp4 的 MIME 是空的），所以副檔名也認
-  if (!/^video\//.test(f.type) && !/\.(mp4|mov|m4v)$/i.test(f.name))
-    return alert(`「${f.name}」看起來不是影片檔。`);
+  // Avatar 是 pipeline 的固定 heygen.mp4；MOV／WebM 等一般片段請放在 B-Roll 素材欄位。
+  if (!/\.mp4$/i.test(f.name) || (f.type && !/^video\//.test(f.type)))
+    return alert(`「${f.name}」不是 MP4 Avatar 影片。\n\n一般影片請放在下方的 B-Roll 素材欄位。`);
   heygenFile = f;
+  $('#skipGenerate').checked = true;
   $('#vdrop').classList.add('ok');
-  $('#heygenName').textContent = `${f.name}　${(f.size / 1048576).toFixed(1)} MB　（點這裡可換掉）`;
+  $('#heygenName').textContent = `${f.name}　${fileSize(f.size)}　（點這裡可換掉）`;
+  $('#noSpeedWrap').style.display = 'flex';
+  $('#heygenRemove').hidden = false;
 }
 $('#vdrop').onclick = () => $('#heygenPicker').click();
 ['dragover', 'dragleave', 'drop'].forEach((ev) =>
@@ -512,19 +648,24 @@ $('#vdrop').onclick = () => $('#heygenPicker').click();
     if (ev === 'drop') setHeygen(e.dataTransfer.files[0]);
   }));
 $('#heygenPicker').onchange = (e) => { setHeygen(e.target.files[0]); e.target.value = ''; };
+$('#heygenRemove').onclick = clearHeygen;
 
 // ── 版型 ──
 async function boot() {
   const h = await api('/api/health');
   TPLS = h.templates;
   BRANDS = h.brands || [];
-  // 修正紀錄與進階選項只給管理者（本機連進來的人）看。
-  // 同事看到「用現成的講者影片」「不要加速」只會困惑，那些是給 Leighly 測試用的。
+  // 修正紀錄與發音替換只給管理者（本機連進來的人）看；
+  // Avatar 已是建立影片的正式欄位，不再依管理者權限隱藏。
   ADMIN = !!h.admin;
   $('#navFix').hidden = !ADMIN;
   $('#advBox').hidden = !ADMIN;
   $('#tpl').replaceChildren(...Object.entries(TPLS).map(([k, t]) =>
-    el('div', { class: k === tpl ? 'on' : '', onclick: () => { tpl = k; boot2(); } }, t.label)));
+    el('div', { class: k === tpl ? 'on' : '', onclick: () => {
+      if (activeProject && k !== activeProject.template)
+        return alert('同一個影片專案的版本會沿用原本版型；若要換版型，請建立新的影片。');
+      tpl = k; boot2();
+    } }, t.label)));
   boot2();
   drawSlots();
   poll();
@@ -579,31 +720,47 @@ async function poll() {
 // ── 送出 ──
 $('#submit').onclick = async () => {
   const btn = $('#submit');
-  const imgs = slots.filter(Boolean);
+  const media = slots.filter(Boolean);
   const lines = titleLines();
   if (!$('#body').value.trim()) return alert('腳本是空的');
-  if ($('#skipGenerate').checked && !heygenFile) return alert('勾了「用現成的講者影片」，請選擇 heygen.mp4');
+  if ($('#skipGenerate').checked && !heygenFile) return alert('請重新選擇現成的 Avatar MP4');
+  const previewVideos = [...reusedAssets, ...media].filter((item) => item.kind === 'video');
+  if (previewVideos.some((item) => item.previewStatus === 'error'))
+    return alert('有一支 B-Roll 無法在瀏覽器播放，請移除或換成可預覽的影片後再送出。');
+  if (previewVideos.some((item) => item.previewStatus === 'loading'))
+    return alert('B-Roll 預覽仍在載入，請稍候幾秒再送出。');
 
   btn.disabled = true;
+  let draftJob = null;
   try {
     btn.textContent = '建立工作…';
     const { job } = await api('/api/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        projectId: activeProject && activeProject.id,
+        reuseAssetIds: reusedAssets.map((asset) => asset.id),
         template: tpl, owner: $('#owner').value,
         title: lines.join('\n'), body: $('#body').value, voice: $('#voice').value,
         skipGenerate: $('#skipGenerate').checked, noSpeed: $('#noSpeed').checked,
         withAd: $('#withAd').checked, autoApprove: $('#autoApprove').checked, brand,
       }),
     });
-    const ups = imgs.map((f, i) => ({ f, name: 'shot' + (i + 1) + (/\.jpe?g$/i.test(f.name) ? '.jpg' : '.png') }));
+    draftJob = job;
+    let shotIndex = reusedAssets.filter((asset) => asset.kind === 'image').length + 1;
+    let brollIndex = reusedAssets.filter((asset) => asset.kind === 'video').length + 1;
+    const ups = media.map((item) => ({
+      f: item.file,
+      name: item.kind === 'image'
+        ? `shot${shotIndex++}${item.extension}` : `broll${brollIndex++}${item.extension}`,
+    }));
     if (heygenFile) ups.push({ f: heygenFile, name: 'heygen.mp4' });
     for (let i = 0; i < ups.length; i++) {
       const mb = (ups[i].f.size / 1048576).toFixed(1);
       btn.textContent = `上傳 ${i + 1}/${ups.length}（${mb} MB）…`;
       // ⚠️ 一定要檢查結果。原本沒檢查 → 上傳失敗畫面照樣往下走，
       //    最後才丟一個看不懂的錯（2026-08-13）。
-      const r = await fetch(`/api/jobs/${job.id}/upload?name=${ups[i].name}`,
+      const params = new URLSearchParams({ name: ups[i].name, originalName: ups[i].f.name });
+      const r = await fetch(`/api/jobs/${job.id}/upload?${params}`,
         { method: 'POST', body: ups[i].f });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
@@ -612,49 +769,123 @@ $('#submit').onclick = async () => {
     }
     btn.textContent = '送出…';
     await api(`/api/jobs/${job.id}/submit`, { method: 'POST' });
-    slots = [null, null, null]; heygenFile = null;
-    $('#vdrop').classList.remove('ok');
-    $('#heygenName').textContent = '支援 .mp4（會被存成 heygen.mp4）';
+    draftJob = null;
+    clearLocalSlots(); clearHeygen(); activeProject = null; reusedAssets = []; iterationReturn = null;
+    drawProjectContext();
     $('#body').value = ''; titleVals = ['', ''];
     drawSlots(); drawTitle();
     openJob = job.id; go('job');
-  } catch (e) { alert('出錯了：' + e.message); }
+  } catch (e) {
+    let rollbackNote = '';
+    if (draftJob) {
+      try {
+        await api(`/api/jobs/${draftJob.id}/abort`, { method: 'POST' });
+        rollbackNote = '\n\n剛建立的草稿版本已回收，可以修正素材後重試。';
+      } catch (rollbackError) {
+        rollbackNote = `\n\n草稿未能自動回收（${rollbackError.message}）；請先到影片專案確認狀態，再決定是否重試。`;
+      }
+    }
+    alert('出錯了：' + e.message + rollbackNote);
+  }
   btn.disabled = false; btn.textContent = '開始出片';
 };
 
 // ── 列表 ──
 async function loadJobs() {
-  const { jobs } = await api('/api/jobs');
-  if (!jobs.length) return $('#jobs').replaceChildren(el('div', { class: 'empty' }, '還沒有任何工作'));
+  const [{ projects }, { jobs }] = await Promise.all([api('/api/projects'), api('/api/jobs')]);
+  const legacyJobs = jobs.filter((job) => !job.projectId);
+  if (!projects.length && !legacyJobs.length)
+    return $('#jobs').replaceChildren(el('div', { class: 'empty' }, '還沒有任何影片專案'));
   const t = el('table', {}, el('thead', {}, el('tr', {},
-    el('th', {}, '建立時間'), el('th', {}, '版型'), el('th', {}, '標題'),
-    el('th', {}, '建立者'), el('th', {}, '狀態'))));
+    el('th', {}, '最近更新'), el('th', {}, '版型'), el('th', {}, '影片專案'),
+    el('th', {}, '版本'), el('th', {}, '狀態'))));
   const tb = el('tbody');
-  for (const j of jobs) {
-    let st = STATUS_TEXT[j.status] || j.status;
-    if (j.queuePosition > 0) st += `（前面還有 ${j.queuePosition} 支）`;
-    tb.append(el('tr', { class: 'jobrow', onclick: () => { openJob = j.id; go('job'); } },
-      el('td', {}, new Date(j.createdAt).toLocaleString('zh-TW', { hour12: false }).slice(5)),
-      el('td', {}, (TPLS[j.template] || {}).label || j.template),
-      el('td', {}, (j.title || '—').replace(/\n/g, ' ')),
-      el('td', {}, j.owner),
-      el('td', {}, el('span', { class: 'st ' + j.status }, st))));
+  for (const project of projects) {
+    const latest = (project.revisions || []).slice().sort((a, b) => b.number - a.number)[0] || {};
+    const job = jobs.find((item) => item.id === latest.jobId);
+    const status = job ? job.status : latest.status;
+    tb.append(el('tr', { class: 'jobrow', onclick: () => {
+      if (!latest.jobId) return; openJob = latest.jobId; go('job');
+    } },
+      el('td', {}, new Date(project.updatedAt).toLocaleString('zh-TW', { hour12: false }).slice(5)),
+      el('td', {}, (TPLS[project.template] || {}).label || project.template),
+      el('td', {}, project.name || '未命名影片'),
+      el('td', {}, `V${latest.number || project.latestRevision || 1}・共 ${project.revisions.length} 版`),
+      el('td', {}, el('span', { class: 'st ' + status }, STATUS_TEXT[status] || status || '—'))));
   }
   t.append(tb);
-  $('#jobs').replaceChildren(t);
+  const parts = [t];
+  if (legacyJobs.length) {
+    const legacyBody = el('tbody');
+    for (const job of legacyJobs) {
+      legacyBody.append(el('tr', { class: 'jobrow', onclick: () => { openJob = job.id; go('job'); } },
+        el('td', {}, new Date(job.createdAt).toLocaleString('zh-TW', { hour12: false }).slice(5)),
+        el('td', {}, (TPLS[job.template] || {}).label || job.template),
+        el('td', {}, (job.title || '—').replace(/\n/g, ' ')),
+        el('td', {}, job.owner || '—'),
+        el('td', {}, el('span', { class: 'st ' + job.status }, STATUS_TEXT[job.status] || job.status))));
+    }
+    const legacyTable = el('table', {}, el('thead', {}, el('tr', {},
+      el('th', {}, '建立時間'), el('th', {}, '版型'), el('th', {}, '標題'),
+      el('th', {}, '建立者'), el('th', {}, '狀態'))), legacyBody);
+    parts.push(
+      el('div', { class: 'note', style: 'margin-top:20px;margin-bottom:12px' },
+        `以下 ${legacyJobs.length} 筆舊格式工作尚未歸入影片專案；仍可開啟查看，系統不會自動搬移或刪除。`),
+      legacyTable);
+  }
+  $('#jobs').replaceChildren(...parts);
 }
 
 // ── 詳情 ──
 let edits = {};
 let jobSig = null;   // 上次畫出來的內容特徵
+function revisionAssetCard(projectDetail, job) {
+  const refs = new Set(((projectDetail.revision && projectDetail.revision.assetRefs)
+    || job.assetRefs || []).map(String));
+  const assets = (projectDetail.project.assets || []).filter((asset) => refs.has(String(asset.id)));
+  const groups = [
+    { kind: 'speaker-video', label: '講者 Avatar' },
+    { kind: 'image', label: '圖片' },
+    { kind: 'video', label: 'B-roll 影片' },
+  ];
+  const summary = el('div', { class: 'asset-summary' });
+  for (const group of groups) {
+    const files = assets.filter((asset) => asset.kind === group.kind);
+    const fileBox = el('div', { class: 'asset-summary-files' });
+    if (!files.length) {
+      fileBox.append(el('span', { class: 'asset-summary-empty' }, '這一版尚無檔案'));
+    } else {
+      for (const asset of files) {
+        fileBox.append(el('div', { class: 'asset-summary-file' },
+          el('b', {}, asset.originalName || '未命名檔案'),
+          el('span', {}, fileSize(asset.size))));
+      }
+    }
+    summary.append(el('div', { class: 'asset-summary-row' },
+      el('div', { class: 'asset-summary-kind' }, group.label), fileBox));
+  }
+  const version = (projectDetail.revision && projectDetail.revision.number) || job.revisionNumber;
+  return el('div', { class: 'card' },
+    el('h2', {}, '本版素材'),
+    el('div', { class: 'hint', style: 'margin-top:-10px;margin-bottom:14px' },
+      `只列出 V${version || '—'} 實際使用的檔案；其他版本的素材不會混在這裡。`),
+    summary);
+}
+
 async function loadJob() {
   const { job } = await api('/api/jobs/' + openJob);
   const { text } = await api(`/api/jobs/${openJob}/log`);
+  const projectDetail = job.projectId
+    ? await api(`/api/projects/${job.projectId}${job.revisionId
+      ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`).catch(() => null) : null;
   const box = $('#v-job');
   // 詳情頁每 3 秒輪詢一次。以前不管有沒有變都整塊 replaceChildren，
   // <video> 被重新建立就會重新載入 → 影片一直閃（2026-08-17 使用者回報）。
   // 內容沒變就什麼都不做；工作跑完後特徵不再變動，畫面自然就穩住。
-  const sig = [job.id, job.status, (job.outputs || []).length, text.length, job.error || ''].join('|');
+  const revisionRefs = (projectDetail && projectDetail.revision && projectDetail.revision.assetRefs)
+    || job.assetRefs || [];
+  const sig = [job.id, job.status, (job.outputs || []).length, text.length, job.error || '',
+    revisionRefs.join(',')].join('|');
   if (sig === jobSig && box.childElementCount) return;
   jobSig = sig;
   const keep = box.querySelector('pre.log');
@@ -663,15 +894,37 @@ async function loadJob() {
   const head = el('div', { class: 'card' },
     el('div', { style: 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' },
       el('h2', { style: 'margin:0' }, (TPLS[job.template] || {}).label + '　' + (job.title || '').replace(/\n/g, ' ')),
+      job.revisionNumber ? el('span', { class: 'version' }, 'V' + job.revisionNumber) : '',
       el('span', { class: 'st ' + job.status },
         (STATUS_TEXT[job.status] || job.status) + (job.queuePosition > 0 ? `（前面還有 ${job.queuePosition} 支）` : '')),
       el('span', { style: 'flex:1' }),
+      job.projectId ? el('button', {
+        class: 'ghost',
+        onclick: () => activeProject && iterationReturn && iterationReturn.jobId === job.id
+          ? go('new') : iterateProject(job),
+      }, activeProject && iterationReturn && iterationReturn.jobId === job.id
+        ? '繼續編輯下一版' : '建立下一版') : '',
       el('button', { class: 'ghost', onclick: () => { openJob = null; go('list'); } }, '← 回列表')),
     el('div', { style: 'color:var(--dim);font-size:13px;margin-top:8px' },
       `${job.owner}・${new Date(job.createdAt).toLocaleString('zh-TW', { hour12: false })}`),
     job.error ? el('div', { class: 'note', style: 'margin-top:14px;background:#fdecec;border-color:#f2c9c9;color:#8b2020' }, job.error) : '');
 
   const parts = [head];
+
+  if (projectDetail && projectDetail.project) {
+    const versions = (projectDetail.project.revisions || []).slice().sort((a, b) => b.number - a.number);
+    parts.push(el('div', { class: 'card' },
+      el('h2', {}, '版本紀錄'),
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+        ...versions.map((revision) => el('button', {
+          class: revision.jobId === job.id ? 'go' : 'ghost',
+          onclick: () => {
+            if (!revision.jobId || revision.jobId === job.id) return;
+            openJob = revision.jobId; jobSig = null; loadJob();
+          },
+        }, `V${revision.number}・${STATUS_TEXT[revision.status] || revision.status}`)))));
+    parts.push(revisionAssetCard(projectDetail, job));
+  }
 
   if (job.status === 'detached' || job.status === 'detached-done') {
     parts.push(el('div', { class: 'card' },
@@ -682,7 +935,7 @@ async function loadJob() {
           : '它已經跑完了，但伺服器當時已經重開，所以沒有接回前台流程。<br><br>')
         + '<b>怎麼零成本接回：</b><br>'
         + '講者影片留在專案的 <code>public/heygen.mp4</code>。<br>'
-        + '重新建立一次工作 → 展開「進階」→ 勾「<b>用現成的講者影片</b>」→ 選那支 mp4。<br>'
+        + '重新建立一次工作 → 在「<b>講者 Avatar</b>」欄位選那支 mp4。<br>'
         + '這樣不會再呼叫 HeyGen，一毛錢都不用花。')));
   }
 
@@ -726,6 +979,64 @@ async function loadJob() {
   box.replaceChildren(...parts);
   const pre = logCard.querySelector('pre');
   if (scrolled) pre.scrollTop = pre.scrollHeight;
+}
+
+function drawProjectContext() {
+  const box = $('#projectContext');
+  if (!activeProject) { box.hidden = true; box.replaceChildren(); return; }
+  const sourceVersion = iterationReturn && iterationReturn.revisionNumber;
+  box.hidden = false;
+  box.replaceChildren(
+    el('h2', {}, `正在迭代「${activeProject.name}」`),
+    el('div', {}, `這次會${sourceVersion ? `以 V${sourceVersion} 為起點，` : ''}建立 V${Number(activeProject.latestRevision || 0) + 1}，不會建立另一個影片專案資料夾。`),
+    el('div', { class: 'hint', style: 'margin-top:4px;color:#44658f' },
+      '返回詳情不會建立新版本，這份尚未送出的表單會保留在目前瀏覽器。'),
+    el('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' },
+      iterationReturn ? el('button', { class: 'ghost', onclick: returnToRevision },
+        `← 返回 V${iterationReturn.revisionNumber} 詳情`) : '',
+      el('button', { class: 'ghost', onclick: resetProjectContext }, '改為建立新影片')));
+}
+
+function returnToRevision() {
+  if (!iterationReturn) return;
+  openJob = iterationReturn.jobId;
+  jobSig = null;
+  go('job');
+}
+
+function resetProjectContext() {
+  activeProject = null; reusedAssets = []; iterationReturn = null;
+  clearLocalSlots(); clearHeygen();
+  drawProjectContext(); drawSlots();
+}
+
+async function iterateProject(job) {
+  try {
+    if (activeProject && iterationReturn && iterationReturn.jobId !== job.id) {
+      const discard = confirm(`目前還有一份以 V${iterationReturn.revisionNumber} 為起點、尚未送出的下一版草稿。\n\n`
+        + `要放棄那份草稿，改從 V${job.revisionNumber || '—'} 建立下一版嗎？`);
+      if (!discard) return;
+    }
+    const { project, revision } = await api(`/api/projects/${job.projectId}${job.revisionId
+      ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`);
+    activeProject = project;
+    iterationReturn = { jobId: job.id, revisionNumber: job.revisionNumber || (revision && revision.number) };
+    const selectedAssetIds = new Set((revision && revision.assetRefs) || []);
+    reusedAssets = (project.assets || []).filter((asset) =>
+      ['image', 'video'].includes(asset.kind) && selectedAssetIds.has(asset.id));
+    tpl = project.template;
+    brand = project.brand || null;
+    titleVals = String((revision && revision.script && revision.script.title) || job.title || '').split('\n');
+    $('#owner').value = (revision && revision.owner) || job.owner || '';
+    $('#body').value = (revision && revision.script && revision.script.body) || '';
+    $('#voice').value = (revision && revision.script && revision.script.voice) || '';
+    clearHeygen();
+    $('#autoApprove').checked = !!(revision && revision.options && revision.options.autoApprove);
+    $('#withAd').checked = !!(revision && revision.options && revision.options.withAd);
+    clearLocalSlots();
+    drawProjectContext(); boot2(); drawSlots();
+    openJob = null; go('new');
+  } catch (error) { alert('無法開啟下一版：' + error.message); }
 }
 
 // ── 標注（HeyGen 還在跑的時候就能做）────────

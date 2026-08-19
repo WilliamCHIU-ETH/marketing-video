@@ -29,10 +29,16 @@ This repository hosts a localhost UI that creates queued video jobs and a worker
 - `scripts/`: provider-adjacent processing, OCR, transcription, alignment and maintenance tools.
 - `src/`: React/Remotion compositions.
 - `assets/`: ignored local media source pack; in the managed workspace it points to `../data/assets/`.
-- `runtime-data/`: mutable jobs and archive; ignored by Git.
+- `runtime-data/projects/`: durable Project, Revision, reusable asset manifest, and project outputs; ignored by Git.
+- `runtime-data/jobs/`: temporary Run workspace and logs; ignored by Git and eligible for retention cleanup.
+- `runtime-data/archive/`: legacy output archive for jobs created before project versioning.
 - `public/` and generated JSON under `src/`: transitional shared render workspace; treat as mutable until phase 2 refactoring.
 
 Keep code, configuration, documentation, and sanitized fixtures in this repository. Keep brand media, historical videos, job state, provider caches, archives, and runtime output outside Git. Do not move, rewrite, or delete source data while inspecting it.
+
+New user-visible video work follows `Project → Revision → Run`. Do not create a new Project merely to iterate V1 into V2. Runs may remain isolated in their own folders, but users should manage the Project and its revisions rather than runtime folders.
+
+Project Assets distinguish `image`, general B-Roll `video`, and `speaker-video`. Never infer the role from the file extension alone, and never reuse a `speaker-video` as B-Roll. The current automatic OCR／shot-planning path consumes images; storing and previewing B-Roll does not by itself prove that the clip is edited into the rendered output.
 
 ## Safe validation
 
