@@ -12,6 +12,7 @@ build/
 .remotion/
 .data/
 runtime-data/
+.run.lock
 .run.owner.json
 .cache/
 .dual-tmp/
@@ -68,5 +69,6 @@ public/outro.mp4
 *service_account*.json
 
 # Auto-backups of job files (script/heygen/image)
-backups/
-jobs/
+/backups/
+/jobs/
+public/jobs/

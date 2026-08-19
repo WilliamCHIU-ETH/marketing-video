@@ -273,7 +273,7 @@ function waitForReady(proc, timeoutMs = 10000) {
   });
 }
 
-function startTestServer() {
+function startTestServer(extraEnv = {}) {
   return spawn(process.execPath, ['server/index.js'], {
     cwd: ROOT,
     env: {
@@ -288,6 +288,7 @@ function startTestServer() {
       OPENAI_API_KEY: '',
       SMOKE_GUARD_LOG: GUARD_LOG,
       NODE_OPTIONS: `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--require=${GUARD_MODULE}`,
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -968,6 +969,48 @@ async function main() {
   assert.deepEqual(timestampState(await request(base,
     `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`)), stableTimestamps);
 
+  // 超過 retention 的 Run 仍可能握有唯一完成品：即使 manifest 有 archive 路徑，
+  // archive 檔不存在就不能刪除 fallback out/；input／thumbs 仍可正常清理。
+  const fallbackRetention = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-fallback-retention',
+      title: '未封存成品保留測試',
+      body: '成品庫缺檔時，Run fallback 必須保留。',
+      skipGenerate: true,
+    }),
+  });
+  await request(base, `/api/jobs/${fallbackRetention.job.id}/cancel`, { method: 'POST' });
+  await stopTestServer(child);
+  const fallbackJobDir = path.join(DATA_DIR, 'jobs', fallbackRetention.job.id);
+  const fallbackJobFile = path.join(fallbackJobDir, 'job.json');
+  const fallbackJobJson = JSON.parse(fs.readFileSync(fallbackJobFile, 'utf8'));
+  const missingArchive = path.join(DATA_DIR, 'archive', 'missing-output.mp4');
+  fallbackJobJson.status = 'done';
+  fallbackJobJson.finishedAt = '2001-01-01T00:00:00.000Z';
+  fallbackJobJson.outputs = [{
+    name: 'fallback.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, missingArchive),
+  }];
+  fs.writeFileSync(fallbackJobFile, JSON.stringify(fallbackJobJson, null, 2));
+  for (const sub of ['out', 'input', 'thumbs']) fs.mkdirSync(path.join(fallbackJobDir, sub), { recursive: true });
+  const fallbackOutput = path.join(fallbackJobDir, 'out', 'fallback.mp4');
+  fs.writeFileSync(fallbackOutput, MP4_FIXTURE);
+  fs.writeFileSync(path.join(fallbackJobDir, 'input', 'expired.txt'), 'expired');
+  fs.writeFileSync(path.join(fallbackJobDir, 'thumbs', 'expired.png'), PNG_FIXTURE);
+
+  child = startTestServer({ KEEP_RECENT: '0', KEEP_DAYS: '0' });
+  const pruneRestartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${pruneRestartReady.port}`;
+  await request(base, '/api/prune', { method: 'POST' });
+  assert.equal(fs.existsSync(fallbackOutput), true);
+  assert.deepEqual(fs.readFileSync(fallbackOutput), MP4_FIXTURE);
+  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'input')), false);
+  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'thumbs')), false);
+
   fs.writeFileSync(path.join(DATA_DIR, '.run.lock'), String(Date.now()));
   const unsafeUnlock = await fetch(base + '/api/unlock', { method: 'POST' });
   assert.equal(unsafeUnlock.status, 409);
@@ -995,6 +1038,7 @@ async function main() {
   console.log('✅ submit 後不可重複排隊或覆寫 input');
   console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
   console.log('✅ detached 不可取消；spawn intent 不誤收，owner token 相符才保存 Avatar 並放行');
+  console.log('✅ retention 只清 Run 暫存；archive 缺失時保留唯一 fallback 完成品');
   console.log('✅ 未知／活躍 lock 不可由 API 強制刪除');
   console.log('✅ LAN bind 未明確 opt-in 時拒絕啟動');
   console.log('✅ TEST_MODE 拒絕 repo 內路徑與 symlink 回指');

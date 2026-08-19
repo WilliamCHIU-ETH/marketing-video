@@ -234,12 +234,12 @@
     <button data-v="fix" id="navFix" hidden>修正紀錄</button>
   </nav>
   <span class="spacer"></span>
-  <span class="pill" id="disk" hidden title="點一下清掉保留期外的舊影片"></span>
+  <span class="pill" id="disk" hidden title="點一下清理可移除的 Run 暫存檔"></span>
   <span class="pill" id="status">連線中…</span>
 </header>
 
 <main>
-  <!-- ── 建立工作 ── -->
+  <!-- ── 建立影片 ── -->
   <section id="v-new">
     <div class="card project-context" id="projectContext" hidden></div>
     <div class="card">
@@ -472,17 +472,18 @@ function go(v) {
   if (v === 'job') loadJob();
 }
 
-// 強制解鎖（只有管理者點得動）
+// 安全清除已失效的 lock（只有管理者點得動）
 $('#status').onclick = async () => {
   if (!ADMIN || !$('#status').textContent.includes('佔用')) return;
-  if (!confirm('強制刪掉 .run.lock？\n\n只有在確定沒有任何 run.js 在跑的時候才做，'
-    + '否則兩個流程會同時寫 public/，兩支影片都會壞掉。')) return;
+  if (!confirm('檢查並清除已失效的 .run.lock？\n\n系統只會移除能證明 owner PID 已停止的 lock；'
+    + '仍在執行或來源不明時會拒絕，不會強制解鎖。')) return;
   await api('/api/unlock', { method: 'POST' });
   poll();
 };
 
 $('#disk').onclick = async () => {
-  if (!confirm('清掉保留期外的舊影片與素材？（工作紀錄與執行記錄會留著）')) return;
+  if (!confirm('清理可移除的 Run 暫存檔？\n\n會移除不再需要的快照，以及保留期外的 Run 上傳副本與縮圖；'
+    + '影片專案、版本、專案素材、已封存成品、未封存成品保險副本與執行記錄都會保留。')) return;
   const r = await api('/api/prune', { method: 'POST' });
   alert(r.freedMB ? `清出 ${r.freedMB} MB` : '沒有可以清的東西，目前都在保留期內');
   poll();
@@ -718,8 +719,8 @@ async function poll() {
     if (h.admin && h.diskMB != null) {
       $('#disk').hidden = false;
       $('#disk').textContent = `💾 ${h.diskMB} MB`;
-      $('#disk').title = `工作資料夾佔用。自動保留最近 ${h.keep.recent} 支或 ${h.keep.days} 天內，`
-        + '更舊的只留紀錄不留影片。點一下立刻清理。';
+      $('#disk').title = `Run 工作區佔用。暫存檔保留最近 ${h.keep.recent} 支或 ${h.keep.days} 天內；`
+        + 'Project 素材、已封存成品與未封存 fallback 不會清除。點一下檢查並清理。';
     } else $('#disk').hidden = true;
     // ⚠️ 順序：busy 要先判斷。run.js 一跑就會建立 .run.lock，
     // 先看 locked 的話「每支影片跑的時候」都會顯示「被鎖住」，正常狀況長得像出事
@@ -729,7 +730,7 @@ async function poll() {
       s.className = 'pill bad';
       s.textContent = `⚠️ 工作區被佔用${h.lockAgeMin != null ? '（' + h.lockAgeMin + ' 分鐘）' : ''}`;
       s.title = '有其他流程在用工作區（可能是終端機在跑 run.js，或上次沒清乾淨）。'
-        + '新工作會排隊等，不會失敗。點一下可以強制解鎖。';
+        + '新工作會排隊等，不會失敗。點一下可檢查是否能安全清除失效鎖。';
       s.style.cursor = ADMIN ? 'pointer' : 'default';
     } else { s.className = 'pill'; s.textContent = '○ 閒置'; s.title = ''; s.style.cursor = 'default'; }
   } catch (_) {
@@ -756,7 +757,7 @@ $('#submit').onclick = async () => {
   btn.disabled = true;
   let draftJob = null;
   try {
-    btn.textContent = '建立工作…';
+    btn.textContent = activeProject ? '建立下一版…' : '建立影片…';
     const { job } = await api('/api/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -959,16 +960,12 @@ async function loadJob() {
   }
 
   if (job.status === 'detached' || job.status === 'detached-done') {
+    const detachedMessage = job.status === 'detached'
+      ? '伺服器重啟後，背景流程仍可能執行。先不要重送或啟動下一支，避免重複呼叫付費服務或覆寫共用 out/；完成後再確認本版素材與成品。'
+      : '背景流程已結束。可驗證的 Avatar 會保存到原影片專案；但重啟後完成的 render 目前不會自動收割回專案。請先確認「本版素材」與共用 out/，再決定是否建立下一版。';
     parts.push(el('div', { class: 'card' },
       el('h2', {}, job.status === 'detached' ? '這支正在背景跑' : '這支已經在背景跑完'),
-      el('div', { class: 'note' },
-        (job.status === 'detached'
-          ? '伺服器在它跑到一半時重開過。它沒有被殺掉，會自己跑完 —— <b>HeyGen 點數不會浪費</b>。<br><br>'
-          : '它已經跑完了，但伺服器當時已經重開，所以沒有接回前台流程。<br><br>')
-        + '<b>怎麼零成本接回：</b><br>'
-        + '講者影片留在專案的 <code>public/heygen.mp4</code>。<br>'
-        + '重新建立一次工作 → 在「<b>講者 Avatar</b>」欄位選那支 mp4。<br>'
-        + '這樣不會再呼叫 HeyGen，一毛錢都不用花。')));
+      el('div', { class: 'note' }, detachedMessage)));
   }
 
   // HeyGen 生成／準備中的時候就可以先標注 —— 不用乾等

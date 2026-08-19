@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1280 640" role="img" aria-labelledby="marketing-video-current-workflow-title marketing-video-current-workflow-desc" xmlns="http://www.w3.org/2000/svg">
         <title id="marketing-video-current-workflow-title">Marketing Video 現行製作流程</title>
-        <desc id="marketing-video-current-workflow-desc">雙泳道流程圖，呈現人員遞交腳本與補充素材，系統加入固定品牌素材、建立工作、呼叫 HeyGen 與 OCR、產生素材配置，交由人員確認，再由 Remotion 合成輸出。</desc>
+        <desc id="marketing-video-current-workflow-desc">雙泳道流程圖，呈現人員遞交腳本與補充素材，系統加入固定品牌素材、建立 Project、Revision 與隔離 Run，呼叫 HeyGen、ASR 與 OCR、產生素材配置，交由人員確認，再由 Remotion 合成輸出。</desc>
         <defs>
           <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
           <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -69,17 +69,17 @@
 
         <rect x="352" y="304" width="160" height="96" rx="8" fill="#f5f5f5"/>
         <rect x="352" y="304" width="160" height="96" rx="8" fill="#ffffff" stroke="#2d3142"/>
-        <rect x="364" y="316" width="40" height="16" rx="4" fill="rgba(45,49,66,0.05)" stroke="rgba(45,49,66,0.28)"/>
-        <text x="384" y="328" fill="#4f5d75" font-family="'Geist Mono',monospace" font-size="8" text-anchor="middle">JOB</text>
-        <text x="432" y="356" fill="#2d3142" font-family="'Geist','PingFang TC',sans-serif" font-size="16" font-weight="600" text-anchor="middle">建立製作工作</text>
-        <text x="432" y="380" fill="#4f5d75" font-family="'Geist','PingFang TC',sans-serif" font-size="12" text-anchor="middle">script.txt ＋ 全部素材</text>
+        <rect x="364" y="316" width="64" height="16" rx="4" fill="rgba(45,49,66,0.05)" stroke="rgba(45,49,66,0.28)"/>
+        <text x="396" y="328" fill="#4f5d75" font-family="'Geist Mono',monospace" font-size="8" text-anchor="middle">PROJECT</text>
+        <text x="432" y="356" fill="#2d3142" font-family="'Geist','PingFang TC',sans-serif" font-size="16" font-weight="600" text-anchor="middle">建立影片專案</text>
+        <text x="432" y="380" fill="#4f5d75" font-family="'Geist','PingFang TC',sans-serif" font-size="12" text-anchor="middle">Revision ＋ 隔離 Run</text>
 
         <rect x="544" y="304" width="160" height="96" rx="8" fill="#f5f5f5"/>
         <rect x="544" y="304" width="160" height="96" rx="8" fill="#ffffff" stroke="#2d3142"/>
         <rect x="556" y="316" width="56" height="16" rx="4" fill="rgba(45,49,66,0.05)" stroke="rgba(45,49,66,0.28)"/>
         <text x="584" y="328" fill="#4f5d75" font-family="'Geist Mono',monospace" font-size="8" text-anchor="middle">PROCESS</text>
-        <text x="624" y="356" fill="#2d3142" font-family="'Geist','PingFang TC',sans-serif" font-size="16" font-weight="600" text-anchor="middle">HeyGen ＋ OCR</text>
-        <text x="624" y="380" fill="#4f5d75" font-family="'Geist','PingFang TC',sans-serif" font-size="12" text-anchor="middle">主播影片與素材辨識</text>
+        <text x="624" y="356" fill="#2d3142" font-family="'Geist','PingFang TC',sans-serif" font-size="15" font-weight="600" text-anchor="middle">HeyGen・ASR・OCR</text>
+        <text x="624" y="380" fill="#4f5d75" font-family="'Geist','PingFang TC',sans-serif" font-size="12" text-anchor="middle">主播、語音與素材辨識</text>
 
         <rect x="736" y="304" width="160" height="96" rx="8" fill="#f5f5f5"/>
         <rect x="736" y="304" width="160" height="96" rx="8" fill="#ffffff" stroke="#2d3142"/>

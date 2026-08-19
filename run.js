@@ -435,12 +435,12 @@ const HEYGEN_EXPRESSIVENESS = "medium";
 //   ③ 官方明講 <break time="0.3s"/> 標籤適用於 POST /v3/videos 的 script 欄位（唯一支援的標籤，
 //      不要包 <speak>，會多唸出音節）。這是修「中文分詞斷錯句」的正解。
 //      ⚠️ 但 scripts/script-utils.js 的 cleanBodyWithIndex 目前沒遮罩 <break>，
-//         現在直接在 script.txt 寫標籤會漏進字幕。要用得先做天條 #5 的三處同步。
+//         現在直接在 script.txt 寫標籤會漏進字幕。要用得先同步 TTS、字幕清理與索引對齊，並補測試。
 //   ④ brand_glossary_id 可以指定專有名詞唸法，且官方保證「只影響合成音訊，字幕仍顯示原文」——
 //      比現在的「發音替換」乾淨。要用先 GET /v3/brand-glossaries 拿 id 填進來。
 // 出事時加 --heygen-v2 一鍵退回舊的 /v2/videos 路徑。
 // ⚠️ 投廣模板與雙人 path 走的是「MiniMax 配音 + audio_asset_id 音訊驅動」，
-//    那條路徑完全沒動，仍然是 /v2/videos（天條：既有投廣模板 100% 不變）。
+//    那條路徑完全沒動，仍然是 /v2/videos（既有投廣模板必須保持不變）。
 const HEYGEN_V2_FALLBACK = process.argv.includes("--heygen-v2");
 
 // voice_settings（只有 v3 吃）。null = 不送該欄位，用 HeyGen 預設。

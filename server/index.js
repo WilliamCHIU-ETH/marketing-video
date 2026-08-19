@@ -1860,6 +1860,19 @@ const server = http.createServer(async (req, res) => {
 function pruneOldJobs() {
   const cutoff = Date.now() - KEEP_DAYS * 86400000;
   let freed = 0;
+  const hasVerifiedArchive = (output) => {
+    if (!output || !output.archive) return false;
+    const file = path.resolve(ROOT, output.archive);
+    if (!isWithin(path.resolve(ARCHIVE_DIR), file) && !isWithin(PROJECT_STORE.projectsDir, file))
+      return false;
+    try {
+      const stat = fs.statSync(file);
+      return stat.isFile() && stat.size > 0
+        && (!Number.isFinite(output.size) || stat.size === output.size);
+    } catch (_) {
+      return false;
+    }
+  };
   JOBS.forEach((j, idx) => {
     // 快照只有「等人確認」時才有用，其餘狀態一律清掉（一支約 40~60MB）
     if (!['review', 'approved', 'preparing', 'detached'].includes(j.status)) {
@@ -1870,13 +1883,18 @@ function pruneOldJobs() {
     const t = Date.parse(j.finishedAt || j.createdAt) || 0;
     if (idx < KEEP_RECENT || t > cutoff) return;   // 還在保留期內
     if (['queued', 'preparing', 'review', 'approved', 'rendering', 'detached'].includes(j.status)) return;
-    for (const sub of ['out', 'input', 'thumbs']) {
+    for (const sub of ['input', 'thumbs']) {
       const d = path.join(jobDir(j.id), sub);
       freed += dirSize(d);
       rmrf(d);
     }
-    // 成品在成品庫、不歸這裡管，所以只有「退回工作區的保險副本」才會被清掉
-    if (!j.pruned) { j.pruned = !(j.outputs || []).some((o) => o.archive); saveJob(j); }
+    // 只有每一份輸出都能在成品庫驗證時，才可刪除 Run out/。封存失敗或 archive
+    // 遺失時，out/ 可能是唯一完成品，不能只因超過 retention 就清掉。
+    if ((j.outputs || []).length > 0 && j.outputs.every(hasVerifiedArchive)) {
+      const d = path.join(jobDir(j.id), 'out');
+      freed += dirSize(d);
+      rmrf(d);
+    }
   });
   return freed;
 }

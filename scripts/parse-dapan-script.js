@@ -4,7 +4,7 @@
  * 產生 src/DapanXiaobao/dapan-shots.generated.json，並把當天日期（MMDD）寫進
  * src/video-meta.json 的 headerDate 欄位。
  *
- * 跟現有 scripts/parse-script.js 是平行的兩支腳本，互不共用輸出檔（天條 #4 精神延伸）：
+ * 跟現有 scripts/parse-script.js 是平行的兩支腳本，互不共用輸出檔，避免版型資料互相覆蓋：
  *   - parse-script.js        → src/overlays.generated.json / src/textcards.generated.json（現有模板用）
  *   - parse-dapan-script.js  → src/DapanXiaobao/dapan-shots.generated.json（大盤小報專用）
  * 兩者都會讀寫 src/video-meta.json，但只碰自己的欄位（titleText vs headerDate），互不覆蓋。

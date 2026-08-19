@@ -8,7 +8,7 @@
 //
 //  註：bgm.wav 設成「選配」——使用者可能還沒放 BGM，缺 bgm 只警告不中止，
 //      讓你先把 intro-frame / header-overlay 複製過去、先預覽版面（BGM 補上後再跑一次即可）。
-//  註：複製一律走 fs.copyFileSync（不要用 fs.cpSync，見 docs/tasks.md 第 5 節雷區）。
+//  註：複製一律走 fs.copyFileSync；fs.cpSync 覆蓋掛載碟檔案時可能留下 0 byte 壞檔。
 //  註：覆蓋既有 public/focusstock-* 若遇 EACCES，先 rm -f public/focusstock-* 再重跑。
 // ─────────────────────────────────────────
 

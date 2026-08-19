@@ -35,7 +35,7 @@ export const RemotionRoot: React.FC = () => {
         width={VIDEO_WIDTH}
         height={VIDEO_HEIGHT}
       />
-      {/* 大盤小報：獨立 composition，跟 MarketingVideo 互不影響（詳見 docs/tasks.md 第 3 節） */}
+      {/* 大盤小報：獨立 composition，跟 MarketingVideo 互不影響。 */}
       <Composition
         id="DapanXiaobao"
         component={DapanComposition}
@@ -45,7 +45,7 @@ export const RemotionRoot: React.FC = () => {
         height={VIDEO_HEIGHT}
       />
       {/* 大盤小報「橫式版型」：16:9（1920×1080），與直式共用 heygen/字幕/腳本、版面不同
-          （無開場卡、講者左移、日期＋標題常駐右側面板）。詳見 docs/tasks.md 第 3 節。 */}
+          （無開場卡、講者左移、日期＋標題常駐右側面板）。 */}
       <Composition
         id="DapanXiaobaoLandscape"
         component={DapanLandscapeComposition}

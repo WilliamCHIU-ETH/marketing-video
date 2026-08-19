@@ -11,7 +11,7 @@ Use the current checkout as implementation truth. Read these documents for the d
 3. `docs/operator-runbook.md`: supported local commands and operating procedure.
 4. `docs/engineering-scan.md`: addressed risks and remaining backlog.
 
-`docs/tasks.md` and historical artifacts are context only, not current architecture or product truth.
+Historical artifacts are context only, not current architecture or product truth.
 
 ## Product boundary
 

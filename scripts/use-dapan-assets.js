@@ -10,7 +10,7 @@
 //  用法：node scripts/use-dapan-assets.js
 //
 //  註：複製一律走 fs.copyFileSync。不要改用 fs.cpSync —— 它覆蓋掛載碟上
-//  既有檔案時會先 truncate、再因 EACCES 失敗，留下 0 byte 壞檔（見 docs/tasks.md 第 5 節雷區）。
+//  既有檔案時會先 truncate、再因 EACCES 失敗，留下 0 byte 壞檔。
 // ─────────────────────────────────────────
 
 const fs = require("fs");
