@@ -263,9 +263,11 @@ function jobFile(id) { return path.join(jobDir(id), 'job.json'); }
 
 function loadJobs() {
   const out = [];
+  const recovered = [];
   for (const id of fs.readdirSync(JOBS_DIR)) {
     try {
       const j = JSON.parse(fs.readFileSync(jobFile(id), 'utf-8'));
+      let recoveryChanged = false;
       // 伺服器上次是在跑到一半被關掉的。
       // run.js 是 detached 的，所以它很可能還活著 —— 那就不是「中斷」，
       // 是「在背景繼續跑」。標成失敗會讓人以為 HeyGen 點數白花了（其實沒有）。
@@ -277,15 +279,22 @@ function loadJobs() {
           j.status = 'failed';
           j.error = '伺服器重新啟動，這支工作中斷了。請重新建立。';
         }
+        recoveryChanged = true;
       }
       out.push(j);
+      if (recoveryChanged) recovered.push(j);
     } catch (_) {}
   }
-  return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return {
+    jobs: out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
+    recovered,
+  };
 }
 
-let JOBS = loadJobs();
-JOBS.forEach(saveJob);
+const startupJobs = loadJobs();
+let JOBS = startupJobs.jobs;
+// 一般 restart 只是 replay，不是 Project 更新；只有 recovery 真改變狀態才同步回 Revision。
+startupJobs.recovered.forEach(saveJob);
 
 function saveJob(j) {
   ensureDir(jobDir(j.id));
@@ -982,20 +991,33 @@ function receiveFile(req, dest, limit, validate) {
       reject(error);
       return;
     }
-    const ws = fs.createWriteStream(temp, { fd, autoClose: true });
+    let ws;
+    try {
+      ws = fs.createWriteStream(temp, { fd, autoClose: true });
+    } catch (error) {
+      try { fs.closeSync(fd); } catch (_) {}
+      try { fs.unlinkSync(temp); } catch (_) {}
+      reject(error);
+      return;
+    }
     let size = 0;
     let settled = false;
-    let failed = false;
+    let failure = null;
     const cleanup = () => { try { fs.unlinkSync(temp); } catch (_) {} };
-    const fail = (error) => {
-      if (settled) return;
+    const rejectAfterClose = () => {
+      if (!failure || settled) return;
+      // unlinkSync 回來後才 reject；HTTP catch 因此不會在暫存檔仍開啟／存在時先回應。
+      cleanup();
       settled = true;
-      failed = true;
+      reject(failure);
+    };
+    const fail = (error) => {
+      if (settled || failure) return;
+      failure = error;
       req.unpipe(ws);
       req.resume();
-      ws.destroy();
-      if (ws.closed) cleanup();
-      reject(error);
+      if (ws.closed) rejectAfterClose();
+      else ws.destroy();
     };
     req.on('data', (chunk) => {
       size += chunk.length;
@@ -1006,10 +1028,21 @@ function receiveFile(req, dest, limit, validate) {
       }
     });
     req.on('error', fail);
+    req.on('aborted', () => {
+      const error = new Error('上傳連線中斷');
+      error.statusCode = 400;
+      fail(error);
+    });
     ws.on('error', fail);
-    ws.on('close', () => { if (failed) cleanup(); });
+    ws.on('close', () => {
+      if (!settled && !failure) {
+        failure = new Error('上傳寫入意外中斷');
+        failure.statusCode = 500;
+      }
+      rejectAfterClose();
+    });
     ws.on('finish', () => {
-      if (settled) return;
+      if (settled || failure) return;
       try {
         const validation = validate ? validate(temp) : null;
         fs.renameSync(temp, dest);
@@ -1019,7 +1052,7 @@ function receiveFile(req, dest, limit, validate) {
         fail(error);
       }
     });
-    req.pipe(ws);
+    try { req.pipe(ws); } catch (error) { fail(error); }
   });
 }
 

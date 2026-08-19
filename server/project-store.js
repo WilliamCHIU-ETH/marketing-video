@@ -1,8 +1,10 @@
 'use strict';
 
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const ensureDir = (dir) => fs.mkdirSync(dir, { recursive: true });
 
@@ -24,6 +26,10 @@ const ISO_VIDEO_BRANDS = new Set([
   'M4V ', 'M4VH', 'M4VP', 'qt  ', '3gp4', '3gp5', '3g2a', 'dash', 'cmfc', 'cmfs',
 ]);
 const MAX_CONTAINER_ELEMENTS = 50_000;
+const MAX_PNG_COMPRESSED_BYTES = 64 * 1024 * 1024;
+const MAX_PNG_DECODED_BYTES = 128 * 1024 * 1024;
+const MAX_PNG_PIXELS = 100_000_000;
+const MAX_PNG_SCANLINES = 100_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const PNG_CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -106,12 +112,88 @@ function readPngHeader(fd, dataStart) {
       || data[10] !== 0 || data[11] !== 0 || ![0, 1].includes(data[12])) {
     throw invalidContainer();
   }
-  return { bitDepth, colorType };
+  return { width, height, bitDepth, colorType, interlace: data[12] };
+}
+
+function pngImageLayout(header) {
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[header.colorType];
+  const bitsPerPixel = BigInt(channels * header.bitDepth);
+  const pixelCount = BigInt(header.width) * BigInt(header.height);
+  if (pixelCount > BigInt(MAX_PNG_PIXELS)) throw invalidContainer();
+  const passSpecs = header.interlace === 0
+    ? [[0, 0, 1, 1]]
+    : [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+      [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]];
+  const passes = [];
+  let totalBytes = 0n;
+  let totalScanlines = 0n;
+  for (const [xStart, yStart, xStep, yStep] of passSpecs) {
+    const width = header.width <= xStart ? 0 : Math.ceil((header.width - xStart) / xStep);
+    const height = header.height <= yStart ? 0 : Math.ceil((header.height - yStart) / yStep);
+    if (!width || !height) continue;
+    const rowBytes = (BigInt(width) * bitsPerPixel + 7n) / 8n;
+    totalBytes += BigInt(height) * (rowBytes + 1n);
+    totalScanlines += BigInt(height);
+    if (totalBytes > BigInt(MAX_PNG_DECODED_BYTES)
+        || totalScanlines > BigInt(MAX_PNG_SCANLINES)) throw invalidContainer();
+    passes.push({ height, rowBytes: Number(rowBytes) });
+  }
+  if (!passes.length || totalBytes < 1n) throw invalidContainer();
+  return { passes, totalBytes: Number(totalBytes) };
+}
+
+function readPngImageData(fd, ranges, totalLength) {
+  if (totalLength < 1 || totalLength > MAX_PNG_COMPRESSED_BYTES) throw invalidContainer();
+  const compressed = Buffer.allocUnsafe(totalLength);
+  let outputOffset = 0;
+  for (const range of ranges) {
+    let position = range.start;
+    let remaining = range.length;
+    while (remaining > 0) {
+      const read = fs.readSync(fd, compressed, outputOffset, remaining, position);
+      if (!read) throw invalidContainer();
+      outputOffset += read;
+      position += read;
+      remaining -= read;
+    }
+  }
+  if (outputOffset !== totalLength) throw invalidContainer();
+  return compressed;
+}
+
+function validatePngImageData(fd, header, ranges, totalLength) {
+  const layout = pngImageLayout(header);
+  const compressed = readPngImageData(fd, ranges, totalLength);
+  let decoded;
+  let consumed;
+  try {
+    const result = zlib.inflateSync(compressed, {
+      info: true,
+      maxOutputLength: layout.totalBytes,
+    });
+    decoded = result.buffer;
+    consumed = result.engine.bytesWritten;
+  } catch (_) {
+    throw invalidContainer();
+  }
+  // Node's inflater otherwise accepts garbage after the first zlib stream. PNG IDAT may contain
+  // exactly one complete stream, and its decoded byte count is fixed by IHDR/Adam7 geometry.
+  if (consumed !== compressed.length || decoded.length !== layout.totalBytes)
+    throw invalidContainer();
+  let offset = 0;
+  for (const pass of layout.passes) {
+    for (let row = 0; row < pass.height; row += 1) {
+      if (decoded[offset] > 4) throw invalidContainer();
+      offset += pass.rowBytes + 1;
+    }
+  }
+  if (offset !== decoded.length) throw invalidContainer();
 }
 
 /**
- * Validate the PNG container without decoding pixels. CRC is checked for every chunk so a
- * signature plus a forged/truncated IHDR cannot be accepted as a reusable Project asset.
+ * Validate the PNG container and its compressed scanline stream without reconstructing pixels.
+ * CRC is checked for every chunk, while bounded inflate verifies the exact IHDR/Adam7 layout and
+ * legal row filters so a syntactically plausible but undecodable image cannot become reusable.
  */
 function inspectPng(fd, fileSize) {
   const budget = { count: 0 };
@@ -121,6 +203,7 @@ function inspectPng(fd, fileSize) {
   let seenImageData = false;
   let imageDataClosed = false;
   let imageDataBytes = 0;
+  const imageDataRanges = [];
   try {
     if (fileSize < PNG_SIGNATURE.length + 12
         || !readExactly(fd, 0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return null;
@@ -155,12 +238,15 @@ function inspectPng(fd, fileSize) {
         if (!header || imageDataClosed || (header.colorType === 3 && !seenPalette))
           throw invalidContainer();
         seenImageData = true;
+        if (length > MAX_PNG_COMPRESSED_BYTES - imageDataBytes) throw invalidContainer();
         imageDataBytes += length;
+        imageDataRanges.push({ start: dataStart, length });
       } else if (type === 'IEND') {
         if (!header || length !== 0 || !seenImageData || imageDataBytes < 1
             || (header.colorType === 3 && !seenPalette) || chunkEnd !== fileSize) {
           throw invalidContainer();
         }
+        validatePngImageData(fd, header, imageDataRanges, imageDataBytes);
         return { kind: 'image', mediaType: 'image/png', extension: '.png' };
       } else if (!(typeBytes[0] & 0x20)) {
         // A decoder cannot safely ignore an unknown critical chunk.
@@ -404,24 +490,6 @@ function someIsoBoxes(fd, start, end, fileEnd, budget, visitor) {
   return false;
 }
 
-function isoMdiaHasVideo(fd, box, fileEnd, budget) {
-  return someIsoBoxes(fd, box.dataStart, box.end, fileEnd, budget, (child) => {
-    if (child.type !== 'hdlr') return false;
-    if (child.end - child.dataStart < 12) throw invalidContainer();
-    return readExactly(fd, child.dataStart + 8, 4).toString('latin1') === 'vide';
-  });
-}
-
-function isoTrakHasVideo(fd, box, fileEnd, budget) {
-  return someIsoBoxes(fd, box.dataStart, box.end, fileEnd, budget, (child) =>
-    child.type === 'mdia' && isoMdiaHasVideo(fd, child, fileEnd, budget));
-}
-
-function isoMoovHasVideo(fd, box, fileEnd, budget) {
-  return someIsoBoxes(fd, box.dataStart, box.end, fileEnd, budget, (child) =>
-    child.type === 'trak' && isoTrakHasVideo(fd, child, fileEnd, budget));
-}
-
 function readIsoBrands(fd, box) {
   const payloadSize = box.end - box.dataStart;
   if (payloadSize < 8 || payloadSize > 64 * 1024 || (payloadSize - 8) % 4 !== 0)
@@ -436,18 +504,27 @@ function readIsoBrands(fd, box) {
 function inspectIsoBmff(fd, fileSize) {
   const budget = { count: 0 };
   let brands = null;
-  let hasVideoTrack = false;
+  let hasMovie = false;
+  let hasMediaData = false;
   try {
     someIsoBoxes(fd, 0, fileSize, fileSize, budget, (box) => {
-      if (box.type === 'ftyp') brands = readIsoBrands(fd, box);
-      else if (box.type === 'moov') hasVideoTrack = isoMoovHasVideo(fd, box, fileSize, budget);
-      return !!brands && hasVideoTrack;
+      if (box.type === 'ftyp') {
+        if (brands) throw invalidContainer();
+        brands = readIsoBrands(fd, box);
+      } else if (box.type === 'moov') {
+        if (hasMovie) throw invalidContainer();
+        hasMovie = true;
+      } else if (box.type === 'mdat' && box.end > box.dataStart) {
+        hasMediaData = true;
+      }
+      // Scan the complete top-level scope; accepting early would hide malformed trailing boxes.
+      return false;
     });
   } catch (error) {
     if (error.code === 'INVALID_MEDIA_CONTAINER') return null;
     throw error;
   }
-  if (!brands || !hasVideoTrack || ISO_IMAGE_BRANDS.has(brands[0])
+  if (!brands || !hasMovie || !hasMediaData || ISO_IMAGE_BRANDS.has(brands[0])
       || !brands.some((brand) => ISO_VIDEO_BRANDS.has(brand))) return null;
   const mediaType = brands.includes('qt  ') ? 'video/quicktime' : 'video/mp4';
   return { kind: 'video', mediaType, extension: extensionForMediaType(mediaType) };
@@ -576,11 +653,44 @@ function inspectWebm(fd, fileSize) {
   return null;
 }
 
+function probePlayableVideo(file) {
+  try {
+    const output = execFileSync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-read_intervals', '%+3',
+      '-count_frames',
+      '-show_entries', 'stream=codec_type,width,height,nb_read_frames',
+      '-of', 'json',
+      path.resolve(file),
+    ], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 256 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const parsed = JSON.parse(output);
+    const stream = Array.isArray(parsed.streams) ? parsed.streams[0] : null;
+    const width = Number(stream && stream.width);
+    const height = Number(stream && stream.height);
+    const frames = Number(stream && stream.nb_read_frames);
+    return !!stream && stream.codec_type === 'video'
+      && Number.isInteger(width) && width > 0
+      && Number.isInteger(height) && height > 0
+      && Number.isInteger(frames) && frames > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
 function inspectMediaFile(file) {
   const fd = fs.openSync(file, 'r');
   const head = Buffer.alloc(64 * 1024);
   let headSize;
   let fileSize;
+  let videoCandidate;
   try {
     fileSize = fs.fstatSync(fd).size;
     headSize = fs.readSync(fd, head, 0, head.length, 0);
@@ -590,10 +700,11 @@ function inspectMediaFile(file) {
       return inspectPng(fd, fileSize);
     if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8)
       return inspectJpeg(fd, fileSize);
-    return inspectIsoBmff(fd, fileSize) || inspectWebm(fd, fileSize);
+    videoCandidate = inspectIsoBmff(fd, fileSize) || inspectWebm(fd, fileSize);
   } finally {
     fs.closeSync(fd);
   }
+  return videoCandidate && probePlayableVideo(file) ? videoCandidate : null;
 }
 
 function safeOriginalName(value, fallback) {

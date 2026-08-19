@@ -6,6 +6,7 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn, spawnSync } = require('child_process');
 const { capturePaidSpeakerAfterFailure } = require('../server/project-assets');
 const { createProjectStore, inspectMediaFile } = require('../server/project-store');
@@ -61,6 +62,17 @@ const OUT_OF_BOUNDS_PNG_FIXTURE = Buffer.from(PNG_FIXTURE);
 const idatTypeOffset = OUT_OF_BOUNDS_PNG_FIXTURE.indexOf(Buffer.from('IDAT', 'ascii'));
 assert.ok(idatTypeOffset > 4);
 OUT_OF_BOUNDS_PNG_FIXTURE.writeUInt32BE(0x7fffffff, idatTypeOffset - 4);
+function pngWithSingleIdat(data) {
+  return Buffer.concat([
+    PNG_FIXTURE.subarray(0, idatTypeOffset - 4),
+    pngChunk('IDAT', data),
+    PNG_FIXTURE.subarray(-12),
+  ]);
+}
+const NON_INFLATABLE_PNG_FIXTURE = pngWithSingleIdat(Buffer.from('not-zlib'));
+// 1x1 grayscale+alpha needs filter byte + two pixel bytes; filter method 5 is invalid.
+const INVALID_FILTER_PNG_FIXTURE = pngWithSingleIdat(
+  zlib.deflateSync(Buffer.from([5, 0, 0])));
 
 const JPEG_FIXTURE = Buffer.from(
   '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsj'
@@ -91,6 +103,12 @@ ZERO_WIDTH_JPEG_FIXTURE.writeUInt16BE(0, sofTypeOffset + 7);
 
 const MP4_FIXTURE = Buffer.from(
   'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMVbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAj90cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAG3bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABYm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASJzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAABYoAAAAAAAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAANFAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4xMi4xMDIAAAAIZnJlZQAAAs1tZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAQZYiEABX//vfJ78Cm69vfgQ==',
+  'base64');
+const FRAGMENTED_MP4_FIXTURE = Buffer.from(
+  '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',
+  'base64');
+const FAKE_AVC1_MP4_FIXTURE = Buffer.from(
+  'AAAAGGZ0eXBpc29tAAAAAGlzb21hdmMxAAABCm1vb3YAAAECdHJhawAAAPptZGlhAAAAIGhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAAAAAADSbWluZgAAAMpzdGJsAAAAZnN0c2QAAAAAAAAAAQAAAFZhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGHN0dHMAAAAAAAAAAQAAAAEAAAABAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAABAAAAAQAAABRzdHN6AAAAAAAAAAEAAAABAAAAFHN0Y28AAAAAAAAAAQAAASoAAAAJbWRhdAA=',
   'base64');
 const AVIF_DISGUISED_AS_MP4 = Buffer.from(MP4_FIXTURE);
 AVIF_DISGUISED_AS_MP4.write('avif', 8, 'latin1');
@@ -126,6 +144,32 @@ function freeBox(size, marker = '') {
   return box;
 }
 
+function isoBox(type, payload = Buffer.alloc(0)) {
+  assert.equal(Buffer.byteLength(type, 'latin1'), 4);
+  const box = Buffer.alloc(8 + payload.length);
+  box.writeUInt32BE(box.length, 0);
+  box.write(type, 4, 'latin1');
+  payload.copy(box, 8);
+  return box;
+}
+
+const fixtureTopLevelBoxes = topLevelBoxes(MP4_FIXTURE);
+const FIXTURE_FTYP = fixtureTopLevelBoxes.find((box) => box.type === 'ftyp').bytes;
+const FIXTURE_MOOV = fixtureTopLevelBoxes.find((box) => box.type === 'moov').bytes;
+const videoHandlerPayload = Buffer.alloc(12);
+videoHandlerPayload.write('vide', 8, 'latin1');
+const VIDEO_HANDLER_ONLY_MP4_FIXTURE = Buffer.concat([
+  FIXTURE_FTYP,
+  isoBox('moov', isoBox('trak', isoBox('mdia', isoBox('hdlr', videoHandlerPayload)))),
+]);
+const MP4_WITHOUT_MDAT_FIXTURE = Buffer.concat([FIXTURE_FTYP, FIXTURE_MOOV]);
+const MOV_FIXTURE = Buffer.from(MP4_FIXTURE);
+MOV_FIXTURE.write('qt  ', 8, 'latin1');
+const OUTSIDE_MDAT_MP4_FIXTURE = Buffer.from(MP4_FIXTURE);
+const outsideMdatStco = OUTSIDE_MDAT_MP4_FIXTURE.indexOf(Buffer.from('stco', 'latin1'));
+assert.ok(outsideMdatStco >= 4);
+OUTSIDE_MDAT_MP4_FIXTURE.writeUInt32BE(0, outsideMdatStco + 12);
+
 function lateMoovMp4Fixture() {
   const boxes = topLevelBoxes(MP4_FIXTURE);
   const ftyp = boxes.find((box) => box.type === 'ftyp').bytes;
@@ -151,8 +195,10 @@ const childProcess = require('child_process');
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const path = require('path');
 const tls = require('tls');
 const log = process.env.SMOKE_GUARD_LOG;
+const originalExecFileSync = childProcess.execFileSync;
 function blocked(kind) {
   return function () {
     fs.appendFileSync(log, kind + '\\n');
@@ -162,6 +208,19 @@ function blocked(kind) {
 for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
   childProcess[name] = blocked('child_process.' + name);
 }
+const blockedExecFileSync = childProcess.execFileSync;
+childProcess.execFileSync = function (file, args, options) {
+  const input = Array.isArray(args) ? args[args.length - 1] : null;
+  let localProbe = false;
+  try {
+    const dataRoot = fs.realpathSync(process.env.DATA_DIR);
+    const target = fs.realpathSync(input);
+    localProbe = target.startsWith(dataRoot + path.sep);
+  } catch (_) {}
+  if (file === 'ffprobe' && Array.isArray(args) && args.includes('-count_frames') && localProbe)
+    return originalExecFileSync(file, args, options);
+  return blockedExecFileSync();
+};
 http.request = blocked('http.request');
 http.get = blocked('http.get');
 https.request = blocked('https.request');
@@ -214,6 +273,33 @@ function waitForReady(proc, timeoutMs = 10000) {
   });
 }
 
+function startTestServer() {
+  return spawn(process.execPath, ['server/index.js'], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: '0',
+      TEST_MODE: '1',
+      DATA_DIR,
+      HEYGEN_API_KEY: '',
+      MINIMAX_API_KEY: '',
+      MINIMAX_GROUP_ID: '',
+      OPENAI_API_KEY: '',
+      SMOKE_GUARD_LOG: GUARD_LOG,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--require=${GUARD_MODULE}`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+async function stopTestServer(proc) {
+  if (!proc || proc.exitCode !== null) return;
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  proc.kill('SIGTERM');
+  await exited;
+}
+
 async function request(base, pathname, options) {
   const res = await fetch(base + pathname, options);
   const text = await res.text();
@@ -234,13 +320,22 @@ async function main() {
     ['trailing-data.png', TRAILING_DATA_PNG_FIXTURE, null],
     ['missing-idat.png', NO_IDAT_PNG_FIXTURE, null],
     ['out-of-bounds.png', OUT_OF_BOUNDS_PNG_FIXTURE, null],
+    ['non-inflatable.png', NON_INFLATABLE_PNG_FIXTURE, null],
+    ['invalid-filter.png', INVALID_FILTER_PNG_FIXTURE, null],
     ['valid.jpg', JPEG_FIXTURE, 'image/jpeg'],
     ['text-disguised.jpg', TEXT_DISGUISED_JPEG_FIXTURE, null],
     ['truncated.jpg', TRUNCATED_JPEG_FIXTURE, null],
     ['trailing-data.jpg', TRAILING_DATA_JPEG_FIXTURE, null],
     ['out-of-bounds.jpg', OUT_OF_BOUNDS_JPEG_FIXTURE, null],
     ['zero-width.jpg', ZERO_WIDTH_JPEG_FIXTURE, null],
+    ['valid.mp4', MP4_FIXTURE, 'video/mp4'],
+    ['valid.mov', MOV_FIXTURE, 'video/quicktime'],
     ['late-moov.mp4', LATE_MOOV_MP4_FIXTURE, 'video/mp4'],
+    ['fragmented.mp4', FRAGMENTED_MP4_FIXTURE, 'video/mp4'],
+    ['fake-avc1.mp4', FAKE_AVC1_MP4_FIXTURE, null],
+    ['video-handler-only.mp4', VIDEO_HANDLER_ONLY_MP4_FIXTURE, null],
+    ['missing-mdat.mp4', MP4_WITHOUT_MDAT_FIXTURE, null],
+    ['sample-outside-mdat.mp4', OUTSIDE_MDAT_MP4_FIXTURE, null],
     ['video.webm', WEBM_VIDEO_FIXTURE, 'video/webm'],
     ['audio-only.webm', WEBM_AUDIO_ONLY_FIXTURE, null],
     ['decoy-vide.mp4', MP4_WITHOUT_VIDEO_TRACK, null],
@@ -347,28 +442,12 @@ async function main() {
   const mutableRepoPaths = ['public', 'src', 'out', 'backups', 'runtime-data'];
   const before = Object.fromEntries(mutableRepoPaths.map((rel) => [rel, treeState(path.join(ROOT, rel))]));
 
-  child = spawn(process.execPath, ['server/index.js'], {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      HOST: '127.0.0.1',
-      PORT: '0',
-      TEST_MODE: '1',
-      DATA_DIR,
-      HEYGEN_API_KEY: '',
-      MINIMAX_API_KEY: '',
-      MINIMAX_GROUP_ID: '',
-      OPENAI_API_KEY: '',
-      SMOKE_GUARD_LOG: GUARD_LOG,
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : ''}--require=${GUARD_MODULE}`,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  child = startTestServer();
 
   const ready = await waitForReady(child);
   assert.equal(ready.mode, 'test');
   assert.equal(ready.workerEnabled, false);
-  const base = `http://127.0.0.1:${ready.port}`;
+  let base = `http://127.0.0.1:${ready.port}`;
 
   const html = await request(base, '/');
   assert.match(html, /出片前台/);
@@ -417,6 +496,23 @@ async function main() {
   assert.equal((await fetch(base + `/api/projects/${abandoned.job.projectId}`)).status, 404);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', abandoned.job.id)), false);
 
+  const fragmentedDraft = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-test',
+      title: 'fragmented MP4 驗證',
+      body: '合法 fragmented B-Roll 不應被 container validator 誤拒。',
+      skipGenerate: true,
+    }),
+  });
+  await request(base, `/api/jobs/${fragmentedDraft.job.id}/upload?name=broll1.mp4`, {
+    method: 'POST',
+    body: FRAGMENTED_MP4_FIXTURE,
+  });
+  await request(base, `/api/jobs/${fragmentedDraft.job.id}/abort`, { method: 'POST' });
+
   const created = await request(base, '/api/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -435,6 +531,21 @@ async function main() {
   assert.match(created.job.projectId, /^project-/);
   assert.equal(created.job.revisionId, 'v001');
   const id = created.job.id;
+  const expectRejectedMediaUpload = async (name, body) => {
+    const inputDir = path.join(DATA_DIR, 'jobs', id, 'input');
+    const response = await fetch(base + `/api/jobs/${id}/upload?name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      body,
+    });
+    // `fetch()` 已收到 response headers；此刻 temp 就必須不存在，不能依賴 eventual cleanup。
+    const entriesAtResponse = fs.readdirSync(inputDir);
+    assert.equal(response.status, 415, name);
+    assert.equal(fs.existsSync(path.join(inputDir, name)), false, name);
+    assert.equal(entriesAtResponse.some((entry) => entry.startsWith(`${name}.upload-`)), false, name);
+    await response.text();
+    assert.equal(fs.readdirSync(inputDir)
+      .some((entry) => entry.startsWith(`${name}.upload-`)), false, name);
+  };
 
   const invalidUpload = await fetch(base + `/api/jobs/${id}/upload?name=not-allowed.txt`, {
     method: 'POST',
@@ -454,6 +565,8 @@ async function main() {
   });
   assert.equal(truncatedPng.status, 415);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot7.png')), false);
+  await expectRejectedMediaUpload('shot4.png', NON_INFLATABLE_PNG_FIXTURE);
+  await expectRejectedMediaUpload('shot3.png', INVALID_FILTER_PNG_FIXTURE);
   const disguisedJpeg = await fetch(base + `/api/jobs/${id}/upload?name=shot6.jpg`, {
     method: 'POST',
     body: TEXT_DISGUISED_JPEG_FIXTURE,
@@ -471,11 +584,10 @@ async function main() {
     body: MP4_FIXTURE,
   });
   assert.equal(mismatchedImage.status, 415);
-  const avifVideo = await fetch(base + `/api/jobs/${id}/upload?name=broll9.mp4`, {
-    method: 'POST',
-    body: AVIF_DISGUISED_AS_MP4,
-  });
-  assert.equal(avifVideo.status, 415);
+  await expectRejectedMediaUpload('broll9.mp4', AVIF_DISGUISED_AS_MP4);
+  await expectRejectedMediaUpload('broll8.mp4', VIDEO_HANDLER_ONLY_MP4_FIXTURE);
+  await expectRejectedMediaUpload('broll7.mp4', MP4_WITHOUT_MDAT_FIXTURE);
+  await expectRejectedMediaUpload('broll6.mp4', FAKE_AVC1_MP4_FIXTURE);
   assert.equal(fs.readdirSync(path.join(DATA_DIR, 'jobs', id, 'input'))
     .some((name) => name.includes('.upload-')), false);
 
@@ -710,6 +822,75 @@ async function main() {
   assert.equal(queued.job.status, 'queued');
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'job.json')), true);
   assert.equal(fs.existsSync(path.join(ROOT, '.run.lock')), false);
+
+  const timestampState = ({ project, revision }) => ({
+    project: project.updatedAt,
+    revision: revision.updatedAt,
+    summaries: project.revisions.map((item) => [item.id, item.updatedAt]),
+  });
+  const stableBeforeRestart = await request(base,
+    `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`);
+  const stableTimestamps = timestampState(stableBeforeRestart);
+  const recoveryJob = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-recovery',
+      title: '重啟恢復時間測試',
+      body: '只有真正的 recovery 狀態變更可以更新 Project 時間。',
+      skipGenerate: true,
+    }),
+  });
+
+  await stopTestServer(child);
+  const recoverySentinel = '2001-01-01T00:00:00.000Z';
+  const recoveryJobFile = path.join(DATA_DIR, 'jobs', recoveryJob.job.id, 'job.json');
+  const recoveryJobJson = JSON.parse(fs.readFileSync(recoveryJobFile, 'utf8'));
+  recoveryJobJson.status = 'rendering';
+  recoveryJobJson.pid = 0;
+  fs.writeFileSync(recoveryJobFile, JSON.stringify(recoveryJobJson, null, 2));
+  const recoveryProjectFile = path.join(DATA_DIR, 'projects', recoveryJob.job.projectId, 'project.json');
+  const recoveryProjectJson = JSON.parse(fs.readFileSync(recoveryProjectFile, 'utf8'));
+  recoveryProjectJson.updatedAt = recoverySentinel;
+  recoveryProjectJson.revisions[0].status = 'rendering';
+  recoveryProjectJson.revisions[0].updatedAt = recoverySentinel;
+  fs.writeFileSync(recoveryProjectFile, JSON.stringify(recoveryProjectJson, null, 2));
+  const recoveryRevisionFile = path.join(DATA_DIR, 'projects', recoveryJob.job.projectId,
+    'revisions', `${recoveryJob.job.revisionId}.json`);
+  const recoveryRevisionJson = JSON.parse(fs.readFileSync(recoveryRevisionFile, 'utf8'));
+  recoveryRevisionJson.status = 'rendering';
+  recoveryRevisionJson.updatedAt = recoverySentinel;
+  fs.writeFileSync(recoveryRevisionFile, JSON.stringify(recoveryRevisionJson, null, 2));
+
+  child = startTestServer();
+  const restartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${restartReady.port}`;
+  const stableAfterRestart = await request(base,
+    `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`);
+  assert.deepEqual(timestampState(stableAfterRestart), stableTimestamps);
+  const recoveredJob = await request(base, `/api/jobs/${recoveryJob.job.id}`);
+  const recoveredProject = await request(base,
+    `/api/projects/${recoveryJob.job.projectId}?revision=${recoveryJob.job.revisionId}`);
+  assert.equal(recoveredJob.job.status, 'failed');
+  assert.equal(recoveredProject.revision.status, 'failed');
+  assert.equal(recoveredProject.project.revisions[0].status, 'failed');
+  assert.notEqual(recoveredProject.project.updatedAt, recoverySentinel);
+  assert.equal(recoveredProject.project.updatedAt, recoveredProject.revision.updatedAt);
+  const recoveredTimestamps = timestampState(recoveredProject);
+
+  // Recovery 只發生一次；第二次一般 restart 不得再刷新 Project／Revision 時間。
+  await stopTestServer(child);
+  child = startTestServer();
+  const secondRestartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${secondRestartReady.port}`;
+  const stableAfterSecondRestart = await request(base,
+    `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`);
+  const recoveryAfterSecondRestart = await request(base,
+    `/api/projects/${recoveryJob.job.projectId}?revision=${recoveryJob.job.revisionId}`);
+  assert.deepEqual(timestampState(stableAfterSecondRestart), stableTimestamps);
+  assert.deepEqual(timestampState(recoveryAfterSecondRestart), recoveredTimestamps);
+
   fs.writeFileSync(path.join(DATA_DIR, '.run.lock'), String(Date.now()));
   const unsafeUnlock = await fetch(base + '/api/unlock', { method: 'POST' });
   assert.equal(unsafeUnlock.status, 409);
@@ -726,15 +907,16 @@ async function main() {
   console.log('✅ 同一 Project 建立 V1/V2，Revision 不複製成新專案');
   console.log('✅ Project 圖片與 B-Roll 可跨 Revision 重用，SHA-256 相同角色內容只保存一次');
   console.log('✅ B-Roll 與講者影片角色分離，影片預覽支援 Range／416');
-  console.log('✅ PNG 逐 chunk 驗證邊界、IHDR／IDAT／IEND 與 CRC，截斷／偽裝結構被拒絕');
+  console.log('✅ PNG 驗證 chunk／CRC 並 bounded inflate scanlines，損毀 payload／filter 被拒絕');
   console.log('✅ JPEG marker stream 驗證 SOF／SOS／entropy／EOI，偽裝、截斷與尾隨資料被拒絕');
-  console.log('✅ MP4/MOV/WebM 依 video track 驗證；late-moov 合法，純音訊與偽裝內容拒絕');
+  console.log('✅ MP4/MOV/WebM bounded probe 可解碼畫格；fragmented 合法，空殼／偽造被拒絕');
   console.log('✅ 超過 50 個沿用素材時不建立 Revision、Run 或 job 目錄');
   console.log('✅ 付費講者影片失敗救援寫回 Project／Revision；invalid／ingest error 維持 best-effort');
   console.log('✅ Project Avatar 以獨立 speaker ID 沿用，不混入 B-Roll，並強制跳過付費生成');
-  console.log('✅ 非法 brand、upload 檔名與偽裝媒體內容被拒絕');
+  console.log('✅ 非法 brand、upload 檔名與偽裝媒體內容被拒絕，415 前已清除 temp');
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');
   console.log('✅ submit 後不可重複排隊或覆寫 input');
+  console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
   console.log('✅ 未知／活躍 lock 不可由 API 強制刪除');
   console.log('✅ LAN bind 未明確 opt-in 時拒絕啟動');
   console.log('✅ TEST_MODE 拒絕 repo 內路徑與 symlink 回指');
