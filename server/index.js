@@ -1185,9 +1185,11 @@ const server = http.createServer(async (req, res) => {
         .slice(0, tcfg.lines).join('\n');
       const reuseAssetIds = Array.isArray(body.reuseAssetIds)
         ? [...new Set(body.reuseAssetIds.map(String))] : [];
+      const reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
+        ? null : String(body.reuseSpeakerAssetId);
       if (reuseAssetIds.length > MAX_REUSED_ASSETS)
         return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片與 B-Roll 素材` });
-      if (!body.projectId && reuseAssetIds.length)
+      if (!body.projectId && (reuseAssetIds.length || reuseSpeakerAssetId))
         return send(res, 400, { error: '建立新影片時不能引用其他專案的素材' });
       const id = newId();
       let project;
@@ -1211,6 +1213,16 @@ const server = http.createServer(async (req, res) => {
         return !asset || !['image', 'video'].includes(asset.kind);
       });
       if (invalidReuse) return send(res, 400, { error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用` });
+      const speakerAsset = reuseSpeakerAssetId
+        ? (project.assets || []).find((item) => item.id === reuseSpeakerAssetId) : null;
+      if (reuseSpeakerAssetId && (!speakerAsset || speakerAsset.kind !== 'speaker-video'))
+        return send(res, 400, { error: `素材 ${reuseSpeakerAssetId} 不可作為講者 Avatar 重用` });
+      if (speakerAsset) {
+        const speakerFile = PROJECT_STORE.assetPath(project.id, speakerAsset.id);
+        const speakerMedia = speakerFile && inspectMediaFile(speakerFile);
+        if (!speakerMedia || speakerMedia.mediaType !== 'video/mp4')
+          return send(res, 422, { error: `講者 Avatar ${speakerAsset.id} 已損毀或不是 MP4，請重新加入` });
+      }
       let revision;
       let job;
       try {
@@ -1225,7 +1237,7 @@ const server = http.createServer(async (req, res) => {
             voice: String(body.voice || ''),
           },
           options: {
-            skipGenerate: !!body.skipGenerate,
+            skipGenerate: !!body.skipGenerate || !!speakerAsset,
             noSpeed: !!body.noSpeed,
             withAd: !!body.withAd,
             autoApprove: !!body.autoApprove,
@@ -1242,7 +1254,7 @@ const server = http.createServer(async (req, res) => {
           title,
           status: 'draft', // 上傳完檔案才轉 queued
           createdAt: nowISO(),
-          skipGenerate: !!body.skipGenerate,
+          skipGenerate: !!body.skipGenerate || !!speakerAsset,
           noSpeed: !!body.noSpeed,
           withAd: !!body.withAd,
           brand,
@@ -1253,6 +1265,11 @@ const server = http.createServer(async (req, res) => {
         ensureDir(path.join(jobDir(job.id), 'input'));
         fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
           buildScript({ voice: body.voice, title, body: body.body }));
+        if (speakerAsset) {
+          PROJECT_STORE.materializeAsset(project.id, speakerAsset.id,
+            path.join(jobDir(job.id), 'input', 'heygen.mp4'));
+          job.assetRefs.push(speakerAsset.id);
+        }
         let shotIndex = 1;
         let brollIndex = 1;
         for (const assetId of reuseAssetIds) {

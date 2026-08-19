@@ -278,7 +278,8 @@
         </button>
         <div class="avatar-actions">
           <label class="chk" id="noSpeedWrap" style="display:none"><input type="checkbox" id="noSpeed">
-            <span>這支已經加速過<small>不要再套用 120% 加速。</small></span></label>
+            <span>這支已經加速過<small>不要再套用 125% 加速。</small></span></label>
+          <a id="heygenDownload" hidden>下載專案 Avatar</a>
           <button type="button" class="ghost" id="heygenRemove" hidden>移除 Avatar</button>
         </div>
         <input type="checkbox" id="skipGenerate" hidden>
@@ -412,7 +413,7 @@ const STATUS_TEXT = { draft:'建立中', queued:'排隊中', preparing:'準備�
   detached:'背景執行中', 'detached-done':'已在背景跑完' };
 
 let TPLS = {}, BRANDS = [], ADMIN = false, brand = null, tpl = 'focusstock', view = 'new', openJob = null;
-let activeProject = null, reusedAssets = [];
+let activeProject = null, reusedAssets = [], reusedSpeakerAsset = null;
 let iterationReturn = null;
 
 // ── 標題 ──────────────────────────────────
@@ -620,11 +621,15 @@ function drawSlots() {
 let heygenFile = null;
 function clearHeygen() {
   heygenFile = null;
+  reusedSpeakerAsset = null;
   $('#skipGenerate').checked = false;
   $('#noSpeed').checked = false;
   $('#noSpeedWrap').style.display = 'none';
   $('#vdrop').classList.remove('ok', 'hot');
   $('#heygenName').textContent = '尚未選擇，將由 HeyGen 產生';
+  $('#heygenDownload').hidden = true;
+  $('#heygenDownload').removeAttribute('href');
+  $('#heygenDownload').removeAttribute('download');
   $('#heygenRemove').hidden = true;
   $('#heygenPicker').value = '';
 }
@@ -633,11 +638,28 @@ function setHeygen(f) {
   // Avatar 是 pipeline 的固定 heygen.mp4；MOV／WebM 等一般片段請放在 B-Roll 素材欄位。
   if (!/\.mp4$/i.test(f.name) || (f.type && !/^video\//.test(f.type)))
     return alert(`「${f.name}」不是 MP4 Avatar 影片。\n\n一般影片請放在下方的 B-Roll 素材欄位。`);
+  clearHeygen();
   heygenFile = f;
   $('#skipGenerate').checked = true;
   $('#vdrop').classList.add('ok');
   $('#heygenName').textContent = `${f.name}　${fileSize(f.size)}　（點這裡可換掉）`;
   $('#noSpeedWrap').style.display = 'flex';
+  $('#heygenRemove').hidden = false;
+}
+function setReusedHeygen(asset) {
+  clearHeygen();
+  reusedSpeakerAsset = asset;
+  $('#skipGenerate').checked = true;
+  // Project 裡保存的是前一輪已完成處理的 Avatar；預設不再重複加速。
+  $('#noSpeed').checked = true;
+  $('#noSpeedWrap').style.display = 'flex';
+  $('#vdrop').classList.add('ok');
+  $('#heygenName').textContent = `${asset.originalName || 'heygen.mp4'}　${fileSize(asset.size)}`
+    + '　（專案 Avatar，點這裡可換掉）';
+  const href = `/api/projects/${activeProject.id}/assets/${asset.id}?dl=1`;
+  $('#heygenDownload').href = href;
+  $('#heygenDownload').setAttribute('download', '');
+  $('#heygenDownload').hidden = false;
   $('#heygenRemove').hidden = false;
 }
 $('#vdrop').onclick = () => $('#heygenPicker').click();
@@ -723,7 +745,8 @@ $('#submit').onclick = async () => {
   const media = slots.filter(Boolean);
   const lines = titleLines();
   if (!$('#body').value.trim()) return alert('腳本是空的');
-  if ($('#skipGenerate').checked && !heygenFile) return alert('請重新選擇現成的 Avatar MP4');
+  if ($('#skipGenerate').checked && !heygenFile && !reusedSpeakerAsset)
+    return alert('請重新選擇現成的 Avatar MP4');
   const previewVideos = [...reusedAssets, ...media].filter((item) => item.kind === 'video');
   if (previewVideos.some((item) => item.previewStatus === 'error'))
     return alert('有一支 B-Roll 無法在瀏覽器播放，請移除或換成可預覽的影片後再送出。');
@@ -739,6 +762,7 @@ $('#submit').onclick = async () => {
       body: JSON.stringify({
         projectId: activeProject && activeProject.id,
         reuseAssetIds: reusedAssets.map((asset) => asset.id),
+        reuseSpeakerAssetId: reusedSpeakerAsset && reusedSpeakerAsset.id,
         template: tpl, owner: $('#owner').value,
         title: lines.join('\n'), body: $('#body').value, voice: $('#voice').value,
         skipGenerate: $('#skipGenerate').checked, noSpeed: $('#noSpeed').checked,
@@ -858,7 +882,9 @@ function revisionAssetCard(projectDetail, job) {
       for (const asset of files) {
         fileBox.append(el('div', { class: 'asset-summary-file' },
           el('b', {}, asset.originalName || '未命名檔案'),
-          el('span', {}, fileSize(asset.size))));
+          el('span', {}, fileSize(asset.size)),
+          el('a', { href: `/api/projects/${projectDetail.project.id}/assets/${asset.id}?dl=1`,
+            download: '' }, '下載')));
       }
     }
     summary.append(el('div', { class: 'asset-summary-row' },
@@ -1027,9 +1053,14 @@ async function iterateProject(job) {
       ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`);
     activeProject = project;
     iterationReturn = { jobId: job.id, revisionNumber: job.revisionNumber || (revision && revision.number) };
-    const selectedAssetIds = new Set((revision && revision.assetRefs) || []);
+    const selectedAssetRefs = (revision && revision.assetRefs) || [];
+    const selectedAssetIds = new Set(selectedAssetRefs);
     reusedAssets = (project.assets || []).filter((asset) =>
       ['image', 'video'].includes(asset.kind) && selectedAssetIds.has(asset.id));
+    // 同一版若歷史上留下多支 speaker asset，以最後寫入 Revision 的那支為準。
+    const speakerAsset = selectedAssetRefs.slice().reverse().map((assetId) =>
+      (project.assets || []).find((asset) => asset.id === assetId))
+      .find((asset) => asset && asset.kind === 'speaker-video');
     tpl = project.template;
     brand = project.brand || null;
     titleVals = String((revision && revision.script && revision.script.title) || job.title || '').split('\n');
@@ -1037,6 +1068,7 @@ async function iterateProject(job) {
     $('#body').value = (revision && revision.script && revision.script.body) || '';
     $('#voice').value = (revision && revision.script && revision.script.voice) || '';
     clearHeygen();
+    if (speakerAsset) setReusedHeygen(speakerAsset);
     $('#autoApprove').checked = !!(revision && revision.options && revision.options.autoApprove);
     $('#withAd').checked = !!(revision && revision.options && revision.options.withAd);
     clearLocalSlots();

@@ -376,6 +376,8 @@ async function main() {
   assert.match(html, /4・圖片與 B-Roll 影片素材/);
   assert.match(html, /本版素材/);
   assert.match(html, /返回 V/);
+  assert.match(html, /reuseSpeakerAssetId/);
+  assert.match(html, /下載專案 Avatar/);
 
   const health = await request(base, '/api/health');
   assert.equal(health.ok, true);
@@ -563,6 +565,42 @@ async function main() {
   });
   assert.equal(speakerReuse.status, 400);
 
+  const brollAsSpeaker = await fetch(base + '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      reuseSpeakerAssetId: reusableVideo.id,
+      template: 'focusstock',
+      title: '不應建立的 Avatar 版本',
+      body: 'B-Roll 不能當作講者 Avatar。',
+    }),
+  });
+  assert.equal(brollAsSpeaker.status, 400);
+
+  const speakerIteration = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      reuseSpeakerAssetId: speakerVideo.id,
+      template: 'focusstock',
+      title: '沿用專案 Avatar 的 V2',
+      body: '沿用 Avatar 時不應再次呼叫付費生成。',
+    }),
+  });
+  assert.equal(speakerIteration.job.revisionNumber, 2);
+  assert.equal(speakerIteration.job.skipGenerate, true);
+  assert.deepEqual(speakerIteration.job.assetRefs, [speakerVideo.id]);
+  assert.deepEqual(
+    fs.readFileSync(path.join(DATA_DIR, 'jobs', speakerIteration.job.id, 'input', 'heygen.mp4')),
+    MP4_FIXTURE);
+  await request(base, `/api/jobs/${speakerIteration.job.id}/abort`, { method: 'POST' });
+  const afterSpeakerIterationAbort = await request(base, `/api/projects/${created.job.projectId}`);
+  assert.equal(afterSpeakerIterationAbort.project.latestRevision, 1);
+  assert.equal(afterSpeakerIterationAbort.project.revisions.length, 1);
+  assert.ok(afterSpeakerIterationAbort.project.assets.some((asset) => asset.id === speakerVideo.id));
+
   // 舊 manifest 可能來自只看副檔名的版本；重用時要重新驗內容，失敗也不能留下 V2。
   const storedProjectFile = path.join(DATA_DIR, 'projects', created.job.projectId, 'project.json');
   let storedProject = JSON.parse(fs.readFileSync(storedProjectFile, 'utf8'));
@@ -693,6 +731,7 @@ async function main() {
   console.log('✅ MP4/MOV/WebM 依 video track 驗證；late-moov 合法，純音訊與偽裝內容拒絕');
   console.log('✅ 超過 50 個沿用素材時不建立 Revision、Run 或 job 目錄');
   console.log('✅ 付費講者影片失敗救援寫回 Project／Revision；invalid／ingest error 維持 best-effort');
+  console.log('✅ Project Avatar 以獨立 speaker ID 沿用，不混入 B-Roll，並強制跳過付費生成');
   console.log('✅ 非法 brand、upload 檔名與偽裝媒體內容被拒絕');
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');
   console.log('✅ submit 後不可重複排隊或覆寫 input');
