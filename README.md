@@ -47,7 +47,7 @@ localhost 前台的 Project Asset 支援 PNG／JPEG 圖片，以及 MP4／MOV／
 目前尚未由這個 baseline 證明：
 
 - HeyGen 付費生成可以完整重現。
-- Whisper、字型與所有品牌素材已在新環境備齊。
+- whisper.cpp 模型、字型與所有品牌素材已在新環境備齊。
 - 完整文章到成片流程已達 production readiness。
 
 ---
@@ -68,7 +68,9 @@ localhost 前台的 Project Asset 支援 PNG／JPEG 圖片，以及 MP4／MOV／
 ```bash
 nvm install
 nvm use
+brew install ffmpeg whisper-cpp tesseract tesseract-lang
 npm ci
+npm run setup:whisper
 npm run doctor
 npm run smoke
 npm run dev:server
@@ -81,6 +83,8 @@ npm run dev:server
 ```bash
 npm run doctor                         # localhost 與完整 pipeline preflight
 npm run doctor:full                    # 完整出片鏈任一 blocker 都回傳非 0
+npm run setup:whisper                  # 下載並校驗 pinned base-q5_1 模型
+npm run test:transcription             # 驗證 whisper.cpp JSON adapter
 npm run smoke                          # 免 provider、隔離 fixture job
 npm run cleanup:plan -- --root=/path   # 唯讀清理計畫，絕不刪檔
 npm run dev:server                     # localhost 使用者前台，port 4000
@@ -122,7 +126,20 @@ npm start                  # 開啟 Remotion Studio 預覽
 npm run render             # 輸出 out/output.mp4
 ```
 
-完整 pipeline 需要 FFmpeg、ffprobe、Whisper、Tesseract `chi_tra`、有效字型與對應 provider keys。Whisper 應使用 project-local `.venv/` 與 `.cache/whisper/`，不要安裝成全域 Python package。
+完整 pipeline 需要 FFmpeg／ffprobe、`whisper-cli`（Homebrew 套件 `whisper-cpp`）、Tesseract `chi_tra`、有效字型與對應 provider keys。`package.json`／`package-lock.json` 只管理 Node.js 套件；這些主機指令與約 57 MB 的模型權重不是 npm dependency，因此由安裝文件說明，並由 `npm run doctor:full` 驗證實際環境。
+
+本機 ASR 的固定資料流如下：
+
+```text
+whisper-cli + ggml-base-q5_1.bin
+  → whisper.cpp 原生 full JSON（保留 token offsets）
+  → normalize-whispercpp adapter
+  → src/subtitles.json（既有 segments[].words[] contract）
+  → correct-subtitles（正式腳本事後順序對齊）
+  → _scriptCharTimes（B-roll content point 使用）
+```
+
+`whisper` 是 Python `openai-whisper` 套件提供的 CLI；`whisper-cli` 是 C/C++ 實作 `whisper.cpp` 提供的 CLI。兩者使用同一家族的 Whisper 模型，但安裝方式、模型格式、參數與 JSON schema 都不同。這個 repo 選擇較輕的 `whisper-cli`，並用 adapter 隔離差異；下游不直接依賴特定 ASR 引擎。模型預設放在 ignored 的 `.cache/whisper/ggml-base-q5_1.bin`，以 `npm run setup:whisper` 下載並校驗。不要把完整正式腳本傳成 Whisper prompt；文字真值由 `correct-subtitles` 在辨識後對齊。
 
 ### 詳細規格
 

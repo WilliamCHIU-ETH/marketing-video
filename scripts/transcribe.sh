@@ -3,8 +3,8 @@
 #
 # 用法：./scripts/transcribe.sh
 # 前置需求（Mac）：
-#   brew install ffmpeg
-#   pip install -U openai-whisper
+#   brew install ffmpeg whisper-cpp
+#   npm run setup:whisper
 
 set -euo pipefail
 
@@ -12,11 +12,25 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INPUT="$ROOT/public/heygen.mp4"
 OUTRO="$ROOT/public/outro.mp4"
 TMP_DIR="$ROOT/.cache"
+WHISPER_DIR="$TMP_DIR/whisper"
 TMP_AUDIO="$TMP_DIR/heygen.wav"
+RAW_PREFIX="$WHISPER_DIR/heygen.whispercpp"
+RAW_JSON="$RAW_PREFIX.json"
 OUTPUT_DIR="$ROOT/src"
 OUTPUT_JSON="$OUTPUT_DIR/subtitles.json"
 BACKUP_JSON="$OUTPUT_DIR/subtitles.original.json"
 META_JSON="$OUTPUT_DIR/video-meta.json"
+ENV_MODEL_PATH="$(node "$ROOT/scripts/read-asr-env.js" WHISPER_MODEL_PATH)"
+ENV_THREADS="$(node "$ROOT/scripts/read-asr-env.js" WHISPER_THREADS)"
+ENV_DEVICE="$(node "$ROOT/scripts/read-asr-env.js" WHISPER_DEVICE)"
+WHISPER_MODEL_PATH="${WHISPER_MODEL_PATH:-${ENV_MODEL_PATH:-$WHISPER_DIR/ggml-base-q5_1.bin}}"
+WHISPER_THREADS="${WHISPER_THREADS:-${ENV_THREADS:-4}}"
+WHISPER_DEVICE="${WHISPER_DEVICE:-${ENV_DEVICE:-cpu}}"
+
+case "$WHISPER_MODEL_PATH" in
+  /*) ;;
+  *) WHISPER_MODEL_PATH="$ROOT/$WHISPER_MODEL_PATH" ;;
+esac
 
 if [ ! -f "$INPUT" ]; then
   echo "❌ 找不到 $INPUT — 請先把 HeyGen 影片放到 public/heygen.mp4"
@@ -27,7 +41,7 @@ fi
 missing=()
 command -v ffmpeg  >/dev/null 2>&1 || missing+=("ffmpeg (brew install ffmpeg)")
 command -v ffprobe >/dev/null 2>&1 || missing+=("ffprobe (brew install ffmpeg)")
-command -v whisper >/dev/null 2>&1 || missing+=("whisper (brew install pipx && pipx install openai-whisper && pipx ensurepath)")
+command -v whisper-cli >/dev/null 2>&1 || missing+=("whisper-cli (brew install whisper-cpp)")
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "❌ 缺少以下工具，請先安裝："
@@ -37,7 +51,27 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
-mkdir -p "$TMP_DIR"
+if [ ! -f "$WHISPER_MODEL_PATH" ]; then
+  echo "❌ 找不到 Whisper 模型：$WHISPER_MODEL_PATH"
+  echo "   請先執行 npm run setup:whisper，或設定 WHISPER_MODEL_PATH"
+  exit 1
+fi
+
+if ! [[ "$WHISPER_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ WHISPER_THREADS 必須是正整數，目前為：$WHISPER_THREADS"
+  exit 1
+fi
+
+case "$WHISPER_DEVICE" in
+  cpu) DEVICE_ARGS=(-ng) ;;
+  auto) DEVICE_ARGS=() ;;
+  *)
+    echo "❌ WHISPER_DEVICE 僅支援 cpu 或 auto，目前為：$WHISPER_DEVICE"
+    exit 1
+    ;;
+esac
+
+mkdir -p "$TMP_DIR" "$WHISPER_DIR"
 
 echo "▶ 1/4 用 ffprobe 偵測影片時長..."
 HEYGEN_DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT")
@@ -65,26 +99,33 @@ echo "   → 已寫入 src/video-meta.json"
 echo "▶ 2/4 用 ffmpeg 從影片抽出音檔..."
 ffmpeg -y -i "$INPUT" -ar 16000 -ac 1 -c:a pcm_s16le "$TMP_AUDIO" -loglevel error
 
-echo "▶ 3/4 跑 Whisper 轉字幕（中文，small 模型）..."
-# 想要更精準：把 small 換成 medium 或 large（慢很多）
-whisper "$TMP_AUDIO" \
-  --language zh \
-  --model small \
-  --word_timestamps True \
-  --output_format json \
-  --output_dir "$TMP_DIR" \
-  --verbose False
+echo "▶ 3/4 跑 whisper.cpp（中文，token timestamps）..."
+# 不傳完整正式腳本作 prompt；文字校正由下一步 correct-subtitles 做事後順序對齊。
+whisper-cli \
+  "${DEVICE_ARGS[@]}" \
+  -t "$WHISPER_THREADS" \
+  -m "$WHISPER_MODEL_PATH" \
+  -f "$TMP_AUDIO" \
+  -l zh \
+  -ml 1 \
+  -ojf \
+  -of "$RAW_PREFIX" \
+  -np
 
-echo "▶ 4/4 整理輸出到 src/subtitles.json..."
-# Whisper 輸出檔名跟輸入相同：heygen.json
-cp "$TMP_DIR/heygen.json" "$OUTPUT_JSON"
+echo "▶ 4/4 透過 adapter 整理成既有字幕格式..."
+node "$ROOT/scripts/normalize-whispercpp.js" \
+  --input "$RAW_JSON" \
+  --output "$OUTPUT_JSON" \
+  --duration "$HEYGEN_DURATION" \
+  --model "$WHISPER_MODEL_PATH"
 # 同步覆寫 raw 備份，讓 correct-subtitles 出包時可還原到本次新的 Whisper 輸出
 # （否則舊版備份會卡住，重 transcribe 也救不回來）
-cp "$TMP_DIR/heygen.json" "$BACKUP_JSON"
+cp "$OUTPUT_JSON" "$BACKUP_JSON"
 
 echo ""
 echo "✅ 完成！"
 TOTAL=$(python3 -c "print(f'{$HEYGEN_ROUNDED + $OUTRO_ROUNDED:.2f}')" 2>/dev/null || echo "$HEYGEN_ROUNDED+$OUTRO_ROUNDED")
 echo "   時長  → $META_JSON (heygen $HEYGEN_ROUNDED + outro $OUTRO_ROUNDED = $TOTAL 秒)"
 echo "   字幕  → $OUTPUT_JSON"
+echo "   ASR raw → $RAW_JSON"
 echo "   現在打開 Remotion Studio 就能看到字幕 + 正確時長"
