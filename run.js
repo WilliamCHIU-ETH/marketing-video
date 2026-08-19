@@ -8,7 +8,7 @@
 require("dotenv").config();
 
 const { execSync, execFileSync } = require("child_process");
-const { readFileSync, writeFileSync, existsSync } = require("fs");
+const { readFileSync, writeFileSync, existsSync, openSync, closeSync } = require("fs");
 const { resolve } = require("path");
 const OpenCC = require("opencc-js");
 const { cleanStaleStaging, backupJob } = require("./scripts/public-utils");
@@ -790,13 +790,27 @@ async function runDualPath(segments, pair, outputMp4Path) {
 async function main() {
   // 0. 防止重複執行
   const lockFile = resolve(PROJECT_DIR, ".run.lock");
-  if (existsSync(lockFile)) {
+  const ownerFile = resolve(PROJECT_DIR, ".run.owner.json");
+  const startedAt = new Date().toISOString();
+  const workspaceRunToken = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(process.env.WORKSPACE_RUN_TOKEN || '') ? process.env.WORKSPACE_RUN_TOKEN : null;
+  const ownership = { pid: process.pid, startedAt, token: workspaceRunToken };
+  let lockFd;
+  try {
+    // 'wx' is the actual mutex. existsSync -> writeFileSync lets two simultaneous runners both win.
+    lockFd = openSync(lockFile, "wx");
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
     console.error("❌ 偵測到腳本已在執行中！請等待完成再跑。");
     console.error("   請先確認 lock 記錄的 PID 已停止；未知舊 lock 需人工檢查，勿直接強制刪除。");
     process.exit(1);
   }
-  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   process.on("exit", () => { try { require("fs").unlinkSync(lockFile); } catch(e) {} });
+  try { writeFileSync(lockFd, JSON.stringify(ownership)); }
+  finally { closeSync(lockFd); }
+  // lock 會在 exit 時刪除；owner marker 則保留到下一個 run.js 取得工作區時覆寫。
+  // server 重啟後藉由 job-specific token 判斷 public/ 目前究竟屬於哪一支工作。
+  writeFileSync(ownerFile, JSON.stringify(ownership));
   // 被終止（關終端機=SIGHUP、Ctrl+C=SIGINT、kill=SIGTERM）時也清 .run.lock。
   // 注意：這不會讓生成繼續——關視窗 run.js 一樣會死、新 heygen.mp4 不會下載；
   // 只是死得乾淨、不留 lock 卡住下一次執行。

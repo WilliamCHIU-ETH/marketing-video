@@ -10,10 +10,14 @@
 
 1. 人員從任意腳本來源選擇內容並遞交；系統不限定腳本必須來自 Excel、Google Sheet 或其他特定工具。
 2. 人員提供這支影片需要的截圖、圖片或影片；系統另外加入片頭、框架、Logo、BGM 等固定品牌素材。
-3. 系統建立製作 Job，保存腳本與本次使用的全部素材。
+3. 系統建立影片 Project 與第一個 Revision；實際執行則建立可清理的 Run（Job）。
 4. HeyGen 產生 Avatar 主播影片，OCR 同步分析畫面素材，接著完成字幕時間對齊與素材配置計畫。
 5. 人員確認或調整圖片、出現時間與框選範圍。
 6. Remotion 依確認後的配置合成影片，完成輸出與封存。
+
+同一支影片後續調整時，從專案詳情選擇「建立下一版」。V1、V2 會留在同一個 Project，既有圖片與 B-Roll 影片可直接沿用；系統仍會為每次執行建立隔離 Run，但不把 Run 當成另一支影片。
+
+localhost 前台的 Project Asset 支援 PNG／JPEG 圖片，以及 MP4／MOV／M4V／WebM B-Roll。一般 B-Roll 與 `heygen.mp4` 講者影片是不同角色：B-Roll 可保存、預覽及跨版本沿用；講者影片則獨立保存供 pipeline 使用，不會與 B-Roll 互相誤用。目前自動 OCR、素材配置與 Remotion 合成仍以圖片為主；B-Roll 在這一階段尚不代表已自動剪入成片。
 
 
 
@@ -86,7 +90,7 @@ npm start                              # Remotion Studio，不是使用者前台
 ### 安全與資料邊界
 
 - `npm run smoke` 使用 repo 外的臨時 `DATA_DIR`、停用 worker、清空 provider keys，並阻擋／記錄 child process 與 outbound network 嘗試。
-- 正常 job state 預設放在 ignored 的 `runtime-data/`。
+- 正常 Project、Revision 與 Run state 預設放在 ignored 的 `runtime-data/`。
 - 大型品牌素材不進 Git；本 workspace 的 ignored `assets` symlink 指向 `../data/assets/`。
 - 啟動 server 不會自動清理舊 job；只有顯式設定 `AUTO_PRUNE_ON_START=1` 才會 prune。
 - 非 localhost 模式目前沒有完整認證，server 會預設拒絕啟動。
@@ -95,13 +99,17 @@ npm start                              # Remotion Studio，不是使用者前台
 ```text
 marketing-video/
 ├── app/                 # Git repository
-│   └── assets -> ../data/assets
+│   ├── assets -> ../data/assets
+│   └── runtime-data/    # 預設 DATA_DIR；不進 Git
+│       ├── projects/    # 一支影片一個 Project；版本、共用素材與成品集中保存
+│       ├── jobs/        # 每次 Run 的暫存工作區，可依保留策略清理
+│       └── archive/     # 舊格式 Job 的成品庫
 └── data/
     ├── assets/          # 品牌素材、BGM、outro；不進 Git
     ├── cases/
     ├── history/
-    ├── outputs/
-    └── runtime/
+    ├── runtime/         # 可選的外部 DATA_DIR
+    └── outputs/         # 舊格式／人工確認保留的歷史成品
 ```
 
 ### 手動執行既有 Remotion 流程
