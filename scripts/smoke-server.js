@@ -7,7 +7,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { inspectMediaFile } = require('../server/project-store');
+const { capturePaidSpeakerAfterFailure } = require('../server/project-assets');
+const { createProjectStore, inspectMediaFile } = require('../server/project-store');
 
 const ROOT = path.resolve(__dirname, '..');
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'marketing-video-smoke-'));
@@ -60,6 +61,33 @@ const OUT_OF_BOUNDS_PNG_FIXTURE = Buffer.from(PNG_FIXTURE);
 const idatTypeOffset = OUT_OF_BOUNDS_PNG_FIXTURE.indexOf(Buffer.from('IDAT', 'ascii'));
 assert.ok(idatTypeOffset > 4);
 OUT_OF_BOUNDS_PNG_FIXTURE.writeUInt32BE(0x7fffffff, idatTypeOffset - 4);
+
+const JPEG_FIXTURE = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsj'
+  + 'HBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo'
+  + 'KCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECA'
+  + 'wQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2Jygg'
+  + 'kKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5i'
+  + 'ZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEB'
+  + 'AQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFE'
+  + 'KRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6'
+  + 'goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09'
+  + 'fb3+Pn6/9oADAMBAAIRAxEAPwD6pooooA//2Q==',
+  'base64');
+const TEXT_DISGUISED_JPEG_FIXTURE = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xfe, 0x00, 0x0a]),
+  Buffer.from('not-jpeg', 'ascii'),
+  Buffer.from([0xff, 0xd9]),
+]);
+const TRUNCATED_JPEG_FIXTURE = Buffer.from(JPEG_FIXTURE.subarray(0, -2));
+const TRAILING_DATA_JPEG_FIXTURE = Buffer.concat([JPEG_FIXTURE, Buffer.from('trailing-data')]);
+const OUT_OF_BOUNDS_JPEG_FIXTURE = Buffer.from([
+  0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff, 0x4a, 0x46, 0x49, 0x46, 0xff, 0xd9,
+]);
+const ZERO_WIDTH_JPEG_FIXTURE = Buffer.from(JPEG_FIXTURE);
+const sofTypeOffset = ZERO_WIDTH_JPEG_FIXTURE.indexOf(Buffer.from([0xff, 0xc0]));
+assert.ok(sofTypeOffset >= 0);
+ZERO_WIDTH_JPEG_FIXTURE.writeUInt16BE(0, sofTypeOffset + 7);
 
 const MP4_FIXTURE = Buffer.from(
   'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMVbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAj90cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAG3bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABYm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASJzdGJsAAAAvnN0c2QAAAAAAAAAAQAAAK5hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLA/fj4AAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAABYoAAAAAAAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAANFAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY2Mi4xMi4xMDIAAAAIZnJlZQAAAs1tZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0tMiB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAQZYiEABX//vfJ78Cm69vfgQ==',
@@ -206,6 +234,12 @@ async function main() {
     ['trailing-data.png', TRAILING_DATA_PNG_FIXTURE, null],
     ['missing-idat.png', NO_IDAT_PNG_FIXTURE, null],
     ['out-of-bounds.png', OUT_OF_BOUNDS_PNG_FIXTURE, null],
+    ['valid.jpg', JPEG_FIXTURE, 'image/jpeg'],
+    ['text-disguised.jpg', TEXT_DISGUISED_JPEG_FIXTURE, null],
+    ['truncated.jpg', TRUNCATED_JPEG_FIXTURE, null],
+    ['trailing-data.jpg', TRAILING_DATA_JPEG_FIXTURE, null],
+    ['out-of-bounds.jpg', OUT_OF_BOUNDS_JPEG_FIXTURE, null],
+    ['zero-width.jpg', ZERO_WIDTH_JPEG_FIXTURE, null],
     ['late-moov.mp4', LATE_MOOV_MP4_FIXTURE, 'video/mp4'],
     ['video.webm', WEBM_VIDEO_FIXTURE, 'video/webm'],
     ['audio-only.webm', WEBM_AUDIO_ONLY_FIXTURE, null],
@@ -216,6 +250,73 @@ async function main() {
     fs.writeFileSync(file, bytes);
     assert.equal(inspectMediaFile(file)?.mediaType || null, expectedMediaType, name);
   }
+
+  const rescueStore = createProjectStore({
+    dataDir: path.join(DATA_DIR, 'speaker-rescue'),
+    nowISO: () => '2026-08-19T00:00:00.000Z',
+    idFactory: () => 'speaker-rescue-fixture',
+  });
+  const rescueProject = rescueStore.create({
+    name: '付費講者影片救援測試', template: 'focusstock', owner: 'smoke-test',
+  });
+  const rescueRevision = rescueStore.addRevision(rescueProject.id, { jobId: 'speaker-rescue-job' });
+  const rescueJob = {
+    id: 'speaker-rescue-job',
+    projectId: rescueProject.id,
+    revisionId: rescueRevision.id,
+    skipGenerate: false,
+    assetRefs: [],
+  };
+  const paidSpeakerFile = path.join(DATA_DIR, 'paid-speaker.mp4');
+  fs.writeFileSync(paidSpeakerFile, MP4_FIXTURE);
+  const savedPaidSpeaker = capturePaidSpeakerAfterFailure({
+    job: rescueJob,
+    speakerFile: paidSpeakerFile,
+    projectStore: rescueStore,
+    saveJob: (job) => rescueStore.updateRevision(job.projectId, job.revisionId, {
+      assetRefs: job.assetRefs,
+    }),
+    appendLog: () => {},
+  });
+  assert.equal(savedPaidSpeaker, true);
+  const rescuedDetail = rescueStore.detail(rescueProject.id, rescueRevision.id);
+  const rescuedSpeaker = rescuedDetail.project.assets.find((asset) => asset.kind === 'speaker-video');
+  assert.ok(rescuedSpeaker);
+  assert.equal(rescuedSpeaker.mediaType, 'video/mp4');
+  assert.deepEqual(rescuedDetail.revision.assetRefs, [rescuedSpeaker.id]);
+
+  const invalidSpeakerFile = path.join(DATA_DIR, 'invalid-paid-speaker.mp4');
+  fs.writeFileSync(invalidSpeakerFile, 'not-a-video');
+  let invalidCaptureResult;
+  assert.doesNotThrow(() => {
+    invalidCaptureResult = capturePaidSpeakerAfterFailure({
+      job: { ...rescueJob, assetRefs: [...rescueJob.assetRefs] },
+      speakerFile: invalidSpeakerFile,
+      projectStore: rescueStore,
+      saveJob: () => { throw new Error('invalid capture must not save'); },
+      appendLog: () => {},
+    });
+  });
+  assert.equal(invalidCaptureResult, false);
+  let ingestThrowResult;
+  assert.doesNotThrow(() => {
+    ingestThrowResult = capturePaidSpeakerAfterFailure({
+      job: { ...rescueJob, assetRefs: [...rescueJob.assetRefs] },
+      speakerFile: paidSpeakerFile,
+      projectStore: { ingestAsset: () => { throw new Error('fixture ingest failure'); } },
+      saveJob: () => { throw new Error('ingest failure must not save'); },
+      appendLog: () => {},
+    });
+  });
+  assert.equal(ingestThrowResult, false);
+  const skipGenerateResult = capturePaidSpeakerAfterFailure({
+    job: { ...rescueJob, skipGenerate: true, assetRefs: [] },
+    speakerFile: paidSpeakerFile,
+    projectStore: { ingestAsset: () => { throw new Error('skip-generate must not ingest'); } },
+    saveJob: () => { throw new Error('skip-generate must not save'); },
+    appendLog: () => { throw new Error('skip-generate must not log'); },
+  });
+  assert.equal(skipGenerateResult, false);
 
   const lanAttempt = spawnSync(process.execPath, ['server/index.js'], {
     cwd: ROOT,
@@ -351,6 +452,18 @@ async function main() {
   });
   assert.equal(truncatedPng.status, 415);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot7.png')), false);
+  const disguisedJpeg = await fetch(base + `/api/jobs/${id}/upload?name=shot6.jpg`, {
+    method: 'POST',
+    body: TEXT_DISGUISED_JPEG_FIXTURE,
+  });
+  assert.equal(disguisedJpeg.status, 415);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot6.jpg')), false);
+  const truncatedJpeg = await fetch(base + `/api/jobs/${id}/upload?name=shot5.jpeg`, {
+    method: 'POST',
+    body: TRUNCATED_JPEG_FIXTURE,
+  });
+  assert.equal(truncatedJpeg.status, 415);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', id, 'input', 'shot5.jpeg')), false);
   const mismatchedImage = await fetch(base + `/api/jobs/${id}/upload?name=shot8.png`, {
     method: 'POST',
     body: MP4_FIXTURE,
@@ -394,6 +507,32 @@ async function main() {
   assert.equal(reusableVideo.mediaType, 'video/mp4');
   assert.equal(Object.hasOwn(reusableImage, 'path'), false);
   assert.equal(Object.hasOwn(reusableVideo, 'path'), false);
+
+  const jobsBeforeReuseLimit = await request(base, '/api/jobs');
+  const jobDirsBeforeReuseLimit = fs.readdirSync(path.join(DATA_DIR, 'jobs')).sort();
+  const projectBeforeReuseLimit = await request(base, `/api/projects/${created.job.projectId}`);
+  const overLimitReuse = await fetch(base + '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      reuseAssetIds: Array.from({ length: 51 }, (_, index) => `asset-over-limit-${index}`),
+      template: 'focusstock',
+      title: '不應建立的素材超限版本',
+      body: '超過五十個素材時，不能留下 Revision 或 Run。',
+    }),
+  });
+  assert.equal(overLimitReuse.status, 400);
+  assert.match((await overLimitReuse.json()).error, /50/);
+  const projectAfterReuseLimit = await request(base, `/api/projects/${created.job.projectId}`);
+  const jobsAfterReuseLimit = await request(base, '/api/jobs');
+  assert.equal(projectAfterReuseLimit.project.latestRevision,
+    projectBeforeReuseLimit.project.latestRevision);
+  assert.equal(projectAfterReuseLimit.project.revisions.length,
+    projectBeforeReuseLimit.project.revisions.length);
+  assert.deepEqual(jobsAfterReuseLimit.jobs.map((job) => job.id),
+    jobsBeforeReuseLimit.jobs.map((job) => job.id));
+  assert.deepEqual(fs.readdirSync(path.join(DATA_DIR, 'jobs')).sort(), jobDirsBeforeReuseLimit);
 
   const imageAsset = await fetch(base + `/api/projects/${created.job.projectId}/assets/${reusableImage.id}`);
   assert.equal(imageAsset.status, 200);
@@ -550,7 +689,10 @@ async function main() {
   console.log('✅ Project 圖片與 B-Roll 可跨 Revision 重用，SHA-256 相同角色內容只保存一次');
   console.log('✅ B-Roll 與講者影片角色分離，影片預覽支援 Range／416');
   console.log('✅ PNG 逐 chunk 驗證邊界、IHDR／IDAT／IEND 與 CRC，截斷／偽裝結構被拒絕');
+  console.log('✅ JPEG marker stream 驗證 SOF／SOS／entropy／EOI，偽裝、截斷與尾隨資料被拒絕');
   console.log('✅ MP4/MOV/WebM 依 video track 驗證；late-moov 合法，純音訊與偽裝內容拒絕');
+  console.log('✅ 超過 50 個沿用素材時不建立 Revision、Run 或 job 目錄');
+  console.log('✅ 付費講者影片失敗救援寫回 Project／Revision；invalid／ingest error 維持 best-effort');
   console.log('✅ 非法 brand、upload 檔名與偽裝媒體內容被拒絕');
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');
   console.log('✅ submit 後不可重複排隊或覆寫 input');

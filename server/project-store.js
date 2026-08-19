@@ -35,6 +35,7 @@ const PNG_CRC_TABLE = (() => {
   }
   return table;
 })();
+const JPEG_SOF_MARKERS = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc9, 0xca, 0xcb]);
 
 function invalidContainer() {
   const error = new Error('invalid media container');
@@ -166,6 +167,193 @@ function inspectPng(fd, fileSize) {
         throw invalidContainer();
       }
       offset = chunkEnd;
+    }
+  } catch (error) {
+    if (error.code === 'INVALID_MEDIA_CONTAINER') return null;
+    throw error;
+  }
+  return null;
+}
+
+function readJpegMarker(fd, offset, fileSize) {
+  if (fileSize - offset < 2 || readExactly(fd, offset, 1)[0] !== 0xff)
+    throw invalidContainer();
+  let cursor = offset + 1;
+  let fillBytes = 0;
+  let code;
+  do {
+    if (cursor >= fileSize || fillBytes > 64) throw invalidContainer();
+    code = readExactly(fd, cursor, 1)[0];
+    cursor += 1;
+    fillBytes += 1;
+  } while (code === 0xff);
+  if (code === 0x00) throw invalidContainer();
+  return { code, start: offset, end: cursor };
+}
+
+function readJpegSegment(fd, markerEnd, fileSize) {
+  if (fileSize - markerEnd < 2) throw invalidContainer();
+  const length = readExactly(fd, markerEnd, 2).readUInt16BE(0);
+  if (length < 2 || length > fileSize - markerEnd) throw invalidContainer();
+  return { dataStart: markerEnd + 2, end: markerEnd + length, payloadLength: length - 2 };
+}
+
+function readJpegFrame(fd, segment, markerCode) {
+  if (segment.payloadLength < 6) throw invalidContainer();
+  const header = readExactly(fd, segment.dataStart, 6);
+  const precision = header[0];
+  const height = header.readUInt16BE(1);
+  const width = header.readUInt16BE(3);
+  const componentCount = header[5];
+  if (!width || !height || componentCount < 1 || componentCount > 4
+      || segment.payloadLength !== 6 + componentCount * 3
+      || (markerCode === 0xc0 && precision !== 8)
+      || ([0xc1, 0xc2, 0xc9, 0xca].includes(markerCode) && ![8, 12].includes(precision))
+      || ([0xc3, 0xcb].includes(markerCode) && (precision < 2 || precision > 16))) {
+    throw invalidContainer();
+  }
+  const componentBytes = readExactly(fd, segment.dataStart + 6, componentCount * 3);
+  const components = new Set();
+  for (let index = 0; index < componentCount; index += 1) {
+    const id = componentBytes[index * 3];
+    const sampling = componentBytes[index * 3 + 1];
+    const horizontal = sampling >>> 4;
+    const vertical = sampling & 0x0f;
+    const quantizationTable = componentBytes[index * 3 + 2];
+    if (components.has(id) || horizontal < 1 || horizontal > 4 || vertical < 1 || vertical > 4
+        || quantizationTable > 3) throw invalidContainer();
+    components.add(id);
+  }
+  return { markerCode, components };
+}
+
+function readJpegScan(fd, segment, frame) {
+  if (!frame || segment.payloadLength < 4) throw invalidContainer();
+  const componentCount = readExactly(fd, segment.dataStart, 1)[0];
+  if (componentCount < 1 || componentCount > frame.components.size
+      || segment.payloadLength !== 4 + componentCount * 2) throw invalidContainer();
+  const scanBytes = readExactly(fd, segment.dataStart + 1, componentCount * 2 + 3);
+  const components = new Set();
+  for (let index = 0; index < componentCount; index += 1) {
+    const id = scanBytes[index * 2];
+    const tables = scanBytes[index * 2 + 1];
+    if (!frame.components.has(id) || components.has(id) || (tables >>> 4) > 3 || (tables & 0x0f) > 3)
+      throw invalidContainer();
+    components.add(id);
+  }
+  const parameterOffset = componentCount * 2;
+  const spectralStart = scanBytes[parameterOffset];
+  const spectralEnd = scanBytes[parameterOffset + 1];
+  const approximationHigh = scanBytes[parameterOffset + 2] >>> 4;
+  const approximationLow = scanBytes[parameterOffset + 2] & 0x0f;
+  if ([0xc0, 0xc1, 0xc9].includes(frame.markerCode)) {
+    if (spectralStart !== 0 || spectralEnd !== 63 || approximationHigh !== 0 || approximationLow !== 0)
+      throw invalidContainer();
+  } else if ([0xc2, 0xca].includes(frame.markerCode)) {
+    if (spectralStart > spectralEnd || spectralEnd > 63
+        || (spectralStart === 0 && spectralEnd !== 0)
+        || (spectralStart > 0 && componentCount !== 1)
+        || approximationHigh > 13 || approximationLow > 13
+        || (approximationHigh && approximationHigh !== approximationLow + 1)) {
+      throw invalidContainer();
+    }
+  } else if (spectralStart < 1 || spectralStart > 7 || spectralEnd !== 0
+      || approximationHigh !== 0) {
+    throw invalidContainer();
+  }
+  return components;
+}
+
+function scanJpegEntropy(fd, start, fileSize, budget, buffer) {
+  let nextOffset = start;
+  let index = 0;
+  let buffered = 0;
+  let dataBytes = 0;
+  const nextByte = () => {
+    if (index >= buffered) {
+      buffered = fs.readSync(fd, buffer, 0, Math.min(buffer.length, fileSize - nextOffset), nextOffset);
+      index = 0;
+      if (!buffered) throw invalidContainer();
+    }
+    const result = { value: buffer[index], offset: nextOffset };
+    index += 1;
+    nextOffset += 1;
+    return result;
+  };
+
+  while (nextOffset < fileSize) {
+    const byte = nextByte();
+    if (byte.value !== 0xff) {
+      dataBytes += 1;
+      continue;
+    }
+    const markerStart = byte.offset;
+    let fillBytes = 0;
+    let code;
+    do {
+      if (nextOffset >= fileSize || fillBytes > 64) throw invalidContainer();
+      code = nextByte().value;
+      fillBytes += 1;
+    } while (code === 0xff);
+    if (code === 0x00) {
+      dataBytes += 1;
+      continue;
+    }
+    takeContainerElement(budget);
+    if ((code >= 0xd0 && code <= 0xd7) || code === 0x01) continue;
+    if (!dataBytes) throw invalidContainer();
+    return markerStart;
+  }
+  throw invalidContainer();
+}
+
+function isJpegSegmentMarker(code) {
+  return JPEG_SOF_MARKERS.has(code) || code === 0xc4 || code === 0xcc || code === 0xda
+    || code === 0xdb || code === 0xdd || code === 0xfe || (code >= 0xe0 && code <= 0xef);
+}
+
+/**
+ * Validate a standalone JPEG marker stream without decoding entropy-coded pixels. Segment lengths,
+ * frame/scan metadata, byte stuffing, restart markers and the terminal EOI are all fail-closed.
+ */
+function inspectJpeg(fd, fileSize) {
+  const budget = { count: 0 };
+  // Progressive JPEGs can contain many scans; reuse one bounded buffer instead of allocating
+  // 64 KiB for every SOS segment in a hostile file.
+  const entropyBuffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(fileSize, 1)));
+  let offset = 2;
+  let frame = null;
+  let scanCount = 0;
+  const scannedComponents = new Set();
+  try {
+    if (fileSize < 4 || !readExactly(fd, 0, 2).equals(Buffer.from([0xff, 0xd8]))) return null;
+    while (offset < fileSize) {
+      takeContainerElement(budget);
+      const marker = readJpegMarker(fd, offset, fileSize);
+      offset = marker.end;
+      if (marker.code === 0xd9) {
+        if (!frame || !scanCount || scannedComponents.size !== frame.components.size
+            || offset !== fileSize) throw invalidContainer();
+        return { kind: 'image', mediaType: 'image/jpeg', extension: '.jpg' };
+      }
+      if (marker.code === 0xd8 || marker.code === 0x00
+          || (marker.code >= 0xd0 && marker.code <= 0xd7) || !isJpegSegmentMarker(marker.code)) {
+        throw invalidContainer();
+      }
+      const segment = readJpegSegment(fd, marker.end, fileSize);
+      if (JPEG_SOF_MARKERS.has(marker.code)) {
+        if (frame) throw invalidContainer();
+        frame = readJpegFrame(fd, segment, marker.code);
+      } else if (marker.code === 0xda) {
+        const scanComponents = readJpegScan(fd, segment, frame);
+        for (const component of scanComponents) scannedComponents.add(component);
+        scanCount += 1;
+        offset = scanJpegEntropy(fd, segment.end, fileSize, budget, entropyBuffer);
+        continue;
+      } else if (marker.code === 0xdd && segment.payloadLength !== 2) {
+        throw invalidContainer();
+      }
+      offset = segment.end;
     }
   } catch (error) {
     if (error.code === 'INVALID_MEDIA_CONTAINER') return null;
@@ -391,24 +579,17 @@ function inspectWebm(fd, fileSize) {
 function inspectMediaFile(file) {
   const fd = fs.openSync(file, 'r');
   const head = Buffer.alloc(64 * 1024);
-  const tail = Buffer.alloc(64 * 1024);
   let headSize;
-  let tailSize;
   let fileSize;
   try {
     fileSize = fs.fstatSync(fd).size;
     headSize = fs.readSync(fd, head, 0, head.length, 0);
-    const tailStart = Math.max(fileSize - tail.length, 0);
-    tailSize = fs.readSync(fd, tail, 0, Math.min(tail.length, fileSize), tailStart);
     const bytes = head.subarray(0, headSize);
-    const tailBytes = tail.subarray(0, tailSize);
     if (bytes.length >= PNG_SIGNATURE.length
         && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE))
       return inspectPng(fd, fileSize);
-    if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-        && tailBytes.includes(Buffer.from([0xff, 0xd9]))) {
-      return { kind: 'image', mediaType: 'image/jpeg', extension: '.jpg' };
-    }
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8)
+      return inspectJpeg(fd, fileSize);
     return inspectIsoBmff(fd, fileSize) || inspectWebm(fd, fileSize);
   } finally {
     fs.closeSync(fd);

@@ -32,6 +32,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const { createProjectStore, extensionForMediaType, inspectMediaFile } = require('./project-store');
+const { capturePaidSpeakerAfterFailure } = require('./project-assets');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -847,11 +848,21 @@ async function doPrepare(job) {
   if (job.skipGenerate) args.push('--skip-generate');
   if (job.noSpeed) args.push('--no-speed');
   if (job.withAd) args.push('--with-ad');
-  await runPipeline(job, args);
-
-  captureProjectAssets(job);
-  snapshotWorkspace(job);
-  job.planView = buildPlanView(job);
+  try {
+    await runPipeline(job, args);
+    captureProjectAssets(job);
+    snapshotWorkspace(job);
+    job.planView = buildPlanView(job);
+  } catch (error) {
+    capturePaidSpeakerAfterFailure({
+      job,
+      speakerFile: path.join(ROOT, 'public', 'heygen.mp4'),
+      projectStore: PROJECT_STORE,
+      saveJob,
+      appendLog,
+    });
+    throw error;
+  }
   job.preparedAt = nowISO();
 
   if (job.autoApprove) {
@@ -1020,6 +1031,7 @@ const MIME = {
 };
 
 const UPLOAD_LIMITS = Object.freeze({ image: 25 * 1024 * 1024, video: 500 * 1024 * 1024 });
+const MAX_REUSED_ASSETS = 50;
 
 function uploadSpec(name) {
   if (/^heygen\.mp4$/i.test(name)) return { kind: 'speaker-video', mediaKind: 'video', limit: UPLOAD_LIMITS.video };
@@ -1171,11 +1183,13 @@ const server = http.createServer(async (req, res) => {
       const title = String(body.title || '').split('\n')
         .map((l) => (tcfg.wrap ? l.trim() : l.trim().slice(0, tcfg.per))).filter(Boolean)
         .slice(0, tcfg.lines).join('\n');
-      const id = newId();
       const reuseAssetIds = Array.isArray(body.reuseAssetIds)
-        ? [...new Set(body.reuseAssetIds.map(String))].slice(0, 50) : [];
+        ? [...new Set(body.reuseAssetIds.map(String))] : [];
+      if (reuseAssetIds.length > MAX_REUSED_ASSETS)
+        return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片與 B-Roll 素材` });
       if (!body.projectId && reuseAssetIds.length)
         return send(res, 400, { error: '建立新影片時不能引用其他專案的素材' });
+      const id = newId();
       let project;
       if (body.projectId) {
         project = PROJECT_STORE.get(body.projectId);
