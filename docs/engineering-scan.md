@@ -28,7 +28,7 @@ This does not prove that rendered video output is visually identical after the R
 
 ## Remaining P1 blockers
 
-- `whisper` command is missing, so transcription and the full pipeline are not ready.
+- The legacy Python `whisper` dependency has been replaced by `whisper-cli` plus a schema adapter. Full-pipeline readiness still depends on the pinned local model, valid fonts, and provider configuration reported by `doctor:full`.
 - 原專案的 `public/NotoSansTC-Regular.ttf` 與 `NotoSansTC-Bold.ttf` 實際是 HTML，不是字型；候選 baseline 不納入這兩個錯誤檔案，需從可驗證來源補回真正字型後才能做 render regression。
 - Provider keys are intentionally absent from the candidate repo.
 - Historical review jobs are incomplete and must be recovered before cleanup.

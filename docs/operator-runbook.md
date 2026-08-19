@@ -10,10 +10,12 @@
 cd /Users/chiu/Developer/marketing-video/app
 nvm install
 nvm use
+brew install ffmpeg whisper-cpp tesseract tesseract-lang
 npm ci
+npm run setup:whisper
 ```
 
-目標 runtime 是 Node 22 LTS。`npm ci` 必須以 `package-lock.json` 為唯一依賴來源。
+目標 runtime 是 Node 22 LTS。`npm ci` 必須以 `package-lock.json` 為唯一 Node.js 依賴來源；FFmpeg、`whisper-cli`、Tesseract 與模型權重屬於主機／runtime dependency，不會出現在 lockfile，改由上述安裝命令與 `doctor:full` 驗證。
 
 ## 啟動前檢查
 
@@ -23,7 +25,7 @@ npm run smoke
 ```
 
 - `doctor` 預設只以 localhost startup blocker 決定 exit code。
-- `doctor:full` 會把 Whisper、FFmpeg、Tesseract、npm packages 等完整出片條件納入 gate。
+- `doctor:full` 會把 `whisper-cli`、模型檔與 SHA-256、FFmpeg、Tesseract、npm packages 等完整出片條件納入 gate。
 - `smoke` 使用 repo 外的 OS 暫存目錄、`TEST_MODE=1` 與停用 worker；provider keys 會被清空，child process／outbound network 嘗試會被 guard 擋下並使測試失敗。
 
 ## 啟動 localhost
@@ -66,6 +68,10 @@ Server 與 `doctor` 都會讀取 repo root 的 `.env`；既有 shell／launchd �
 | `MINIMAX_API_KEY` | MiniMax fallback | 否 |
 | `MINIMAX_GROUP_ID` | MiniMax fallback | 否 |
 | `OPENAI_API_KEY` | 選用的 AI 生圖／判圖腳本 | 否 |
+| `WHISPER_MODEL_PATH` | 本機 whisper.cpp 模型；預設 `.cache/whisper/ggml-base-q5_1.bin` | 僅 ASR |
+| `WHISPER_MODEL_SHA256` | 模型校驗碼；換自訂模型時必須同步設定 | 僅 ASR |
+| `WHISPER_THREADS` | CPU thread 數；預設 `4` | 僅 ASR |
+| `WHISPER_DEVICE` | `cpu`（可重現預設）或 `auto` | 僅 ASR |
 
 ## 歷史資料盤點
 
@@ -83,7 +89,7 @@ npm run cleanup:plan -- --root='/Users/chiu/Downloads/marketing-video 2'
 - 目前自動 OCR／素材配置／Remotion 合成仍只消費圖片；B-Roll 已可加入、預覽及沿用，但「保存於 Project」不等於「已自動剪入成片」。
 
 - `npm start` 是 Remotion Studio，不是 localhost 使用者前台。
-- 完整 pipeline 仍需要 `ffmpeg`、`ffprobe`、`whisper` 與 `tesseract`。
+- 完整 pipeline 仍需要 `ffmpeg`、`ffprobe`、`whisper-cli`、已校驗的 base-q5_1 模型與 `tesseract`。
 - 原專案兩個 `.ttf` 實際是 HTML，候選 repo 刻意不納入；正式 render 前要補回有效且授權清楚的 Noto Sans TC 字型。
 - LAN 認證尚未完成；不可把目前版本直接開到 `0.0.0.0`。
 - `public/` 與部分 `src/*.generated.json` 仍是共用 mutable workspace；這是下一階段解耦範圍。

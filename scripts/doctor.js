@@ -4,12 +4,15 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const full = process.argv.includes('--full');
 const json = process.argv.includes('--json');
 const checks = [];
+const DEFAULT_WHISPER_MODEL = path.join(ROOT, '.cache/whisper/ggml-base-q5_1.bin');
+const DEFAULT_WHISPER_MODEL_SHA256 = '422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898';
 
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
 
@@ -60,10 +63,23 @@ const nodeMajor = Number(process.versions.node.split('.')[0]);
 add('startup', nodeMajor >= 20 ? (nodeMajor === 22 ? 'pass' : 'warn') : 'fail', 'Node.js',
   `v${process.versions.node}；專案目標為 Node 22 LTS`);
 
-for (const name of ['npm', 'ffmpeg', 'ffprobe', 'whisper', 'tesseract']) {
+for (const name of ['npm', 'ffmpeg', 'ffprobe', 'whisper-cli', 'tesseract']) {
   const found = commandExists(name);
   const scope = name === 'npm' ? 'install' : 'pipeline';
   add(scope, found ? 'pass' : 'fail', name, found ? found : '找不到 command');
+}
+
+const configuredModel = process.env.WHISPER_MODEL_PATH || DEFAULT_WHISPER_MODEL;
+const whisperModel = path.isAbsolute(configuredModel) ? configuredModel : path.resolve(ROOT, configuredModel);
+const expectedModelSha = process.env.WHISPER_MODEL_SHA256 || DEFAULT_WHISPER_MODEL_SHA256;
+if (!fs.existsSync(whisperModel)) {
+  add('pipeline', 'fail', 'whisper:model', `找不到 ${whisperModel}；請執行 npm run setup:whisper`);
+} else {
+  const actualModelSha = crypto.createHash('sha256').update(fs.readFileSync(whisperModel)).digest('hex');
+  add('pipeline', actualModelSha === expectedModelSha ? 'pass' : 'fail', 'whisper:model',
+    actualModelSha === expectedModelSha
+      ? `${path.basename(whisperModel)}；SHA-256 校驗通過`
+      : `SHA-256 不符；預期 ${expectedModelSha}，實際 ${actualModelSha}`);
 }
 
 if (commandExists('tesseract')) {
