@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
+ * RETIRED: historical payload experiment only; execution is blocked before provider access.
+ * Use run.js with explicit identity and --dry-run instead.
+ *
  * 一次性測試：POST /v3/videos（Avatar IV 是 v3 的預設引擎）。
  * 專門用來驗「斷句」有沒有改善 —— 同一段腳本，可開關 <break> 標籤與 voice_settings。
  *
  * ⚠️ 會消耗 HeyGen 額度，請「手動」執行（Claude 不會自動跑）。
  * 完全獨立，不碰 run.js / public/heygen.mp4 / pipeline。
  *
- * 用法：
+ * 歷史用法（現已停用）：
  *   node scripts/test-v3-videos.js                    # 用下面 CONFIG 的預設
  *   TEXT="要唸的字" node scripts/test-v3-videos.js
  *   SPEED=0.95 LOCALE=zh-TW node scripts/test-v3-videos.js
@@ -14,6 +17,8 @@
  *
  * 建議測法：先跑一次 NO_BREAK=1 當基準，再跑一次帶 break 的，兩支並排聽。
  */
+
+require('./retired-paid-provider-script').stopRetiredPaidProviderScript('test-v3-videos.js');
 
 const fs = require("fs");
 const path = require("path");

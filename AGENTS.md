@@ -21,6 +21,13 @@ This repository hosts a localhost UI that creates queued video jobs and a worker
 - A historical MP4 is not evidence that the current checkout is reproducible.
 - Never invoke paid provider scripts during tests unless the user explicitly authorizes that run.
 
+## HeyGen create naming
+
+- Every HeyGen create request must send a non-empty `title` so the Dashboard entry can be matched to its experiment, revision, duration, and credits.
+- Experimental videos use `測試用EXP-NNN-VN`, for example `測試用EXP-001-V1`. Normalize `experience-001` to `EXP-001` and `v1` to `V1`.
+- Generate and verify the title in the payload dry-run before the paid request. When a provider ledger exists, save the same title there.
+- Renaming is metadata only. Never regenerate a video merely to change its title.
+
 ## Architecture
 
 - `server/public/index.html`: browser UI.
