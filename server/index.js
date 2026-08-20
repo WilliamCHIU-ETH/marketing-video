@@ -67,8 +67,12 @@ const WEB_DIR = path.join(__dirname, 'public');
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 4000);
 const TEST_MODE = envFlag('TEST_MODE');
-const DISABLE_WORKER = TEST_MODE || envFlag('DISABLE_WORKER');
 const DATA_DIR = resolveFromRoot(process.env.DATA_DIR || 'runtime-data');
+// Provider-free smoke may opt into the real queue/doRender path with a DATA_DIR-local fixture.
+// Production can never select this entry, and TEST_MODE remains worker-disabled by default.
+const TEST_PIPELINE_ENTRY = TEST_MODE && envFlag('ENABLE_TEST_WORKER')
+  && process.env.TEST_PIPELINE_ENTRY ? path.resolve(process.env.TEST_PIPELINE_ENTRY) : null;
+const DISABLE_WORKER = envFlag('DISABLE_WORKER') || (TEST_MODE && !TEST_PIPELINE_ENTRY);
 const LOCK = TEST_MODE ? path.join(DATA_DIR, '.run.lock') : path.join(ROOT, '.run.lock');
 const WORKSPACE_OWNER_FILE = TEST_MODE
   ? path.join(DATA_DIR, '.run.owner.json')
@@ -78,6 +82,9 @@ const WORKSPACE_OWNER_FILE = TEST_MODE
 const WORKSPACE_PUBLIC_DIR = TEST_MODE
   ? path.join(DATA_DIR, 'workspace', 'public')
   : path.join(ROOT, 'public');
+const WORKSPACE_OUTPUT_DIR = TEST_MODE
+  ? path.join(DATA_DIR, 'workspace', 'out')
+  : path.join(ROOT, 'out');
 
 if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) {
   throw new Error(`PORT 不合法：${process.env.PORT}`);
@@ -91,6 +98,15 @@ if (TEST_MODE && !process.env.DATA_DIR) {
 }
 if (TEST_MODE && isWithin(fs.realpathSync(ROOT), resolvedPathIncludingMissing(DATA_DIR))) {
   throw new Error('TEST_MODE 的 DATA_DIR 必須位於 repo 外，且不可透過 symlink 指回 repo');
+}
+if (TEST_PIPELINE_ENTRY) {
+  let entryStat;
+  try { entryStat = fs.lstatSync(TEST_PIPELINE_ENTRY); } catch (_) {}
+  const dataRoot = resolvedPathIncludingMissing(DATA_DIR);
+  const entry = resolvedPathIncludingMissing(TEST_PIPELINE_ENTRY);
+  if (!entryStat || !entryStat.isFile() || entryStat.isSymbolicLink()
+      || !isWithin(dataRoot, entry) || entry === dataRoot)
+    throw new Error('TEST_PIPELINE_ENTRY 必須是 DATA_DIR 內的一般檔案');
 }
 
 const JOBS_DIR = path.join(DATA_DIR, 'jobs');
@@ -257,6 +273,57 @@ function fileSha256(file) {
   return hash.digest('hex');
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+
+function atomicWriteFile(file, content, mode = 0o600) {
+  ensureDir(path.dirname(file));
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, content, { mode, flag: 'wx' });
+    const fd = fs.openSync(temp, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, file);
+  } finally {
+    try { fs.unlinkSync(temp); } catch (_) {}
+  }
+}
+
+function atomicCopyVerified(source, target, { size, sha256 }) {
+  const sourceStat = fs.lstatSync(source);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size !== size
+      || fileSha256(source) !== sha256)
+    throw new Error(`來源檔與 completion evidence 不一致：${path.basename(source)}`);
+  const matchesExpected = (file) => {
+    try {
+      const stat = fs.lstatSync(file);
+      return stat.isFile() && !stat.isSymbolicLink() && stat.size === size
+        && fileSha256(file) === sha256;
+    } catch (_) {
+      return false;
+    }
+  };
+  if (fs.existsSync(target)) {
+    if (!matchesExpected(target)) throw new Error(`保留檔衝突：${path.basename(target)}`);
+    return target;
+  }
+  ensureDir(path.dirname(target));
+  const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.copyFileSync(source, temp, fs.constants.COPYFILE_EXCL);
+    const fd = fs.openSync(temp, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (!matchesExpected(temp)) throw new Error(`保留檔驗證失敗：${path.basename(target)}`);
+    try {
+      fs.linkSync(temp, target);
+    } catch (error) {
+      if (error.code !== 'EEXIST' || !matchesExpected(target)) throw error;
+    }
+    return target;
+  } finally {
+    try { fs.unlinkSync(temp); } catch (_) {}
+  }
+}
+
 /** 本機在區網上的 IP，開機訊息要印給同事看 */
 function lanIP() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -305,7 +372,7 @@ function ownedJobDir(id) {
 
 function ownedJobPayloadDir(id, subdir) {
   const dir = ownedJobDir(id);
-  if (!dir || !/^(input|state|thumbs|out)$/.test(subdir)) return null;
+  if (!dir || !/^(input|state|thumbs|out|pipeline)$/.test(subdir)) return null;
   const target = path.join(dir, subdir);
   if (!fs.existsSync(target)) return target;
   try {
@@ -315,6 +382,40 @@ function ownedJobPayloadDir(id, subdir) {
   } catch (_) {
     return null;
   }
+}
+
+function revisionNeedsJobSync(job) {
+  if (!job.projectId || !job.revisionId) return false;
+  if (!['review', 'done', 'failed', 'cancelled', 'detached-done'].includes(job.status)) return false;
+  let revision;
+  try { revision = PROJECT_STORE.getRevision(job.projectId, job.revisionId); }
+  catch (_) { return false; }
+  if (!revision) return false;
+  // Ownership disagreement is corruption/contested state, not a half-written transition. Never
+  // "repair" it from job.json or cleanup could be tricked into trusting the wrong Run.
+  if ((revision.jobId && revision.jobId !== job.id)
+      || (revision.runId && revision.runId !== job.id)) return false;
+  const expected = {
+    jobId: job.id,
+    runId: job.id,
+    status: job.status,
+    owner: job.owner,
+    title: job.title,
+    assetRefs: job.assetRefs || [],
+    files: job.files || [],
+    outputs: job.outputs || [],
+    archived: job.archived || [],
+    finishedAt: job.finishedAt || null,
+  };
+  const revisionMismatch = Object.entries(expected).some(([key, value]) =>
+    JSON.stringify(revision[key] === undefined ? null : revision[key])
+      !== JSON.stringify(value === undefined ? null : value));
+  let project;
+  try { project = PROJECT_STORE.get(job.projectId); } catch (_) { return false; }
+  const summary = project && project.revisions.find((item) => item.id === job.revisionId);
+  const summaryMismatch = !summary || summary.jobId !== job.id || summary.status !== job.status
+    || JSON.stringify(summary.outputs || []) !== JSON.stringify(job.outputs || []);
+  return revisionMismatch || summaryMismatch;
 }
 
 function loadJobs() {
@@ -353,7 +454,10 @@ function loadJobs() {
         recoveryChanged = true;
       }
       out.push(j);
-      if (recoveryChanged) recovered.push(j);
+      // saveJob writes the atomic job record before the Project metadata. A crash in that narrow
+      // window can leave Job done/review while Revision still says rendering. Replaying only an
+      // actual mismatch repairs that half-transition without refreshing timestamps on normal boot.
+      if (recoveryChanged || revisionNeedsJobSync(j)) recovered.push(j);
     } catch (_) {}
   }
   return {
@@ -364,7 +468,8 @@ function loadJobs() {
 
 const startupJobs = loadJobs();
 let JOBS = startupJobs.jobs;
-// 一般 restart 只是 replay，不是 Project 更新；只有 recovery 真改變狀態才同步回 Revision。
+// 一般 restart 不刷新 Project；只有 detached recovery 改變狀態，或偵測到 job-first
+// 半完成 transition 時，才同步回 Revision／Project summary。
 startupJobs.recovered.forEach(saveJob);
 
 function saveJob(j) {
@@ -389,7 +494,7 @@ function saveJob(j) {
 // edited; only saveJob() is allowed to synchronize an actual status/asset change to the Revision.
 function writeJobRecord(j) {
   ensureDir(jobDir(j.id));
-  fs.writeFileSync(jobFile(j.id), JSON.stringify(j, null, 2));
+  atomicWriteFile(jobFile(j.id), JSON.stringify(j, null, 2));
 }
 
 function getJob(id) { return JOBS.find((j) => j.id === id); }
@@ -511,6 +616,279 @@ function deferDetachedCapture(job, message) {
     appendLog(job, `\n⚠️ ${message}；保留工作區並在稍後重試（第 ${attempts} 次）。\n`);
 }
 
+function deferNormalRenderRecovery(job, error) {
+  const pid = Number(job.workspaceRunPid);
+  job.status = 'detached';
+  job.pid = isPidValue(pid) ? pid : null;
+  job.detachedFromStatus = 'rendering';
+  if (isPidValue(pid)) job.detachedOwnerPid = pid;
+  deferDetachedCapture(job, error.message);
+}
+
+function expectedPipelineOutputs(job) {
+  const derived = (job.workspaceRunStatus === 'rendering' || job.detachedFromStatus === 'rendering')
+    ? expectedRenderOutputs(job) : [];
+  if (!Array.isArray(job.workspaceRunExpectedOutputs)
+      || job.workspaceRunExpectedOutputs.length !== derived.length
+      || job.workspaceRunExpectedOutputs.some((item, index) => item !== derived[index])) return null;
+  return derived;
+}
+
+function evidenceOutputSource(job, item) {
+  if (!item || !item.after || item.after.state !== 'file'
+      || !Number.isSafeInteger(item.after.size) || item.after.size <= 0
+      || !SHA256_HEX.test(item.after.sha256 || '')) return null;
+  const fallbackDir = ownedJobPayloadDir(job.id, 'out');
+  const candidates = [
+    path.join(WORKSPACE_OUTPUT_DIR, item.name),
+    fallbackDir && path.join(fallbackDir, item.name),
+  ].filter(Boolean);
+  for (const file of candidates) {
+    try {
+      const stat = fs.lstatSync(file);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size === item.after.size
+          && fileSha256(file) === item.after.sha256) return file;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function readPipelineEvidence(job) {
+  let result;
+  try {
+    if (job.workspaceRunEvidenceVersion !== 1)
+      return { state: 'missing', message: '這筆 Run 沒有 durable completion evidence' };
+    const file = pipelineEvidenceFiles(job).result;
+    if (!fs.existsSync(file)) return { state: 'missing', message: '找不到 completion evidence' };
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      return { state: 'contested', message: 'completion evidence 不是一般檔案' };
+    result = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    return { state: 'contested', message: `completion evidence 無法讀取：${error.message}` };
+  }
+
+  const expected = expectedPipelineOutputs(job);
+  if (!expected)
+    return { state: 'contested', message: 'Run 預期 output manifest 與 template／選項不符' };
+  const identityMatches = result && result.schemaVersion === 1
+    && result.jobId === job.id
+    && result.projectId === (job.projectId || null)
+    && result.revisionId === (job.revisionId || null)
+    && result.workspaceRunToken === job.workspaceRunToken
+    && result.runStatus === job.workspaceRunStatus
+    && result.owner && result.owner.token === job.workspaceRunToken
+    && isPidValue(result.owner.pid)
+    && (!isPidValue(job.workspaceRunPid) || Number(result.owner.pid) === Number(job.workspaceRunPid));
+  if (!identityMatches)
+    return { state: 'contested', message: 'completion evidence identity／owner 不屬於這個 Run' };
+  if (!Number.isInteger(result.exitCode) || typeof result.finishedAt !== 'string'
+      || !Number.isFinite(Date.parse(result.finishedAt)) || !Array.isArray(result.outputs))
+    return { state: 'contested', message: 'completion evidence schema 不完整' };
+  if (result.outputs.length !== expected.length
+      || result.outputs.some((item, index) => !item || typeof item !== 'object'
+        || item.relativePath !== expected[index]
+        || item.name !== path.basename(expected[index])
+        || !item.after || typeof item.after !== 'object'
+        || typeof item.changedFromBefore !== 'boolean'))
+    return { state: 'contested', message: 'completion evidence output manifest 與預期不符' };
+
+  const outputs = result.outputs.map((item) => ({ ...item, source: evidenceOutputSource(job, item) }));
+  let outputFailure = null;
+  if (expected.length) {
+    for (const item of outputs) {
+      if (item.after.state !== 'file') {
+        outputFailure = `${item.name} ${item.after.state === 'missing' ? '缺失' : '未完整產生'}`;
+        break;
+      }
+      if (!item.changedFromBefore) {
+        outputFailure = `${item.name} 與 render 前完全相同，不能證明是本輪輸出`;
+        break;
+      }
+      if (!item.source) {
+        outputFailure = `${item.name} 已不存在或內容與 evidence 不符`;
+        break;
+      }
+      try {
+        const media = inspectMediaFile(item.source);
+        if (!media || media.kind !== 'video') outputFailure = `${item.name} 不是完整可播放影片`;
+      } catch (error) {
+        outputFailure = `${item.name} 無法驗證：${error.message}`;
+      }
+      if (outputFailure) break;
+    }
+  }
+  if (result.exitCode !== 0 || outputFailure) {
+    const reason = result.exitCode !== 0 ? `run.js 結束碼 ${result.exitCode}` : outputFailure;
+    return { state: 'failed', message: reason, result, outputs };
+  }
+  return { state: 'success', message: 'ok', result, outputs };
+}
+
+function preserveEvidenceOutputs(job, evidence) {
+  const fallbackDir = ownedJobPayloadDir(job.id, 'out');
+  if (!fallbackDir) throw new Error('Run fallback output 目錄 ownership 無法確認');
+  const preserved = [];
+  for (const item of evidence.outputs || []) {
+    if (!item.source || !item.after || item.after.state !== 'file') continue;
+    const target = path.join(fallbackDir, item.name);
+    atomicCopyVerified(item.source, target, {
+      size: item.after.size,
+      sha256: item.after.sha256,
+    });
+    preserved.push({ name: item.name, size: item.after.size, sha256: item.after.sha256 });
+  }
+  return preserved;
+}
+
+function retryableRenderPatch(evidence, preserved) {
+  return {
+    status: 'review',
+    pid: null,
+    error: `render 失敗：${evidence.message}；已保留可驗證 output，可人工確認後重新出片`,
+    finishedAt: null,
+    outputs: preserved,
+    archived: [],
+  };
+}
+
+function commitLegacyOutput(job, item) {
+  const cfg = TEMPLATES[job.template];
+  if (!cfg) throw new Error('Legacy output template 不合法');
+  const date = new Date(job.createdAt || Date.now());
+  const pad = (value) => String(value).padStart(2, '0');
+  const month = `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+  const day = `${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+  const title = String(job.title || '').replace(/\n/g, '').replace(/[\/\\:*?"<>|]/g, '').slice(0, 20);
+  const label = (cfg.outputLabels || {})[item.name] || '';
+  const base = [day, cfg.label, title, label].filter(Boolean).join('-');
+  let target = path.join(ARCHIVE_DIR, month, `${base}.mp4`);
+  // Preserve the historical human-readable name when it is available. A same-content retry reuses
+  // it; only a genuine same-name collision falls back to a deterministic Run-qualified path.
+  if (fs.existsSync(target)) {
+    try {
+      const stat = fs.lstatSync(target);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== item.after.size
+          || fileSha256(target) !== item.after.sha256)
+        target = path.join(ARCHIVE_DIR, month, `${base}-${safeRunId(job.id)}.mp4`);
+    } catch (_) {
+      target = path.join(ARCHIVE_DIR, month, `${base}-${safeRunId(job.id)}.mp4`);
+    }
+  }
+  atomicCopyVerified(item.source, target, {
+    size: item.after.size,
+    sha256: item.after.sha256,
+  });
+  return target;
+}
+
+function finalizeRenderOutputs(job, evidence) {
+  if (!evidence || evidence.state !== 'success' || !evidence.outputs.length)
+    throw new Error('沒有通過驗證的 render completion evidence');
+  const records = [];
+  try {
+    for (const item of evidence.outputs) {
+      const target = job.projectId && job.revisionId
+        ? PROJECT_STORE.commitOutput({
+            projectId: job.projectId,
+            revisionId: job.revisionId,
+            runId: job.id,
+            sourceFile: item.source,
+            name: item.name,
+            size: item.after.size,
+            sha256: item.after.sha256,
+          })
+        : commitLegacyOutput(job, item);
+      records.push({
+        name: item.name,
+        size: item.after.size,
+        sha256: item.after.sha256,
+        archive: path.relative(ROOT, target),
+      });
+    }
+  } catch (error) {
+    // Preserve every verified output before returning control. Both normal execution and restart
+    // recovery keep the queue closed and retry the deterministic Project commit.
+    let fallbackError = null;
+    try { preserveEvidenceOutputs(job, evidence); }
+    catch (preserveError) { fallbackError = preserveError; }
+    const wrapped = new Error(`Project output 封存失敗：${error.message}`
+      + (fallbackError ? `；fallback 保存也失敗：${fallbackError.message}` : ''));
+    wrapped.code = 'OUTPUT_ARCHIVE_RETRY';
+    wrapped.pipelineEvidence = evidence;
+    throw wrapped;
+  }
+  return {
+    finishedAt: evidence.result.finishedAt,
+    outputs: records,
+    archived: records.map((record) => record.archive),
+  };
+}
+
+function transitionJobSafely(job, patch) {
+  const previous = JSON.parse(JSON.stringify(job));
+  Object.assign(job, patch);
+  delete job.detachedCaptureRetryAt;
+  delete job.detachedCaptureAttempts;
+  try {
+    saveJob(job);
+  } catch (error) {
+    for (const key of Object.keys(job)) delete job[key];
+    Object.assign(job, previous);
+    try { writeJobRecord(job); } catch (_) {}
+    throw error;
+  }
+}
+
+function reconcileDetachedRender(job, pid) {
+  const retryAt = Date.parse(job.detachedCaptureRetryAt || '');
+  if (Number.isFinite(retryAt) && retryAt > Date.now()) return false;
+  if (Number(job.detachedOwnerPid) !== pid) {
+    deferDetachedCapture(job, 'render output ownership 尚未驗證');
+    return false;
+  }
+
+  const evidence = readPipelineEvidence(job);
+  if (evidence.state === 'missing' || evidence.state === 'contested') {
+    markDetachedContested(job, evidence.message);
+    return false;
+  }
+  if (evidence.state === 'failed') {
+    let preserved;
+    try {
+      preserved = preserveEvidenceOutputs(job, evidence);
+      transitionJobSafely(job, retryableRenderPatch(evidence, preserved));
+    } catch (error) {
+      deferDetachedCapture(job, `背景 render 失敗且 fallback 尚未保存：${error.message}`);
+      return false;
+    }
+    appendLogBestEffort(job, `\n⚠️ 背景 render 失敗：${evidence.message}；`
+      + `已保留 ${preserved.length} 份可檢查 output，回到待確認狀態，可人工重新出片。\n`);
+    return true;
+  }
+
+  let finalized;
+  try {
+    finalized = finalizeRenderOutputs(job, evidence);
+    transitionJobSafely(job, {
+      status: 'done',
+      pid: null,
+      error: null,
+      finishedAt: finalized.finishedAt,
+      outputs: finalized.outputs,
+      archived: finalized.archived,
+    });
+  } catch (error) {
+    let message = error.message;
+    try { preserveEvidenceOutputs(job, evidence); }
+    catch (fallbackError) { message += `；fallback 保存也失敗：${fallbackError.message}`; }
+    deferDetachedCapture(job, message);
+    return false;
+  }
+  appendLogBestEffort(job, '\n🛟 背景 render output 已驗證並保存到原 Project／Revision。\n');
+  return true;
+}
+
 /**
  * Reconcile one job whose detached run outlived the server.
  *
@@ -587,6 +965,7 @@ function reconcileDetached(job) {
   }
 
   const fromStatus = job.detachedFromStatus || (job.preparedAt ? 'rendering' : 'preparing');
+  if (fromStatus === 'rendering') return reconcileDetachedRender(job, pid);
   // render-only and skip-generate runs cannot have bought a new speaker output. Finalize them
   // without inspecting a possibly unrelated staging copy left in the shared workspace.
   if (fromStatus !== 'preparing' || job.skipGenerate) {
@@ -659,6 +1038,10 @@ function appendLog(job, line) {
   fs.appendFileSync(f, line.endsWith('\n') ? line : line + '\n');
 }
 
+function appendLogBestEffort(job, line) {
+  try { appendLog(job, line); return true; } catch (_) { return false; }
+}
+
 function newId() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -720,32 +1103,6 @@ function captureProjectAssets(job) {
   saveJob(job);
 }
 
-/**
- * 把成品另存到成品庫，檔名取成人看得懂的：
- *   成品/2026-08/0817-大盤小報-台股反彈-橫式.mp4
- * jobs/ 會被自動清掉，這裡不會 —— 這才是「以後還找得到」的那一份。
- */
-function archivePath(job, outName) {
-  if (job.projectId && job.revisionId) {
-    return PROJECT_STORE.outputPath(job.projectId, job.revisionId, outName);
-  }
-  const cfg = TEMPLATES[job.template];
-  const d = new Date(job.finishedAt || Date.now());
-  const pad = (n) => String(n).padStart(2, '0');
-  const month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
-  const day = `${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
-  // 檔名不能有 / : 等字元；標題可能兩行，接起來就好
-  const title = (job.title || '').replace(/\n/g, '').replace(/[\/\\:*?"<>|]/g, '').slice(0, 20);
-  const dir = path.join(ARCHIVE_DIR, month);
-  ensureDir(dir);
-  const label = (cfg.outputLabels || {})[outName] || '';
-  const base = [day, cfg.label, title, label].filter(Boolean).join('-');
-  let dest = path.join(dir, base + '.mp4');
-  let n = 2;
-  while (fs.existsSync(dest)) dest = path.join(dir, `${base}(${n++}).mp4`); // 同天同標題不覆蓋
-  return dest;
-}
-
 // ── 執行 run.js ───────────────────────────
 /** pid 還活著，而且真的是我們的 run.js（防 pid 被回收後誤判） */
 function isRunJs(pid) {
@@ -778,6 +1135,145 @@ function readLockOwner() {
   }
 }
 
+function expectedRenderOutputs(job) {
+  const configured = (TEMPLATES[job.template] && TEMPLATES[job.template].outputs) || [];
+  if (job.template === 'focusstock' && !job.withAd)
+    return configured.filter((rel) => path.basename(rel) === 'output-focusstock.mp4');
+  return configured.slice();
+}
+
+function pipelineEvidenceFiles(job, token = job.workspaceRunToken, { create = false } = {}) {
+  if (!isWorkspaceRunToken(token)) throw new Error('workspaceRunToken 不合法');
+  let dir = ownedJobPayloadDir(job.id, 'pipeline');
+  if (!dir) throw new Error('Run pipeline evidence 目錄 ownership 無法確認');
+  if (create) {
+    ensureDir(dir);
+    dir = ownedJobPayloadDir(job.id, 'pipeline');
+    if (!dir) throw new Error('Run pipeline evidence 目錄 ownership 無法確認');
+  }
+  return {
+    dir,
+    config: path.join(dir, `${token}.config.json`),
+    preload: path.join(dir, `${token}.preload.cjs`),
+    result: path.join(dir, `${token}.result.json`),
+  };
+}
+
+// This preload executes inside the same Node process as run.js. Its synchronous exit hook is the
+// durable boundary the parent server cannot provide after a restart: it records the real exit code,
+// matching workspace owner, and before/after fingerprints for the exact expected outputs.
+const PIPELINE_EVIDENCE_PRELOAD = String.raw`'use strict';
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+function hashFile(file) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let count;
+    do {
+      count = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (count) hash.update(buffer.subarray(0, count));
+    } while (count);
+  } finally { fs.closeSync(fd); }
+  return hash.digest('hex');
+}
+function snapshot(file) {
+  try {
+    const stat = fs.lstatSync(file, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink()) return { state: 'invalid' };
+    return {
+      state: 'file',
+      size: Number(stat.size),
+      sha256: hashFile(file),
+      mtimeNs: String(stat.mtimeNs),
+      ctimeNs: String(stat.ctimeNs),
+      ino: String(stat.ino),
+    };
+  } catch (error) {
+    return { state: error && error.code === 'ENOENT' ? 'missing' : 'error', error: error.message };
+  }
+}
+function changed(before, after) {
+  if (!before || before.state !== 'file' || !after || after.state !== 'file')
+    return Boolean(after && after.state === 'file');
+  return ['size', 'sha256', 'mtimeNs', 'ctimeNs', 'ino'].some((key) => before[key] !== after[key]);
+}
+const configFile = process.env.WORKSPACE_EVIDENCE_CONFIG;
+if (!configFile) throw new Error('WORKSPACE_EVIDENCE_CONFIG is required');
+const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+const before = config.outputs.map((output) => snapshot(output.file));
+process.once('exit', (exitCode) => {
+  try {
+    let owner = null;
+    try { owner = JSON.parse(fs.readFileSync(config.ownerFile, 'utf8')); } catch (_) {}
+    const outputs = config.outputs.map((output, index) => {
+      const after = snapshot(output.file);
+      return {
+        relativePath: output.relativePath,
+        name: path.basename(output.relativePath),
+        before: before[index],
+        after,
+        changedFromBefore: changed(before[index], after),
+      };
+    });
+    const result = {
+      schemaVersion: 1,
+      jobId: config.jobId,
+      projectId: config.projectId,
+      revisionId: config.revisionId,
+      workspaceRunToken: config.workspaceRunToken,
+      runStatus: config.runStatus,
+      startedAt: config.startedAt,
+      finishedAt: new Date().toISOString(),
+      exitCode: Number.isInteger(exitCode) ? exitCode : 1,
+      owner: owner && {
+        pid: Number(owner.pid),
+        startedAt: owner.startedAt || null,
+        token: owner.token || null,
+      },
+      outputs,
+    };
+    fs.mkdirSync(path.dirname(config.resultFile), { recursive: true });
+    const temp = config.resultFile + '.' + process.pid + '.tmp';
+    const fd = fs.openSync(temp, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(result, null, 2));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, config.resultFile);
+  } catch (error) {
+    try { console.error('completion evidence write failed: ' + error.message); } catch (_) {}
+  }
+});
+`;
+
+function preparePipelineEvidence(job, token) {
+  const files = pipelineEvidenceFiles(job, token, { create: true });
+  const expectedOutputs = job.status === 'rendering' ? expectedRenderOutputs(job) : [];
+  const config = {
+    schemaVersion: 1,
+    jobId: job.id,
+    projectId: job.projectId || null,
+    revisionId: job.revisionId || null,
+    workspaceRunToken: token,
+    runStatus: job.status,
+    startedAt: job.workspaceRunStartedAt,
+    ownerFile: WORKSPACE_OWNER_FILE,
+    resultFile: files.result,
+    outputs: expectedOutputs.map((relativePath) => ({
+      relativePath,
+      file: path.join(WORKSPACE_OUTPUT_DIR, path.basename(relativePath)),
+    })),
+  };
+  atomicWriteFile(files.preload, PIPELINE_EVIDENCE_PRELOAD);
+  atomicWriteFile(files.config, JSON.stringify(config, null, 2));
+  job.workspaceRunEvidenceVersion = 1;
+  job.workspaceRunExpectedOutputs = expectedOutputs;
+  return files;
+}
+
 /**
  * 跑 run.js。
  *
@@ -801,18 +1297,25 @@ function runPipeline(job, args) {
     job.workspaceRunPid = null;
     job.workspaceRunStatus = job.status;
     job.workspaceRunStartedAt = nowISO();
+    const evidenceFiles = preparePipelineEvidence(job, workspaceRunToken);
+    const pipelineEntry = TEST_PIPELINE_ENTRY || 'run.js';
     // Persist the job-specific token before spawn. It is only intent until run.js writes the same
     // token into the workspace-owner marker after acquiring .run.lock.
     writeJobRecord(job);
-    appendLog(job, `\n$ node run.js ${args.join(' ')}\n`);
+    appendLog(job, `\n$ node ${path.basename(pipelineEntry)} ${args.join(' ')}\n`);
     const logPath = path.join(jobDir(job.id), 'log.txt');
     ensureDir(path.dirname(logPath));
     const fd = fs.openSync(logPath, 'a');
     let child;
     try {
-      child = spawn(process.execPath, ['run.js', ...args], {
+      child = spawn(process.execPath, ['--require', evidenceFiles.preload, pipelineEntry, ...args], {
         cwd: ROOT,
-        env: { ...process.env, FORCE_COLOR: '0', WORKSPACE_RUN_TOKEN: workspaceRunToken },
+        env: {
+          ...process.env,
+          FORCE_COLOR: '0',
+          WORKSPACE_RUN_TOKEN: workspaceRunToken,
+          WORKSPACE_EVIDENCE_CONFIG: evidenceFiles.config,
+        },
         detached: true,
         stdio: ['ignore', fd, fd],
       });
@@ -827,7 +1330,26 @@ function runPipeline(job, args) {
     child.on('error', reject);
     child.on('close', (code) => {
       job.pid = null;
-      code === 0 ? resolve() : reject(new Error(`run.js 結束碼 ${code}，詳見執行記錄`));
+      const evidence = readPipelineEvidence(job);
+      if (job.workspaceRunStatus === 'rendering') {
+        // A trusted failed result can contain valuable partial output. Let doRender preserve it
+        // before the queue advances. Missing/contested evidence cannot prove the workspace safe,
+        // so turn it into a retryable fail-closed condition instead of a generic worker failure.
+        if (evidence.state === 'failed') return resolve(evidence);
+        if (code !== 0 || evidence.state !== 'success') {
+          const error = new Error(code !== 0
+            ? `run.js 結束碼 ${code}，但 completion evidence 無法安全收割`
+            : `run.js completion evidence 無效：${evidence.message}`);
+          error.code = 'OUTPUT_EVIDENCE_RETRY';
+          error.pipelineEvidence = evidence;
+          return reject(error);
+        }
+        return resolve(evidence);
+      }
+      if (code !== 0) return reject(new Error(`run.js 結束碼 ${code}，詳見執行記錄`));
+      if (evidence.state !== 'success')
+        return reject(new Error(`run.js completion evidence 無效：${evidence.message}`));
+      return resolve(evidence);
     });
   });
 }
@@ -1173,10 +1695,37 @@ function tick() {
   const work = job.status === 'approved' ? doRender(job) : doPrepare(job);
   work
     .catch((e) => {
+      if (['OUTPUT_EVIDENCE_RETRY', 'OUTPUT_FALLBACK_RETRY', 'OUTPUT_ARCHIVE_RETRY',
+        'OUTPUT_METADATA_RETRY'].includes(e.code)) {
+        // The worker has ended, but the shared workspace still contains output that is not safely
+        // represented by durable Run/Project state. Reuse detached reconciliation as the one retry
+        // gate and do not let finally() advance to another job.
+        try { deferNormalRenderRecovery(job, e); }
+        catch (persistError) {
+          // status was changed in memory before persistence; refreshDetached therefore still keeps
+          // this process's queue closed even when the disk itself is temporarily unavailable.
+          job.error = `${e.message}；retry state 保存失敗：${persistError.message}`;
+          console.error(`⚠️ ${job.error}`);
+        }
+        return;
+      }
       job.status = 'failed';
       job.error = e.message;
-      appendLog(job, '\n❌ ' + e.message + '\n');
-      saveJob(job);
+      try {
+        // Machine state is the durable boundary. A diagnostic log must never prevent the Job and
+        // Revision from agreeing on the failure state.
+        saveJob(job);
+      } catch (persistError) {
+        if (job.workspaceRunStatus === 'rendering'
+            && isWorkspaceRunToken(job.workspaceRunToken)) {
+          const retry = new Error(`render failure state 尚未同步：${persistError.message}`);
+          try { deferNormalRenderRecovery(job, retry); }
+          catch (_) { job.error = retry.message; }
+        } else {
+          job.error = `${e.message}；failure state 保存失敗：${persistError.message}`;
+        }
+      }
+      appendLogBestEffort(job, '\n❌ ' + job.error + '\n');
     })
     .finally(() => {
       busy = false;
@@ -1239,45 +1788,54 @@ async function doRender(job) {
 
   const args = [`--template=${job.template}`, '--render-only'];
   if (job.withAd) args.push('--with-ad');
-  const renderFrom = Date.now() - 3000; // 容忍一點時鐘誤差
-  await runPipeline(job, args);
-
-  // 收成品
-  // ⚠️ 只收「這次真的重新產生」的檔。out/ 底下的檔名是固定的，上一支的成品會一直留著；
-  //    不比對時間就會把舊檔當成這次的成果交出去
-  //   （2026-08-17 實際踩到：只出客製版，卻附上四天前的投廣版）。
-  // 成品只存「一份」，放在成品庫。網頁直接從那裡播、從那裡下載。
-  // 不再在 jobs/<id>/out 留第二份 —— 同一支大盤存兩份就是 276MB，純浪費
-  //（2026-08-17 使用者點出來的）。成品庫失敗才退回 jobs/ 當保險。
-  job.finishedAt = nowISO();
-  job.outputs = [];
-  const fallbackDir = path.join(jobDir(job.id), 'out');
-  for (const rel of TEMPLATES[job.template].outputs) {
-    const from = path.join(ROOT, rel);
-    if (!fs.existsSync(from)) continue;
-    if (fs.statSync(from).mtimeMs < renderFrom) {
-      appendLog(job, `⏭  略過 ${rel}：這次沒有重新產生，是上一支留下的舊檔\n`);
-      continue;
-    }
-    const name = path.basename(rel);
-    const size = fs.statSync(from).size;
+  const evidence = await runPipeline(job, args);
+  if (evidence.state !== 'success') {
+    let preserved;
     try {
-      const dest = archivePath(job, name);
-      fs.copyFileSync(from, dest);
-      job.outputs.push({ name, size, archive: path.relative(ROOT, dest) });
-    } catch (e) {
-      ensureDir(fallbackDir);
-      fs.copyFileSync(from, path.join(fallbackDir, name));
-      job.outputs.push({ name, size });
-      appendLog(job, `⚠️ 存進成品庫失敗，先留在工作區：${e.message}\n`);
+      preserved = preserveEvidenceOutputs(job, evidence);
+    } catch (fallbackError) {
+      const error = new Error(`render 失敗且 fallback 尚未保存：${fallbackError.message}`);
+      error.code = 'OUTPUT_FALLBACK_RETRY';
+      error.pipelineEvidence = evidence;
+      throw error;
     }
+    try {
+      transitionJobSafely(job, retryableRenderPatch(evidence, preserved));
+    } catch (saveError) {
+      const error = new Error(`render fallback 已保存，但 retry state 尚未同步：${saveError.message}`);
+      error.code = 'OUTPUT_METADATA_RETRY';
+      error.pipelineEvidence = evidence;
+      throw error;
+    }
+    appendLogBestEffort(job, `\n⚠️ render 失敗：${evidence.message}；已保留 ${preserved.length} 份可檢查 output，`
+      + '回到待確認狀態，可人工重新出片。\n');
+    return;
   }
-  if (!job.outputs.length) throw new Error('render 跑完了，但找不到輸出檔案。請看執行記錄。');
-
-  job.status = 'done';
-  job.archived = job.outputs.map((o) => o.archive).filter(Boolean);
-  if (job.archived.length) appendLog(job, '\n📁 成品庫：\n   ' + job.archived.join('\n   ') + '\n');
-  saveJob(job);
+  const finalized = finalizeRenderOutputs(job, evidence);
+  try {
+    transitionJobSafely(job, {
+      finishedAt: finalized.finishedAt,
+      outputs: finalized.outputs,
+      archived: finalized.archived,
+      status: 'done',
+      pid: null,
+      error: null,
+    });
+  } catch (error) {
+    // A Project metadata write can fail after the immutable output was already committed. Keep a
+    // Run-local verified copy before the worker gate advances, so the next job cannot erase the only
+    // recoverable reference.
+    let fallbackError = null;
+    try { preserveEvidenceOutputs(job, evidence); }
+    catch (preserveError) { fallbackError = preserveError; }
+    const retry = new Error(`Project output metadata 保存失敗：${error.message}`
+      + (fallbackError ? `；fallback 保存也失敗：${fallbackError.message}` : ''));
+    retry.code = 'OUTPUT_METADATA_RETRY';
+    retry.pipelineEvidence = evidence;
+    throw retry;
+  }
+  if (job.archived.length)
+    appendLogBestEffort(job, '\n📁 成品庫：\n   ' + job.archived.join('\n   ') + '\n');
 }
 
 // ── HTTP ──────────────────────────────────
@@ -1484,6 +2042,7 @@ function publicJob(j) {
   const {
     pid, pendingEdits, autoPlan, createdAssetRefs,
     workspaceRunPid, workspaceRunStatus, workspaceRunStartedAt, workspaceRunToken,
+    workspaceRunEvidenceVersion, workspaceRunExpectedOutputs,
     detachedFromStatus, detachedOwnerPid, detachedWorkspaceContested,
     detachedCaptureAttempts, detachedCaptureRetryAt,
     ...rest

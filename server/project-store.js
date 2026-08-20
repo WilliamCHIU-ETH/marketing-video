@@ -981,6 +981,86 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
     return target;
   }
 
+  /**
+   * Persist one Run output under a deterministic Project path.
+   *
+   * The target includes the Run ID, so retrying detached recovery is idempotent: an identical
+   * file is reused, while a different file for the same Project/Revision/Run/name fails closed.
+   * Copying happens through a verified temp file and an atomic hard-link publish, so a crash cannot
+   * leave a partial file at the durable target.
+   */
+  function commitOutput({ projectId, revisionId, runId, sourceFile, name, size, sha256 }) {
+    const project = get(projectId);
+    const revision = getRevision(projectId, revisionId);
+    if (!project || project.id !== projectId || !revision || revision.projectId !== projectId)
+      throw new Error('Project／Revision output ownership 無法確認');
+    const safeRunId = safeId(runId, 'Run ID');
+    if ((revision.jobId && revision.jobId !== safeRunId)
+        || (revision.runId && revision.runId !== safeRunId))
+      throw new Error('Revision 不屬於這個 Run');
+
+    const safeName = path.basename(String(name || '')).replace(/[^\p{L}\p{N}._-]+/gu, '-');
+    if (!safeName || safeName !== name || !Number.isSafeInteger(size) || size <= 0
+        || !/^[0-9a-f]{64}$/i.test(sha256 || ''))
+      throw new Error('Output manifest 不合法');
+
+    const source = path.resolve(sourceFile);
+    const sourceStat = fs.lstatSync(source);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size !== size
+        || hashFile(source) !== sha256)
+      throw new Error(`Output ${safeName} 與 completion evidence 不一致`);
+
+    const rootStat = fs.lstatSync(projectsDir);
+    const projectPath = projectDir(projectId);
+    const projectStat = fs.lstatSync(projectPath);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
+        || !projectStat.isDirectory() || projectStat.isSymbolicLink())
+      throw new Error('Project output 根目錄不安全');
+    const projectsReal = fs.realpathSync(projectsDir);
+    const projectReal = fs.realpathSync(projectPath);
+    if (projectReal === projectsReal || !projectReal.startsWith(projectsReal + path.sep))
+      throw new Error('Project output 路徑超出 Project store');
+
+    const dir = outputDir(projectId);
+    if (!fs.existsSync(dir)) ensureDir(dir);
+    const dirStat = fs.lstatSync(dir);
+    const dirReal = fs.realpathSync(dir);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()
+        || dirReal === projectReal || !dirReal.startsWith(projectReal + path.sep))
+      throw new Error('Project outputs 目錄不安全');
+
+    const target = path.join(dir, `${safeId(revisionId, 'Revision ID')}-${safeRunId}-${safeName}`);
+    const matchesExpected = (file) => {
+      try {
+        const stat = fs.lstatSync(file);
+        return stat.isFile() && !stat.isSymbolicLink() && stat.size === size
+          && hashFile(file) === sha256;
+      } catch (_) {
+        return false;
+      }
+    };
+    if (fs.existsSync(target)) {
+      if (!matchesExpected(target)) throw new Error(`Project output 衝突：${safeName}`);
+      return target;
+    }
+
+    const temp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    try {
+      fs.copyFileSync(source, temp, fs.constants.COPYFILE_EXCL);
+      const fd = fs.openSync(temp, 'r');
+      try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      if (!matchesExpected(temp)) throw new Error(`Project output copy 驗證失敗：${safeName}`);
+      try {
+        fs.linkSync(temp, target);
+      } catch (error) {
+        if (error.code !== 'EEXIST' || !matchesExpected(target)) throw error;
+      }
+      return target;
+    } finally {
+      try { fs.unlinkSync(temp); } catch (_) {}
+    }
+  }
+
   function detail(projectId, revisionId) {
     const project = get(projectId);
     if (!project) return null;
@@ -1003,6 +1083,7 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
     projectDir,
     outputDir,
     outputPath,
+    commitOutput,
     detail,
   };
 }

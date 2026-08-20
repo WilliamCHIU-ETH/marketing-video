@@ -3,6 +3,7 @@
 'use strict';
 
 const assert = require('assert/strict');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -198,6 +199,7 @@ const net = require('net');
 const path = require('path');
 const tls = require('tls');
 const log = process.env.SMOKE_GUARD_LOG;
+const originalSpawn = childProcess.spawn;
 const originalExecFileSync = childProcess.execFileSync;
 function blocked(kind) {
   return function () {
@@ -208,6 +210,20 @@ function blocked(kind) {
 for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
   childProcess[name] = blocked('child_process.' + name);
 }
+const blockedSpawn = childProcess.spawn;
+childProcess.spawn = function (file, args, options) {
+  try {
+    const dataRoot = fs.realpathSync(process.env.DATA_DIR);
+    const fixture = fs.realpathSync(process.env.TEST_PIPELINE_ENTRY || '');
+    const preload = fs.realpathSync(Array.isArray(args) ? args[1] : '');
+    if (file === process.execPath && Array.isArray(args) && args[0] === '--require'
+        && fs.realpathSync(args[2]) === fixture
+        && fixture.startsWith(dataRoot + path.sep)
+        && preload.startsWith(path.join(dataRoot, 'jobs') + path.sep))
+      return originalSpawn(file, args, options);
+  } catch (_) {}
+  return blockedSpawn(file, args, options);
+};
 const blockedExecFileSync = childProcess.execFileSync;
 childProcess.execFileSync = function (file, args, options) {
   const input = Array.isArray(args) ? args[args.length - 1] : null;
@@ -308,6 +324,18 @@ async function request(base, pathname, options) {
   try { body = JSON.parse(text); } catch (_) {}
   assert.ok(res.ok, `${pathname} 回傳 ${res.status}: ${text}`);
   return body;
+}
+
+async function waitForJobStatus(base, id, expected, timeoutMs = 10000) {
+  const wanted = new Set(Array.isArray(expected) ? expected : [expected]);
+  const deadline = Date.now() + timeoutMs;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await request(base, `/api/jobs/${id}`);
+    if (wanted.has(latest.job.status)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`等待 ${id} 進入 ${[...wanted].join('/')} 逾時；最後狀態 ${latest?.job?.status}`);
 }
 
 async function main() {
@@ -460,12 +488,71 @@ async function main() {
   assert.match(html, /下載專案 Avatar/);
   const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
   const renderDoneBlock = serverSource.match(
-    /job\.status = 'done';[\s\S]{0,600}saveJob\(job\);/);
-  assert.ok(renderDoneBlock, 'render 完成狀態必須先保存，再交給 cleanup');
+    /transitionJobSafely\(job, \{[\s\S]{0,300}status: 'done',[\s\S]{0,160}\}\);/);
+  assert.ok(renderDoneBlock, 'render 完成狀態必須以 durable transition 保存，再交給 cleanup');
   assert.doesNotMatch(renderDoneBlock[0],
     /rmrf\(path\.join\(jobDir\(job\.id\), 'state'\)\);/);
   assert.match(serverSource,
     /\.finally\(\(\) => \{[\s\S]{0,200}pruneOldJobsNonFatal\('工作結束'\);/);
+  assert.match(serverSource,
+    /spawn\(process\.execPath, \['--require', evidenceFiles\.preload, pipelineEntry/,
+    'run.js 必須在同一個 process 內載入 durable completion evidence hook');
+  assert.match(serverSource,
+    /const evidence = await runPipeline\(job, args\);[\s\S]{0,1200}finalizeRenderOutputs\(job, evidence\)/,
+    '正常 render 必須與 detached recovery 共用 output finalizer');
+  assert.match(serverSource,
+    /function writeJobRecord\(j\) \{[\s\S]{0,160}atomicWriteFile\(jobFile\(j\.id\)/,
+    'job.json 必須透過 atomic temp + rename 寫入');
+  const preloadSource = serverSource.match(
+    /const PIPELINE_EVIDENCE_PRELOAD = String\.raw`([\s\S]+?)`;\n\nfunction preparePipelineEvidence/);
+  assert.ok(preloadSource, '找不到 pipeline completion evidence preload source');
+  const preloadHarnessDir = path.join(DATA_DIR, 'preload-harness');
+  fs.mkdirSync(preloadHarnessDir, { recursive: true });
+  const preloadHarness = path.join(preloadHarnessDir, 'evidence.preload.cjs');
+  const preloadConfig = path.join(preloadHarnessDir, 'evidence.config.json');
+  const preloadResult = path.join(preloadHarnessDir, 'evidence.result.json');
+  const preloadOwner = path.join(preloadHarnessDir, 'owner.json');
+  const preloadOutput = path.join(preloadHarnessDir, 'output.mp4');
+  const preloadToken = '00000000-0000-4000-8000-000000000009';
+  fs.writeFileSync(preloadHarness, preloadSource[1]);
+  fs.writeFileSync(preloadConfig, JSON.stringify({
+    schemaVersion: 1,
+    jobId: 'preload-harness-job',
+    projectId: 'preload-harness-project',
+    revisionId: 'v001',
+    workspaceRunToken: preloadToken,
+    runStatus: 'rendering',
+    startedAt: '2001-01-01T00:00:00.000Z',
+    ownerFile: preloadOwner,
+    resultFile: preloadResult,
+    outputs: [{ relativePath: 'out/output.mp4', file: preloadOutput }],
+  }));
+  const preloadAttempt = spawnSync(process.execPath, ['--require', preloadHarness, '-e', [
+    "const fs = require('fs')",
+    "fs.writeFileSync(process.env.SMOKE_PRELOAD_OUTPUT, Buffer.from('fresh-render-output'))",
+    'fs.writeFileSync(process.env.SMOKE_PRELOAD_OWNER, JSON.stringify({',
+    '  pid: process.pid,',
+    "  startedAt: '2001-01-01T00:00:00.000Z',",
+    '  token: process.env.SMOKE_PRELOAD_TOKEN,',
+    '}))',
+  ].join('\n')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      WORKSPACE_EVIDENCE_CONFIG: preloadConfig,
+      SMOKE_PRELOAD_OUTPUT: preloadOutput,
+      SMOKE_PRELOAD_OWNER: preloadOwner,
+      SMOKE_PRELOAD_TOKEN: preloadToken,
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(preloadAttempt.status, 0, preloadAttempt.stderr);
+  const preloadEvidence = JSON.parse(fs.readFileSync(preloadResult, 'utf8'));
+  assert.equal(preloadEvidence.exitCode, 0);
+  assert.equal(preloadEvidence.owner.token, preloadToken);
+  assert.equal(preloadEvidence.outputs[0].changedFromBefore, true);
+  assert.equal(preloadEvidence.outputs[0].after.sha256,
+    crypto.createHash('sha256').update('fresh-render-output').digest('hex'));
 
   const health = await request(base, '/api/health');
   assert.equal(health.ok, true);
@@ -977,6 +1064,342 @@ async function main() {
   assert.deepEqual(timestampState(await request(base,
     `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`)), stableTimestamps);
 
+  const workspaceOut = path.join(DATA_DIR, 'workspace', 'out');
+  let detachedRenderSequence = 0x10;
+  const renderExpected = (template, withAd) => {
+    if (template === 'dapan')
+      return ['out/output-dapan.mp4', 'out/output-dapan-landscape.mp4'];
+    if (template === 'institution') return ['out/output-institution.mp4'];
+    if (template === 'focusstock') return withAd
+      ? ['out/output-focusstock.mp4', 'out/output-focusstock-ad.mp4']
+      : ['out/output-focusstock.mp4'];
+    return ['out/output.mp4'];
+  };
+  const setupDetachedRender = async ({
+    template,
+    withAd = false,
+    title,
+    produced,
+    exitCode = 0,
+    unchanged = [],
+    ownerToken,
+    beforeRestart,
+  }) => {
+    const createdRun = await request(base, '/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template,
+        withAd,
+        owner: 'smoke-detached-render',
+        title,
+        body: `${title} 的 detached output recovery fixture。`,
+        skipGenerate: true,
+      }),
+    });
+    await stopTestServer(child);
+
+    const suffix = String(detachedRenderSequence++).padStart(12, '0');
+    const token = `00000000-0000-4000-8000-${suffix}`;
+    const pid = 2147483000 + detachedRenderSequence;
+    const startedAt = '2001-01-01T00:00:00.000Z';
+    const finishedAt = '2001-01-01T00:01:00.000Z';
+    const expected = renderExpected(template, withAd);
+    const runFile = path.join(DATA_DIR, 'jobs', createdRun.job.id, 'job.json');
+    const runJson = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    Object.assign(runJson, {
+      status: 'rendering',
+      pid,
+      workspaceRunPid: pid,
+      workspaceRunStatus: 'rendering',
+      workspaceRunStartedAt: startedAt,
+      workspaceRunToken: token,
+      workspaceRunEvidenceVersion: 1,
+      workspaceRunExpectedOutputs: expected,
+    });
+    fs.writeFileSync(runFile, JSON.stringify(runJson, null, 2));
+
+    fs.rmSync(workspaceOut, { recursive: true, force: true });
+    fs.mkdirSync(workspaceOut, { recursive: true });
+    const producedByName = new Map(Object.entries(produced || {}));
+    const unchangedNames = new Set(unchanged);
+    for (const [name, bytes] of producedByName) fs.writeFileSync(path.join(workspaceOut, name), bytes);
+    const resultOutputs = expected.map((relativePath) => {
+      const name = path.basename(relativePath);
+      const bytes = producedByName.get(name);
+      const after = bytes ? {
+        state: 'file',
+        size: bytes.length,
+        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        mtimeNs: '2',
+        ctimeNs: '2',
+        ino: '2',
+      } : { state: 'missing' };
+      return {
+        relativePath,
+        name,
+        before: unchangedNames.has(name) ? after : { state: 'missing' },
+        after,
+        changedFromBefore: Boolean(bytes) && !unchangedNames.has(name),
+      };
+    });
+    const pipelineDir = path.join(DATA_DIR, 'jobs', createdRun.job.id, 'pipeline');
+    fs.mkdirSync(pipelineDir, { recursive: true });
+    fs.writeFileSync(path.join(pipelineDir, `${token}.result.json`), JSON.stringify({
+      schemaVersion: 1,
+      jobId: createdRun.job.id,
+      projectId: createdRun.job.projectId,
+      revisionId: createdRun.job.revisionId,
+      workspaceRunToken: token,
+      runStatus: 'rendering',
+      startedAt,
+      finishedAt,
+      exitCode,
+      owner: { pid, startedAt, token },
+      outputs: resultOutputs,
+    }, null, 2));
+    fs.writeFileSync(path.join(DATA_DIR, '.run.owner.json'), JSON.stringify({
+      pid,
+      startedAt,
+      token: ownerToken || token,
+    }));
+    if (beforeRestart) await beforeRestart(createdRun);
+
+    child = startTestServer();
+    const restart = await waitForReady(child);
+    base = `http://127.0.0.1:${restart.port}`;
+    await request(base, '/api/health');
+    return { createdRun, token, pid, expected };
+  };
+  const retireDetachedRenderFixture = async (createdRun) => {
+    await stopTestServer(child);
+    const runFile = path.join(DATA_DIR, 'jobs', createdRun.job.id, 'job.json');
+    const record = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    record.status = 'cancelled';
+    record.pid = null;
+    delete record.detachedWorkspaceContested;
+    delete record.detachedCaptureRetryAt;
+    delete record.detachedCaptureAttempts;
+    fs.writeFileSync(runFile, JSON.stringify(record, null, 2));
+    child = startTestServer();
+    const ready = await waitForReady(child);
+    base = `http://127.0.0.1:${ready.port}`;
+  };
+
+  // Exact cardinality matters: Focusstock normally has one output, Dapan always has two, and the
+  // Focusstock ad output is required only when withAd was selected.
+  const detachedSingle = await setupDetachedRender({
+    template: 'focusstock',
+    title: 'Detached 單輸出恢復',
+    produced: { 'output-focusstock.mp4': MP4_FIXTURE },
+  });
+  let recoveredRender = await request(base, `/api/jobs/${detachedSingle.createdRun.job.id}`);
+  let recoveredRenderProject = await request(base,
+    `/api/projects/${detachedSingle.createdRun.job.projectId}`
+      + `?revision=${detachedSingle.createdRun.job.revisionId}`);
+  assert.equal(recoveredRender.job.status, 'done');
+  assert.deepEqual(recoveredRender.job.outputs.map((output) => output.name),
+    ['output-focusstock.mp4']);
+  assert.equal(recoveredRenderProject.revision.status, 'done');
+  assert.equal(recoveredRenderProject.revision.outputs.length, 1);
+  assert.equal(recoveredRenderProject.project.revisions.find(
+    (item) => item.id === detachedSingle.createdRun.job.revisionId).status, 'done');
+  assert.equal((await fetch(base
+    + `/api/jobs/${detachedSingle.createdRun.job.id}/file/output-focusstock.mp4`)).status, 200);
+
+  // Simulate a crash after atomic job.json reached done but before Revision/project metadata did.
+  // Startup repair must replay only this mismatch and restore the Project side.
+  await stopTestServer(child);
+  const halfTransitionProjectDir = path.join(DATA_DIR, 'projects',
+    detachedSingle.createdRun.job.projectId);
+  const halfTransitionRevisionFile = path.join(halfTransitionProjectDir, 'revisions',
+    `${detachedSingle.createdRun.job.revisionId}.json`);
+  const halfTransitionProjectFile = path.join(halfTransitionProjectDir, 'project.json');
+  const halfTransitionRevision = JSON.parse(fs.readFileSync(halfTransitionRevisionFile, 'utf8'));
+  halfTransitionRevision.status = 'rendering';
+  halfTransitionRevision.outputs = [];
+  halfTransitionRevision.archived = [];
+  fs.writeFileSync(halfTransitionRevisionFile, JSON.stringify(halfTransitionRevision, null, 2));
+  const halfTransitionProject = JSON.parse(fs.readFileSync(halfTransitionProjectFile, 'utf8'));
+  const halfTransitionSummary = halfTransitionProject.revisions.find(
+    (item) => item.id === detachedSingle.createdRun.job.revisionId);
+  halfTransitionSummary.status = 'rendering';
+  halfTransitionSummary.outputs = [];
+  fs.writeFileSync(halfTransitionProjectFile, JSON.stringify(halfTransitionProject, null, 2));
+  child = startTestServer();
+  const halfTransitionRestart = await waitForReady(child);
+  base = `http://127.0.0.1:${halfTransitionRestart.port}`;
+  recoveredRenderProject = await request(base,
+    `/api/projects/${detachedSingle.createdRun.job.projectId}`
+      + `?revision=${detachedSingle.createdRun.job.revisionId}`);
+  assert.equal(recoveredRenderProject.revision.status, 'done');
+  assert.equal(recoveredRenderProject.revision.outputs.length, 1);
+
+  const detachedDapan = await setupDetachedRender({
+    template: 'dapan',
+    title: 'Detached 大盤雙輸出恢復',
+    produced: {
+      'output-dapan.mp4': MP4_FIXTURE,
+      'output-dapan-landscape.mp4': MP4_FIXTURE,
+    },
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedDapan.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'done');
+  assert.deepEqual(recoveredRender.job.outputs.map((output) => output.name).sort(),
+    ['output-dapan-landscape.mp4', 'output-dapan.mp4']);
+
+  const detachedWithAd = await setupDetachedRender({
+    template: 'focusstock',
+    withAd: true,
+    title: 'Detached Focusstock 選配雙輸出恢復',
+    produced: {
+      'output-focusstock.mp4': MP4_FIXTURE,
+      'output-focusstock-ad.mp4': MP4_FIXTURE,
+    },
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedWithAd.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'done');
+  assert.deepEqual(recoveredRender.job.outputs.map((output) => output.name).sort(),
+    ['output-focusstock-ad.mp4', 'output-focusstock.mp4']);
+
+  // A non-zero worker exit plus one missing Dapan output is an explicit failed Run. The one file
+  // that did exist is copied into job/out before the shared workspace is released.
+  const detachedPartial = await setupDetachedRender({
+    template: 'dapan',
+    title: 'Detached partial render 失敗保留',
+    produced: { 'output-dapan.mp4': MP4_FIXTURE },
+    exitCode: 1,
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedPartial.createdRun.job.id}`);
+  recoveredRenderProject = await request(base,
+    `/api/projects/${detachedPartial.createdRun.job.projectId}`
+      + `?revision=${detachedPartial.createdRun.job.revisionId}`);
+  assert.equal(recoveredRender.job.status, 'review');
+  assert.match(recoveredRender.job.error, /可人工確認後重新出片/);
+  assert.equal(recoveredRenderProject.revision.status, 'review');
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', detachedPartial.createdRun.job.id,
+    'out', 'output-dapan.mp4')), true);
+  assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects', detachedPartial.createdRun.job.projectId,
+    'outputs')).length, 0);
+
+  const detachedStale = await setupDetachedRender({
+    template: 'institution',
+    title: 'Detached 舊 output 不得誤收',
+    produced: { 'output-institution.mp4': MP4_FIXTURE },
+    unchanged: ['output-institution.mp4'],
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedStale.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'review');
+  assert.match(recoveredRender.job.error, /與 render 前完全相同/);
+  assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects', detachedStale.createdRun.job.projectId,
+    'outputs')).length, 0);
+
+  // A Project outputs failure retains fallback and keeps the detached gate closed. Once the same
+  // destination becomes safe, the evidence is replayed idempotently and the Run becomes done.
+  const archiveFailureTarget = path.join(DATA_DIR, 'unsafe-project-output-target');
+  fs.mkdirSync(archiveFailureTarget, { recursive: true });
+  const detachedArchiveRetry = await setupDetachedRender({
+    template: 'institution',
+    title: 'Detached archive failure retry',
+    produced: { 'output-institution.mp4': MP4_FIXTURE },
+    beforeRestart: async (run) => {
+      const outputDir = path.join(DATA_DIR, 'projects', run.job.projectId, 'outputs');
+      fs.rmdirSync(outputDir);
+      fs.symlinkSync(archiveFailureTarget, outputDir, 'dir');
+    },
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedArchiveRetry.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'detached');
+  assert.match(recoveredRender.job.error, /Project output 封存失敗/);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', detachedArchiveRetry.createdRun.job.id,
+    'out', 'output-institution.mp4')), true);
+  const retryOutputDir = path.join(DATA_DIR, 'projects', detachedArchiveRetry.createdRun.job.projectId,
+    'outputs');
+  fs.unlinkSync(retryOutputDir);
+  fs.mkdirSync(retryOutputDir);
+  await new Promise((resolve) => setTimeout(resolve, 2200));
+  await request(base, '/api/health');
+  recoveredRender = await request(base, `/api/jobs/${detachedArchiveRetry.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'done');
+  assert.equal(recoveredRender.job.outputs.length, 1);
+  const retryProjectBeforeRestart = await request(base,
+    `/api/projects/${detachedArchiveRetry.createdRun.job.projectId}`
+      + `?revision=${detachedArchiveRetry.createdRun.job.revisionId}`);
+  const retryOutputNames = fs.readdirSync(retryOutputDir);
+
+  await stopTestServer(child);
+  child = startTestServer();
+  const idempotentRestart = await waitForReady(child);
+  base = `http://127.0.0.1:${idempotentRestart.port}`;
+  const retryAfterRestart = await request(base, `/api/jobs/${detachedArchiveRetry.createdRun.job.id}`);
+  const retryProjectAfterRestart = await request(base,
+    `/api/projects/${detachedArchiveRetry.createdRun.job.projectId}`
+      + `?revision=${detachedArchiveRetry.createdRun.job.revisionId}`);
+  assert.equal(retryAfterRestart.job.status, 'done');
+  assert.deepEqual(fs.readdirSync(retryOutputDir), retryOutputNames);
+  assert.equal(retryProjectAfterRestart.revision.updatedAt, retryProjectBeforeRestart.revision.updatedAt);
+
+  // A foreign owner token must never be allowed to collect even otherwise valid evidence.
+  const detachedContestedRender = await setupDetachedRender({
+    template: 'institution',
+    title: 'Detached contested ownership',
+    produced: { 'output-institution.mp4': MP4_FIXTURE },
+    ownerToken: '00000000-0000-4000-8000-999999999999',
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedContestedRender.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'detached');
+  const contestedRecord = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'jobs',
+    detachedContestedRender.createdRun.job.id, 'job.json'), 'utf8'));
+  assert.match(contestedRecord.detachedWorkspaceContested, /owner token changed/);
+  assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects',
+    detachedContestedRender.createdRun.job.projectId, 'outputs')).length, 0);
+  await retireDetachedRenderFixture(detachedContestedRender.createdRun);
+
+  // A valid-looking result reached through a Run pipeline symlink is not owned evidence.
+  const detachedPipelineSymlink = await setupDetachedRender({
+    template: 'institution',
+    title: 'Detached pipeline symlink 拒收',
+    produced: { 'output-institution.mp4': MP4_FIXTURE },
+    beforeRestart: async (run) => {
+      const pipelineDir = path.join(DATA_DIR, 'jobs', run.job.id, 'pipeline');
+      const outside = path.join(DATA_DIR, 'outside-pipeline-evidence', run.job.id);
+      fs.mkdirSync(outside, { recursive: true });
+      for (const name of fs.readdirSync(pipelineDir))
+        fs.copyFileSync(path.join(pipelineDir, name), path.join(outside, name));
+      fs.rmSync(pipelineDir, { recursive: true });
+      fs.symlinkSync(outside, pipelineDir, 'dir');
+    },
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedPipelineSymlink.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'detached');
+  const pipelineSymlinkRecord = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'jobs',
+    detachedPipelineSymlink.createdRun.job.id, 'job.json'), 'utf8'));
+  assert.match(pipelineSymlinkRecord.detachedWorkspaceContested, /pipeline evidence 目錄 ownership/);
+  assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects',
+    detachedPipelineSymlink.createdRun.job.projectId, 'outputs')).length, 0);
+  await retireDetachedRenderFixture(detachedPipelineSymlink.createdRun);
+
+  // A Run out/ symlink must not be accepted as a fallback source or destination after the shared
+  // workspace copy disappears. The queue remains closed instead of releasing an unowned file.
+  const detachedOutSymlink = await setupDetachedRender({
+    template: 'institution',
+    title: 'Detached out symlink 拒收',
+    produced: { 'output-institution.mp4': MP4_FIXTURE },
+    beforeRestart: async (run) => {
+      const outside = path.join(DATA_DIR, 'outside-run-output', run.job.id);
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, 'output-institution.mp4'), MP4_FIXTURE);
+      fs.rmSync(path.join(workspaceOut, 'output-institution.mp4'));
+      fs.symlinkSync(outside, path.join(DATA_DIR, 'jobs', run.job.id, 'out'), 'dir');
+    },
+  });
+  recoveredRender = await request(base, `/api/jobs/${detachedOutSymlink.createdRun.job.id}`);
+  assert.equal(recoveredRender.job.status, 'detached');
+  assert.match(recoveredRender.job.error, /fallback 尚未保存/);
+  assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects',
+    detachedOutSymlink.createdRun.job.projectId, 'outputs')).length, 0);
+  await retireDetachedRenderFixture(detachedOutSymlink.createdRun);
+
   // 成功的 Project Run 不需要等 retention：正式 output 已在 Project 後，Run 只保留
   // job.json／log.txt。清掉 input/state/thumbs/out 後，Revision、播放與下一版重用仍要成立。
   const compactable = await request(base, '/api/jobs', {
@@ -1223,7 +1646,8 @@ async function main() {
   ];
   for (const runDir of strictGateDirs) {
     for (const sub of ['input', 'state', 'thumbs', 'out'])
-      assert.equal(fs.existsSync(path.join(runDir, sub)), true, `${sub} 必須 fail closed`);
+      assert.equal(fs.existsSync(path.join(runDir, sub)), true,
+        `${path.basename(runDir)} ${sub} 必須 fail closed`);
   }
   assert.equal(fs.existsSync(path.join(extraFallbackDir, 'input')), false);
   assert.equal(fs.existsSync(path.join(extraFallbackDir, 'state')), false);
@@ -1319,6 +1743,181 @@ async function main() {
   assert.equal(unsafeUnlock.status, 409);
   assert.equal(fs.existsSync(path.join(DATA_DIR, '.run.lock')), true);
 
+  // Exercise the real queue -> doRender -> runPipeline path without providers or Remotion. The
+  // DATA_DIR-local fixture is the only subprocess allowed by the smoke guard: it writes one valid
+  // Dapan output, records the real owner token, and exits non-zero.
+  await stopTestServer(child);
+  const normalWorkerDir = path.join(DATA_DIR, 'normal-render-worker');
+  fs.mkdirSync(normalWorkerDir, { recursive: true });
+  const normalWorkerFixtureMp4 = path.join(normalWorkerDir, 'fixture.mp4');
+  const normalWorkerEntry = path.join(normalWorkerDir, 'partial-render.cjs');
+  const normalWorkerInvocations = path.join(normalWorkerDir, 'invocations.log');
+  fs.writeFileSync(normalWorkerFixtureMp4, MP4_FIXTURE);
+  fs.writeFileSync(normalWorkerEntry, `
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const dataDir = process.env.DATA_DIR;
+const mode = process.env.SMOKE_PIPELINE_MODE || 'partial';
+const outDir = path.join(dataDir, 'workspace', 'out');
+fs.mkdirSync(outDir, { recursive: true });
+const output = path.join(outDir, 'output-dapan.mp4');
+try { fs.unlinkSync(output); } catch (_) {}
+fs.copyFileSync(process.env.SMOKE_PIPELINE_MP4, output);
+if (mode.startsWith('success')) {
+  const landscape = path.join(outDir, 'output-dapan-landscape.mp4');
+  try { fs.unlinkSync(landscape); } catch (_) {}
+  fs.copyFileSync(process.env.SMOKE_PIPELINE_MP4, landscape);
+}
+fs.writeFileSync(path.join(dataDir, '.run.owner.json'), JSON.stringify({
+  pid: process.pid,
+  startedAt: new Date().toISOString(),
+  token: process.env.WORKSPACE_RUN_TOKEN,
+}));
+fs.appendFileSync(process.env.SMOKE_PIPELINE_INVOCATIONS, process.argv.slice(2).join(' ') + '\\n');
+if (mode.endsWith('log-fail')) {
+  const pipelineDir = path.dirname(process.env.WORKSPACE_EVIDENCE_CONFIG);
+  const logFile = path.join(path.dirname(pipelineDir), 'log.txt');
+  fs.rmSync(logFile, { recursive: true, force: true });
+  fs.mkdirSync(logFile);
+}
+process.exitCode = mode.startsWith('success') ? 0 : 1;
+`);
+  child = startTestServer({ DATA_DIR: normalWorkerDir });
+  const normalSetupReady = await waitForReady(child);
+  base = `http://127.0.0.1:${normalSetupReady.port}`;
+  const normalPartial = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', owner: 'normal-partial-smoke', title: '正常 partial 回待確認',
+      body: '正常 render non-zero 必須先保存 partial output。', skipGenerate: true,
+    }),
+  });
+  const normalUnsafeFallback = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', owner: 'normal-partial-smoke', title: '正常 fallback fail closed',
+      body: 'fallback 不安全時不得放行下一支。', skipGenerate: true,
+    }),
+  });
+  const normalPipelineSymlink = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', owner: 'normal-partial-smoke', title: '正常 pipeline symlink 拒寫',
+      body: 'completion evidence 不可寫到 Run 外。', skipGenerate: true,
+    }),
+  });
+  const normalSuccessLogFailure = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', owner: 'normal-partial-smoke', title: '正常 success log fail',
+      body: 'log 寫入失敗不可破壞 durable done transition。', skipGenerate: true,
+    }),
+  });
+  const normalQueuedBehind = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', owner: 'normal-partial-smoke', title: '不得越過 detached gate',
+      body: '前一支 fallback 尚未安全前不能執行。', skipGenerate: true,
+    }),
+  });
+  await stopTestServer(child);
+  const armNormalRender = (run, approvedAt) => {
+    const runDir = path.join(normalWorkerDir, 'jobs', run.job.id);
+    const runFile = path.join(runDir, 'job.json');
+    const record = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    record.status = 'approved';
+    record.approvedAt = approvedAt;
+    record.approvedBy = 'smoke';
+    fs.writeFileSync(runFile, JSON.stringify(record, null, 2));
+    fs.mkdirSync(path.join(runDir, 'state'), { recursive: true });
+  };
+  const workerEnv = {
+    DATA_DIR: normalWorkerDir,
+    ENABLE_TEST_WORKER: '1',
+    TEST_PIPELINE_ENTRY: normalWorkerEntry,
+    SMOKE_PIPELINE_MP4: normalWorkerFixtureMp4,
+    SMOKE_PIPELINE_INVOCATIONS: normalWorkerInvocations,
+  };
+  armNormalRender(normalPartial, '2001-01-01T00:00:00.000Z');
+  child = startTestServer({ ...workerEnv, SMOKE_PIPELINE_MODE: 'partial-log-fail' });
+  const normalWorkerReady = await waitForReady(child);
+  assert.equal(normalWorkerReady.workerEnabled, true);
+  base = `http://127.0.0.1:${normalWorkerReady.port}`;
+  const normalPartialResult = await waitForJobStatus(base, normalPartial.job.id, 'review');
+  assert.match(normalPartialResult.job.error, /可人工確認後重新出片/);
+  const normalFallback = path.join(normalWorkerDir, 'jobs', normalPartial.job.id,
+    'out', 'output-dapan.mp4');
+  assert.equal(fs.existsSync(normalFallback), true);
+  assert.deepEqual(fs.readFileSync(normalFallback), MP4_FIXTURE);
+  const normalPartialProject = await request(base,
+    `/api/projects/${normalPartial.job.projectId}?revision=${normalPartial.job.revisionId}`);
+  assert.equal(normalPartialProject.revision.status, 'review');
+  assert.equal(fs.readdirSync(path.join(normalWorkerDir, 'projects', normalPartial.job.projectId,
+    'outputs')).length, 0);
+  assert.equal(fs.lstatSync(path.join(normalWorkerDir, 'jobs', normalPartial.job.id,
+    'log.txt')).isDirectory(), true);
+
+  await stopTestServer(child);
+  armNormalRender(normalPipelineSymlink, '2001-01-01T00:00:30.000Z');
+  const unsafePipeline = path.join(normalWorkerDir, 'jobs', normalPipelineSymlink.job.id, 'pipeline');
+  const outsideNormalPipeline = path.join(normalWorkerDir, 'outside-normal-pipeline');
+  fs.mkdirSync(outsideNormalPipeline, { recursive: true });
+  fs.symlinkSync(outsideNormalPipeline, unsafePipeline, 'dir');
+  const failedLogPath = path.join(normalWorkerDir, 'jobs', normalPipelineSymlink.job.id, 'log.txt');
+  fs.rmSync(failedLogPath, { recursive: true, force: true });
+  fs.mkdirSync(failedLogPath);
+  child = startTestServer(workerEnv);
+  const normalPipelineReady = await waitForReady(child);
+  base = `http://127.0.0.1:${normalPipelineReady.port}`;
+  const normalPipelineResult = await waitForJobStatus(base, normalPipelineSymlink.job.id, 'failed');
+  assert.match(normalPipelineResult.job.error, /pipeline evidence 目錄 ownership/);
+  const normalPipelineProject = await request(base,
+    `/api/projects/${normalPipelineSymlink.job.projectId}`
+      + `?revision=${normalPipelineSymlink.job.revisionId}`);
+  assert.equal(normalPipelineProject.revision.status, 'failed');
+  assert.deepEqual(fs.readdirSync(outsideNormalPipeline), []);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 1);
+
+  await stopTestServer(child);
+  armNormalRender(normalSuccessLogFailure, '2001-01-01T00:00:45.000Z');
+  child = startTestServer({ ...workerEnv, SMOKE_PIPELINE_MODE: 'success-log-fail' });
+  const normalSuccessReady = await waitForReady(child);
+  base = `http://127.0.0.1:${normalSuccessReady.port}`;
+  const normalSuccessResult = await waitForJobStatus(base, normalSuccessLogFailure.job.id, 'done');
+  assert.equal(normalSuccessResult.job.outputs.length, 2);
+  assert.equal(normalSuccessResult.job.archived.length, 2);
+  const normalSuccessProject = await request(base,
+    `/api/projects/${normalSuccessLogFailure.job.projectId}`
+      + `?revision=${normalSuccessLogFailure.job.revisionId}`);
+  assert.equal(normalSuccessProject.revision.status, 'done');
+  assert.equal(normalSuccessProject.revision.outputs.length, 2);
+  assert.equal(normalSuccessProject.project.revisions.find(
+    (item) => item.id === normalSuccessLogFailure.job.revisionId).status, 'done');
+  assert.equal(fs.readdirSync(path.join(normalWorkerDir, 'projects',
+    normalSuccessLogFailure.job.projectId, 'outputs')).length, 2);
+  assert.equal(fs.lstatSync(path.join(normalWorkerDir, 'jobs', normalSuccessLogFailure.job.id,
+    'log.txt')).isDirectory(), true);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 2);
+
+  await stopTestServer(child);
+  armNormalRender(normalUnsafeFallback, '2001-01-01T00:01:00.000Z');
+  armNormalRender(normalQueuedBehind, '2001-01-01T00:02:00.000Z');
+  const unsafeRunOut = path.join(normalWorkerDir, 'jobs', normalUnsafeFallback.job.id, 'out');
+  const outsideNormalOut = path.join(normalWorkerDir, 'outside-normal-run-out');
+  fs.mkdirSync(outsideNormalOut, { recursive: true });
+  fs.rmSync(unsafeRunOut, { recursive: true, force: true });
+  fs.symlinkSync(outsideNormalOut, unsafeRunOut, 'dir');
+  child = startTestServer(workerEnv);
+  const normalFailClosedReady = await waitForReady(child);
+  base = `http://127.0.0.1:${normalFailClosedReady.port}`;
+  const normalUnsafeResult = await waitForJobStatus(base, normalUnsafeFallback.job.id, 'detached');
+  assert.match(normalUnsafeResult.job.error, /fallback 尚未保存/);
+  const queuedBehindResult = await request(base, `/api/jobs/${normalQueuedBehind.job.id}`);
+  assert.equal(queuedBehindResult.job.status, 'approved');
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 3);
+  await stopTestServer(child);
+
   for (const rel of mutableRepoPaths) {
     assert.equal(treeState(path.join(ROOT, rel)), before[rel], `${rel} 在 smoke 期間被改動`);
   }
@@ -1341,12 +1940,16 @@ async function main() {
   console.log('✅ submit 後不可重複排隊或覆寫 input');
   console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
   console.log('✅ detached 不可取消；spawn intent 不誤收，owner token 相符才保存 Avatar 並放行');
+  console.log('✅ detached render evidence：單／雙／選配輸出、partial fallback、archive retry、owner gate 與 idempotent restart');
+  console.log('✅ 正常 render non-zero/partial：durable fallback 後回待確認；fallback 失敗維持 queue gate');
+  console.log('✅ success／partial／failed 的 log 寫入失敗不影響 durable Job／Revision transition');
+  console.log('✅ job.json atomic、半完成 terminal transition 啟動修復、pipeline/out symlink fail closed');
   console.log('✅ 成功 Project Run 立即清 payload；Project 素材、Revision、成品與下一版仍可用');
   console.log('✅ Project durable gate 不可由 retention 繞過；archive 缺失時保留完整 payload');
   console.log('✅ 未知／活躍 lock 不可由 API 強制刪除');
   console.log('✅ LAN bind 未明確 opt-in 時拒絕啟動');
   console.log('✅ TEST_MODE 拒絕 repo 內路徑與 symlink 回指');
-  console.log('✅ provider keys 為空、worker 停用，side-effect guard 未見 outbound/spawn 嘗試');
+  console.log('✅ provider keys 為空、預設 worker 停用；受限 fixture worker 無 outbound/provider 嘗試');
   console.log('✅ repo mutable workspace 前後一致');
 }
 
