@@ -163,11 +163,16 @@ function scan(options) {
     && !fs.lstatSync(jobsDir).isSymbolicLink(), `找不到安全的 legacy jobs 目錄：${jobsDir}`);
   const records = [];
   for (const entry of fs.readdirSync(jobsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    invariant(!entry.isSymbolicLink(), `Legacy Job 目錄不得是 symlink：${entry.name}`);
+    if (!entry.isDirectory()) continue;
     const id = safeId(entry.name, 'Legacy Job ID');
     const sourceDir = path.join(jobsDir, id);
-    const jobFile = regularOwnedFile(sourceRoot, path.join(sourceDir, 'job.json'));
-    if (!jobFile) continue;
+    const jobPath = path.join(sourceDir, 'job.json');
+    const jobStat = fs.lstatSync(jobPath, { throwIfNoEntry: false });
+    invariant(jobStat && jobStat.isFile() && !jobStat.isSymbolicLink(),
+      `Legacy Job 缺少安全的 job.json：${id}`);
+    const jobFile = regularOwnedFile(sourceRoot, jobPath);
+    invariant(jobFile, `Legacy Job manifest 超出 source 或不安全：${id}`);
     const job = readJson(jobFile);
     invariant(job && job.id === id, `job ID 與資料夾不一致：${jobFile}`);
     invariant(job.createdAt && job.template, `job 缺少 createdAt/template：${id}`);

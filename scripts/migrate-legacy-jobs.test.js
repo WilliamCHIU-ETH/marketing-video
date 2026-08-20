@@ -86,6 +86,40 @@ test('preview validates input, groups V1/V2/V3, and never merges blank titles', 
   assert.equal(fs.existsSync(fixture.dataDir), false);
 });
 
+test('preview rejects job directories or manifests that would otherwise be silently omitted', (t) => {
+  const linkedDirectory = makeFixture();
+  t.after(() => fs.rmSync(linkedDirectory.root, { recursive: true, force: true }));
+  fs.symlinkSync(
+    path.join(linkedDirectory.source, 'jobs', 'job-v1'),
+    path.join(linkedDirectory.source, 'jobs', 'linked-job'),
+  );
+  assert.throws(() => run(options(linkedDirectory.source, linkedDirectory.dataDir)),
+    /Legacy Job 目錄不得是 symlink/);
+
+  const missingManifest = makeFixture();
+  t.after(() => fs.rmSync(missingManifest.root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(missingManifest.source, 'jobs', 'orphan-job'));
+  assert.throws(() => run(options(missingManifest.source, missingManifest.dataDir)),
+    /Legacy Job 缺少安全的 job\.json/);
+
+  const linkedManifest = makeFixture();
+  t.after(() => fs.rmSync(linkedManifest.root, { recursive: true, force: true }));
+  const jobFile = path.join(linkedManifest.source, 'jobs', 'job-v2', 'job.json');
+  const realJobFile = path.join(linkedManifest.source, 'jobs', 'job-v2', 'job-real.json');
+  fs.renameSync(jobFile, realJobFile);
+  fs.symlinkSync(realJobFile, jobFile);
+  assert.throws(() => run(options(linkedManifest.source, linkedManifest.dataDir)),
+    /Legacy Job 缺少安全的 job\.json/);
+
+  const nonRegularManifest = makeFixture();
+  t.after(() => fs.rmSync(nonRegularManifest.root, { recursive: true, force: true }));
+  const nonRegular = path.join(nonRegularManifest.source, 'jobs', 'job-v2', 'job.json');
+  fs.unlinkSync(nonRegular);
+  fs.mkdirSync(nonRegular);
+  assert.throws(() => run(options(nonRegularManifest.source, nonRegularManifest.dataDir)),
+    /Legacy Job 缺少安全的 job\.json/);
+});
+
 test('apply is transactional, deduplicates Project Assets, emits minimal Runs, and reruns idempotently', (t) => {
   const fixture = makeFixture();
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
