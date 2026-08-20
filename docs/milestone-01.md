@@ -29,7 +29,7 @@
 
 ## Source snapshot
 
-- Truth source：`/Users/chiu/Downloads/marketing-video 2` 的 2026-08-18 filesystem working tree。
+- Truth source：2026-08-18 的本機 legacy filesystem working tree；原始機器路徑不屬於版本化契約。
 - 刻意排除：`.git`、`.env`、`.google-creds.json`、`node_modules`、`jobs`、`backups`、`out`、`成品`、cache/tmp/frame artifacts。
 - 原專案兩個 `.ttf` 經 magic bytes 驗證其實是 HTML，因此也不納入 baseline。
 - 缺少支援目錄且不屬 HeyGen 主流程的 `gen-video.js` FAL 實驗線與其專用 dependency 也不納入 baseline。

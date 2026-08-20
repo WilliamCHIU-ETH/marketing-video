@@ -7,7 +7,7 @@
 ## 安裝
 
 ```bash
-cd /Users/chiu/Developer/marketing-video/app
+cd /path/to/marketing-video
 nvm install
 nvm use
 brew install ffmpeg whisper-cpp tesseract tesseract-lang
@@ -76,7 +76,7 @@ Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo r
 ## 歷史資料盤點
 
 ```bash
-npm run cleanup:plan -- --root='/Users/chiu/Downloads/marketing-video 2'
+npm run cleanup:plan -- --root='/path/to/legacy-marketing-video'
 ```
 
 這個命令只有讀取能力，不提供 apply 或 force。若回傳 exit code 2，JSON 會是 `complete=false`、`safeToApply=false`，代表資料完整性異常，任何清理都必須停止。沒有 archive digest 證據的 terminal job payload 也只會列為 manual。

@@ -6,20 +6,30 @@ venv/
 # Local media source pack. In this workspace, assets is a symlink to ../data/assets.
 /assets
 
-# Build & render outputs
-out/
-build/
-.remotion/
-.data/
-runtime-data/
-.run.lock
-.run.owner.json
-.cache/
-.dual-tmp/
-.verify-dual-tmp/
-_frames_check/
-成品/
-docs/diagrams/*.png
+# Build, render, and machine-local outputs. Keep reusable source fixtures outside
+# these roots so they remain visible to Git.
+/out/
+/build/
+/.remotion/
+/.data/
+/runtime-data/
+/.run.lock
+/.run.owner.json
+/.cache/
+/.dual-tmp/
+/.verify-dual-tmp/
+/_frames_check/
+/成品/
+/.local/
+/captures/
+/recordings/
+/provider-cache/
+/sessions/
+/keychain-data/
+/persona-values/
+/internal-snapshots/
+/coverage/
+/test-results/
 
 # Logs
 *.log
