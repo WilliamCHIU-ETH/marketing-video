@@ -335,7 +335,8 @@ async function waitForJobStatus(base, id, expected, timeoutMs = 10000) {
     if (wanted.has(latest.job.status)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`等待 ${id} 進入 ${[...wanted].join('/')} 逾時；最後狀態 ${latest?.job?.status}`);
+  throw new Error(`等待 ${id} 進入 ${[...wanted].join('/')} 逾時；最後狀態 ${latest?.job?.status}`
+    + (latest?.job?.error ? `；${latest.job.error}` : ''));
 }
 
 async function main() {
@@ -1277,8 +1278,10 @@ async function main() {
   assert.equal(recoveredRender.job.status, 'review');
   assert.match(recoveredRender.job.error, /可人工確認後重新出片/);
   assert.equal(recoveredRenderProject.revision.status, 'review');
+  assert.deepEqual(recoveredRender.job.outputs.map((output) => output.name),
+    [`${detachedPartial.token}-output-dapan.mp4`]);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', detachedPartial.createdRun.job.id,
-    'out', 'output-dapan.mp4')), true);
+    'out', recoveredRender.job.outputs[0].name)), true);
   assert.equal(fs.readdirSync(path.join(DATA_DIR, 'projects', detachedPartial.createdRun.job.projectId,
     'outputs')).length, 0);
 
@@ -1312,7 +1315,7 @@ async function main() {
   assert.equal(recoveredRender.job.status, 'detached');
   assert.match(recoveredRender.job.error, /Project output 封存失敗/);
   assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', detachedArchiveRetry.createdRun.job.id,
-    'out', 'output-institution.mp4')), true);
+    'out', `${detachedArchiveRetry.token}-output-institution.mp4`)), true);
   const retryOutputDir = path.join(DATA_DIR, 'projects', detachedArchiveRetry.createdRun.job.projectId,
     'outputs');
   fs.unlinkSync(retryOutputDir);
@@ -1512,6 +1515,8 @@ async function main() {
     return runDir;
   };
   markDoneProjectRun(compactable, compactOutputRecord);
+  fs.writeFileSync(path.join(compactJobDir, 'out',
+    '00000000-0000-4000-8000-000000000099-final.mp4'), FRAGMENTED_MP4_FIXTURE);
   fs.writeFileSync(path.join(compactJobDir, 'log.txt'), 'minimal run trace\n');
 
   const missingSizeOutput = compactStore.outputPath(
@@ -1750,9 +1755,11 @@ async function main() {
   const normalWorkerDir = path.join(DATA_DIR, 'normal-render-worker');
   fs.mkdirSync(normalWorkerDir, { recursive: true });
   const normalWorkerFixtureMp4 = path.join(normalWorkerDir, 'fixture.mp4');
+  const normalWorkerRetryFixtureMp4 = path.join(normalWorkerDir, 'retry-fixture.mp4');
   const normalWorkerEntry = path.join(normalWorkerDir, 'partial-render.cjs');
   const normalWorkerInvocations = path.join(normalWorkerDir, 'invocations.log');
   fs.writeFileSync(normalWorkerFixtureMp4, MP4_FIXTURE);
+  fs.writeFileSync(normalWorkerRetryFixtureMp4, FRAGMENTED_MP4_FIXTURE);
   fs.writeFileSync(normalWorkerEntry, `
 'use strict';
 const fs = require('fs');
@@ -1846,8 +1853,11 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
   base = `http://127.0.0.1:${normalWorkerReady.port}`;
   const normalPartialResult = await waitForJobStatus(base, normalPartial.job.id, 'review');
   assert.match(normalPartialResult.job.error, /可人工確認後重新出片/);
+  assert.equal(normalPartialResult.job.outputs.length, 1);
   const normalFallback = path.join(normalWorkerDir, 'jobs', normalPartial.job.id,
-    'out', 'output-dapan.mp4');
+    'out', normalPartialResult.job.outputs[0].name);
+  assert.match(normalPartialResult.job.outputs[0].name,
+    /^[0-9a-f-]{36}-output-dapan\.mp4$/);
   assert.equal(fs.existsSync(normalFallback), true);
   assert.deepEqual(fs.readFileSync(normalFallback), MP4_FIXTURE);
   const normalPartialProject = await request(base,
@@ -1857,6 +1867,36 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
     'outputs')).length, 0);
   assert.equal(fs.lstatSync(path.join(normalWorkerDir, 'jobs', normalPartial.job.id,
     'log.txt')).isDirectory(), true);
+
+  // Retrying the same Revision receives a fresh workspace token. A different valid partial output
+  // must be preserved under a second filename instead of colliding with the first attempt and
+  // permanently closing the queue.
+  await stopTestServer(child);
+  const normalPartialLog = path.join(normalWorkerDir, 'jobs', normalPartial.job.id, 'log.txt');
+  fs.rmSync(normalPartialLog, { recursive: true, force: true });
+  fs.writeFileSync(normalPartialLog, 'retry after verified log failure\n');
+  armNormalRender(normalPartial, '2001-01-01T00:00:15.000Z');
+  child = startTestServer({
+    ...workerEnv,
+    SMOKE_PIPELINE_MODE: 'partial',
+    SMOKE_PIPELINE_MP4: normalWorkerRetryFixtureMp4,
+  });
+  const normalRetryReady = await waitForReady(child);
+  base = `http://127.0.0.1:${normalRetryReady.port}`;
+  const normalRetryResult = await waitForJobStatus(base, normalPartial.job.id, 'review');
+  assert.match(normalRetryResult.job.error, /可人工確認後重新出片/);
+  assert.equal(normalRetryResult.job.outputs.length, 1);
+  assert.notEqual(normalRetryResult.job.outputs[0].name, normalPartialResult.job.outputs[0].name);
+  const normalRetryFallback = path.join(normalWorkerDir, 'jobs', normalPartial.job.id,
+    'out', normalRetryResult.job.outputs[0].name);
+  assert.deepEqual(fs.readFileSync(normalFallback), MP4_FIXTURE);
+  assert.deepEqual(fs.readFileSync(normalRetryFallback), FRAGMENTED_MP4_FIXTURE);
+  assert.equal(fs.readdirSync(path.dirname(normalFallback)).filter(
+    (name) => name.endsWith('-output-dapan.mp4')).length, 2);
+  const normalRetryPlayback = await fetch(base
+    + `/api/jobs/${normalPartial.job.id}/file/${normalRetryResult.job.outputs[0].name}`);
+  assert.equal(normalRetryPlayback.status, 200);
+  assert.deepEqual(Buffer.from(await normalRetryPlayback.arrayBuffer()), FRAGMENTED_MP4_FIXTURE);
 
   await stopTestServer(child);
   armNormalRender(normalPipelineSymlink, '2001-01-01T00:00:30.000Z');
@@ -1877,7 +1917,7 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
       + `?revision=${normalPipelineSymlink.job.revisionId}`);
   assert.equal(normalPipelineProject.revision.status, 'failed');
   assert.deepEqual(fs.readdirSync(outsideNormalPipeline), []);
-  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 1);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 2);
 
   await stopTestServer(child);
   armNormalRender(normalSuccessLogFailure, '2001-01-01T00:00:45.000Z');
@@ -1898,7 +1938,7 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
     normalSuccessLogFailure.job.projectId, 'outputs')).length, 2);
   assert.equal(fs.lstatSync(path.join(normalWorkerDir, 'jobs', normalSuccessLogFailure.job.id,
     'log.txt')).isDirectory(), true);
-  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 2);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 3);
 
   await stopTestServer(child);
   armNormalRender(normalUnsafeFallback, '2001-01-01T00:01:00.000Z');
@@ -1915,7 +1955,7 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
   assert.match(normalUnsafeResult.job.error, /fallback 尚未保存/);
   const queuedBehindResult = await request(base, `/api/jobs/${normalQueuedBehind.job.id}`);
   assert.equal(queuedBehindResult.job.status, 'approved');
-  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 3);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 4);
   await stopTestServer(child);
 
   for (const rel of mutableRepoPaths) {

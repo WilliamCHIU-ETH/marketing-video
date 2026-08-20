@@ -634,13 +634,23 @@ function expectedPipelineOutputs(job) {
   return derived;
 }
 
+function evidenceFallbackName(job, outputName) {
+  if (!isWorkspaceRunToken(job.workspaceRunToken)
+      || typeof outputName !== 'string' || !outputName
+      || path.basename(outputName) !== outputName) return null;
+  return `${job.workspaceRunToken}-${outputName}`;
+}
+
 function evidenceOutputSource(job, item) {
   if (!item || !item.after || item.after.state !== 'file'
       || !Number.isSafeInteger(item.after.size) || item.after.size <= 0
       || !SHA256_HEX.test(item.after.sha256 || '')) return null;
   const fallbackDir = ownedJobPayloadDir(job.id, 'out');
+  const versionedFallback = evidenceFallbackName(job, item.name);
   const candidates = [
     path.join(WORKSPACE_OUTPUT_DIR, item.name),
+    fallbackDir && versionedFallback && path.join(fallbackDir, versionedFallback),
+    // Backward compatibility for Runs preserved before fallbacks became attempt-scoped.
     fallbackDir && path.join(fallbackDir, item.name),
   ].filter(Boolean);
   for (const file of candidates) {
@@ -731,12 +741,14 @@ function preserveEvidenceOutputs(job, evidence) {
   const preserved = [];
   for (const item of evidence.outputs || []) {
     if (!item.source || !item.after || item.after.state !== 'file') continue;
-    const target = path.join(fallbackDir, item.name);
+    const fallbackName = evidenceFallbackName(job, item.name);
+    if (!fallbackName) throw new Error(`Run fallback output 名稱不合法：${item.name || '(empty)'}`);
+    const target = path.join(fallbackDir, fallbackName);
     atomicCopyVerified(item.source, target, {
       size: item.after.size,
       sha256: item.after.sha256,
     });
-    preserved.push({ name: item.name, size: item.after.size, sha256: item.after.sha256 });
+    preserved.push({ name: fallbackName, size: item.after.size, sha256: item.after.sha256 });
   }
   return preserved;
 }
@@ -2491,9 +2503,20 @@ function pruneOldJobs() {
           && path.basename(output.name) === output.name)
         indexesByName.set(output.name, index);
     });
+    const isAttemptFallback = (name) => {
+      const token = name.slice(0, 36);
+      const originalName = name.slice(37);
+      return name[36] === '-' && isWorkspaceRunToken(token)
+        && originalName && path.basename(originalName) === originalName
+        && indexesByName.has(originalName);
+    };
     try {
       return fs.readdirSync(dir, { withFileTypes: true }).every((entry) => {
-        if (!entry.isFile() || entry.isSymbolicLink() || !indexesByName.has(entry.name)) return false;
+        if (!entry.isFile() || entry.isSymbolicLink()) return false;
+        // A successful retry may leave immutable, token-scoped partial outputs. Once the canonical
+        // Project outputs are verified, these recognized Run-attempt files are disposable too;
+        // arbitrary unlisted files still keep out/ fail closed.
+        if (!indexesByName.has(entry.name)) return isAttemptFallback(entry.name);
         const index = indexesByName.get(entry.name);
         const runFile = path.join(dir, entry.name);
         const durableFile = verifiedOutputs[index];
