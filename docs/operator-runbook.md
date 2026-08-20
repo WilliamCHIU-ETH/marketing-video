@@ -85,6 +85,7 @@ npm run cleanup:plan -- --root='/Users/chiu/Downloads/marketing-video 2'
 
 - 新建立的影片使用 `Project → Revision → Run`；既有 Job 不會自動 migration，也不會被搬移或刪除。
 - Project Asset 分成圖片、一般 B-Roll 影片與講者影片。前台接受 PNG／JPEG 及 MP4／MOV／M4V／WebM，會驗證實際檔案內容、保存 durable copy 並支援跨 Revision 引用；一般 B-Roll 不會被當成 `heygen.mp4`。相同內容與角色依 SHA-256 去重，Run 暫時副本被清理後仍保留 Project 素材。
+- 成功的 Project Run 只有在每份正式 output 都能從 Project `outputs/` 驗證存在且 size 相符後，才會立即清除 `input/`、`state/`、`thumbs/` 與 `out/`。小型 `job.json`／`log.txt` 暫時保留；active、review、detached、failed 或缺少 durable output 的 Run 不走這條立即清理路徑。
 - 前端若在素材上傳或送出前失敗，會回收剛建立的 draft Revision；全新影片會連同空 Project 一起回收，既有 Project 則保留先前版本與既有素材，不讓重試直接跳號。
 - 目前自動 OCR／素材配置／Remotion 合成仍只消費圖片；B-Roll 已可加入、預覽及沿用，但「保存於 Project」不等於「已自動剪入成片」。
 

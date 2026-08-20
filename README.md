@@ -95,6 +95,7 @@ npm start                              # Remotion Studio，不是使用者前台
 
 - `npm run smoke` 使用 repo 外的臨時 `DATA_DIR`、停用 worker、清空 provider keys，並阻擋／記錄 child process 與 outbound network 嘗試。
 - 正常 Project、Revision 與 Run state 預設放在 ignored 的 `runtime-data/`。
+- 成功 Project Run 的正式成品確認寫入 Project 後，`input/`、`state/`、`thumbs/` 與 `out/` payload 會立即清除；只保留小型 Run record／log 供目前 UI 與機器狀態使用。
 - 大型品牌素材不進 Git；本 workspace 的 ignored `assets` symlink 指向 `../data/assets/`。
 - 啟動 server 不會自動清理舊 job；只有顯式設定 `AUTO_PRUNE_ON_START=1` 才會 prune。
 - 非 localhost 模式目前沒有完整認證，server 會預設拒絕啟動。

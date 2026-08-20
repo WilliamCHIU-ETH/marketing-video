@@ -101,10 +101,10 @@ const PROJECT_STORE = createProjectStore({
 });
 
 // ── 保留策略 ──────────────────────────────
-// 一支工作的成品：焦點股約 45MB、大盤約 138MB（兩支）、三大法人約 67MB。
-// 照實際用量（三個版型各一兩支）一天 250~500MB、一個月 5~11GB —— 不清會把硬碟塞爆。
-// 影片發出去之後本機那份就沒用了，所以過期就刪，只留 job.json 與執行記錄
-//（很小，修正紀錄那頁要用）。要更久／更短就改這兩個數字。
+// Project Run 的正式成品與共用素材已經另存到 projects/。只要能驗證每份 output 都在
+// Project outputs，Run 的大型 payload 就立即清掉，只留 job.json 與執行記錄供現有 UI 使用。
+// 下面的數字只控制 legacy、失敗或取消的 terminal Run；成功 Project Run 若驗證失敗
+// 會 fail closed 保留全部 payload，不能靠 retention 繞過 durable gate。
 const KEEP_RECENT = Number(process.env.KEEP_RECENT || 20); // 最近幾支一定留著
 const KEEP_DAYS = Number(process.env.KEEP_DAYS || 7);      // 或幾天內的都留
 
@@ -241,6 +241,22 @@ function dirSize(p) {
   return n;
 }
 
+function fileSha256(file) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead;
+    do {
+      bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
 /** 本機在區網上的 IP，開機訊息要印給同事看 */
 function lanIP() {
   for (const list of Object.values(os.networkInterfaces())) {
@@ -267,15 +283,49 @@ function codeChangedAt() {
 // 用檔案存，伺服器重開不會掉。不用資料庫 —— 一天十幾筆而已。
 ensureDir(JOBS_DIR);
 
-function jobDir(id) { return path.join(JOBS_DIR, id); }
+const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+function safeRunId(id) {
+  const value = String(id || '');
+  if (!RUN_ID.test(value)) throw new Error('Run ID 不合法');
+  return value;
+}
+function jobDir(id) { return path.join(JOBS_DIR, safeRunId(id)); }
 function jobFile(id) { return path.join(jobDir(id), 'job.json'); }
+
+function ownedJobDir(id) {
+  try {
+    const dir = jobDir(id);
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    return isWithin(fs.realpathSync(JOBS_DIR), fs.realpathSync(dir)) ? dir : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function ownedJobPayloadDir(id, subdir) {
+  const dir = ownedJobDir(id);
+  if (!dir || !/^(input|state|thumbs|out)$/.test(subdir)) return null;
+  const target = path.join(dir, subdir);
+  if (!fs.existsSync(target)) return target;
+  try {
+    const stat = fs.lstatSync(target);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return null;
+    return isWithin(fs.realpathSync(dir), fs.realpathSync(target)) ? target : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function loadJobs() {
   const out = [];
   const recovered = [];
-  for (const id of fs.readdirSync(JOBS_DIR)) {
+  for (const entry of fs.readdirSync(JOBS_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
+    const id = entry.name;
     try {
       const j = JSON.parse(fs.readFileSync(jobFile(id), 'utf-8'));
+      if (j.id !== id) continue;
       let recoveryChanged = false;
       // 伺服器上次是在跑到一半被關掉的。
       // run.js 是 detached 的，所以它很可能還活著 —— 那就不是「中斷」，
@@ -1130,7 +1180,7 @@ function tick() {
     })
     .finally(() => {
       busy = false;
-      try { pruneOldJobs(); } catch (_) {}
+      pruneOldJobsNonFatal('工作結束');
       setTimeout(tick, 200);
     });
 }
@@ -1227,8 +1277,6 @@ async function doRender(job) {
   job.status = 'done';
   job.archived = job.outputs.map((o) => o.archive).filter(Boolean);
   if (job.archived.length) appendLog(job, '\n📁 成品庫：\n   ' + job.archived.join('\n   ') + '\n');
-  // 成品已經另存，快照留著只是佔空間（一支約 20MB）→ 清掉
-  rmrf(path.join(jobDir(job.id), 'state'));
   saveJob(job);
 }
 
@@ -1854,49 +1902,142 @@ const server = http.createServer(async (req, res) => {
 });
 
 /**
- * 清掉舊工作的大檔（影片、上傳的素材、快照），保留 job.json 與執行記錄。
- * 回傳釋出的位元組數。啟動時與每支工作跑完後都會呼叫。
+ * 清掉 Run 的大型 payload（影片、上傳素材、快照），保留 job.json 與執行記錄。
+ * 成功的 Project Run 在所有正式 output 都能從 Project 驗證後立即清理；其他 terminal
+ * legacy、failed、cancelled Run 仍使用 KEEP_RECENT／KEEP_DAYS；成功 Project Run 未通過
+ * durable gate 時保留全部 payload。回傳釋出的位元組數。
  */
 function pruneOldJobs() {
   const cutoff = Date.now() - KEEP_DAYS * 86400000;
   let freed = 0;
-  const hasVerifiedArchive = (output) => {
-    if (!output || !output.archive) return false;
+  const verifiedArchiveFile = (output) => {
+    if (!output || typeof output !== 'object' || Array.isArray(output)
+        || typeof output.archive !== 'string' || !output.archive) return false;
     const file = path.resolve(ROOT, output.archive);
     if (!isWithin(path.resolve(ARCHIVE_DIR), file) && !isWithin(PROJECT_STORE.projectsDir, file))
       return false;
     try {
-      const stat = fs.statSync(file);
-      return stat.isFile() && stat.size > 0
-        && (!Number.isFinite(output.size) || stat.size === output.size);
+      const stat = fs.lstatSync(file);
+      return (stat.isFile() && stat.size > 0
+        && (!Number.isFinite(output.size) || stat.size === output.size)) ? file : false;
     } catch (_) {
       return false;
     }
   };
+  const canRemoveRunOutputDir = (dir, outputs, verifiedOutputs) => {
+    if (!dir || !fs.existsSync(dir)) return false;
+    const indexesByName = new Map();
+    outputs.forEach((output, index) => {
+      if (output && typeof output.name === 'string' && output.name
+          && path.basename(output.name) === output.name)
+        indexesByName.set(output.name, index);
+    });
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true }).every((entry) => {
+        if (!entry.isFile() || entry.isSymbolicLink() || !indexesByName.has(entry.name)) return false;
+        const index = indexesByName.get(entry.name);
+        const runFile = path.join(dir, entry.name);
+        const durableFile = verifiedOutputs[index];
+        return durableFile && fs.statSync(runFile).size === fs.statSync(durableFile).size
+          && fileSha256(runFile) === fileSha256(durableFile);
+      });
+    } catch (_) {
+      return false;
+    }
+  };
+  const terminalStatuses = new Set(['done', 'failed', 'cancelled']);
   JOBS.forEach((j, idx) => {
-    // 快照只有「等人確認」時才有用，其餘狀態一律清掉（一支約 40~60MB）
-    if (!['review', 'approved', 'preparing', 'detached'].includes(j.status)) {
-      const d = path.join(jobDir(j.id), 'state');
-      freed += dirSize(d);
-      rmrf(d);
-    }
-    const t = Date.parse(j.finishedAt || j.createdAt) || 0;
-    if (idx < KEEP_RECENT || t > cutoff) return;   // 還在保留期內
-    if (['queued', 'preparing', 'review', 'approved', 'rendering', 'detached'].includes(j.status)) return;
-    for (const sub of ['input', 'thumbs']) {
-      const d = path.join(jobDir(j.id), sub);
-      freed += dirSize(d);
-      rmrf(d);
-    }
-    // 只有每一份輸出都能在成品庫驗證時，才可刪除 Run out/。封存失敗或 archive
-    // 遺失時，out/ 可能是唯一完成品，不能只因超過 retention 就清掉。
-    if ((j.outputs || []).length > 0 && j.outputs.every(hasVerifiedArchive)) {
-      const d = path.join(jobDir(j.id), 'out');
-      freed += dirSize(d);
-      rmrf(d);
+    try {
+      // Unknown／active／draft／detached 或 malformed manifest 一律 fail closed，任何 payload 都不碰。
+      if (!j || typeof j !== 'object' || Array.isArray(j)
+          || typeof j.id !== 'string' || !RUN_ID.test(j.id)
+          || !terminalStatuses.has(j.status) || !ownedJobDir(j.id)
+          || (j.outputs !== undefined && !Array.isArray(j.outputs))) return;
+      const outputs = Array.isArray(j.outputs) ? j.outputs : [];
+      if (outputs.some((output) => !output || typeof output !== 'object' || Array.isArray(output)
+          || typeof output.name !== 'string' || !output.name
+          || path.basename(output.name) !== output.name
+          || (output.archive !== undefined
+            && (typeof output.archive !== 'string' || !output.archive))
+          || (output.size !== undefined
+            && (!Number.isFinite(output.size) || output.size <= 0)))) return;
+      const verifiedOutputs = outputs.map(verifiedArchiveFile);
+      const hasDurableOutputs = outputs.length > 0 && verifiedOutputs.every(Boolean);
+      // IDs 可能因 manifest 損壞而遺失；只要 output lexical path 仍指向 Project store，
+      // 就不能降級當成 legacy 讓 retention 繞過 Project／Revision durable gate。
+      const hasProjectOutputReference = outputs.some((output) => output.archive
+        && isWithin(PROJECT_STORE.projectsDir, path.resolve(ROOT, output.archive)));
+      const isProjectRun = Boolean(j.projectId || j.revisionId || hasProjectOutputReference);
+      let isCompactableProjectRun = false;
+      if (j.status === 'done' && j.projectId && j.revisionId && hasDurableOutputs) {
+        const project = PROJECT_STORE.get(j.projectId);
+        const revision = PROJECT_STORE.getRevision(j.projectId, j.revisionId);
+        const revisionOutputs = revision && revision.outputs;
+        const projectDir = PROJECT_STORE.projectDir(j.projectId);
+        const projectOutputDir = PROJECT_STORE.outputDir(j.projectId);
+        const projectStat = fs.lstatSync(projectDir);
+        const outputDirStat = fs.lstatSync(projectOutputDir);
+        const projectsRootReal = fs.realpathSync(PROJECT_STORE.projectsDir);
+        const projectReal = fs.realpathSync(projectDir);
+        const projectOutputReal = fs.realpathSync(projectOutputDir);
+        isCompactableProjectRun = project && project.id === j.projectId
+          && revision && revision.id === j.revisionId && revision.projectId === j.projectId
+          && revision.jobId === j.id && revision.runId === j.id
+          && revision.status === 'done' && Array.isArray(revisionOutputs)
+          && revisionOutputs.length === outputs.length
+          && projectStat.isDirectory() && !projectStat.isSymbolicLink()
+          && outputDirStat.isDirectory() && !outputDirStat.isSymbolicLink()
+          && isWithin(projectsRootReal, projectReal) && projectReal !== projectsRootReal
+          && isWithin(projectReal, projectOutputReal) && projectOutputReal !== projectReal
+          && new Set(outputs.map((output) => output && output.name)).size === outputs.length
+          && outputs.every((output, index) => {
+            const file = verifiedOutputs[index];
+            if (typeof output.name !== 'string' || !output.name
+                || path.basename(output.name) !== output.name
+                || !Number.isFinite(output.size) || output.size <= 0 || !file
+                || !isWithin(projectOutputReal, fs.realpathSync(file))) return false;
+            // Immediate cleanup is intentionally stricter than legacy retention: a symlink or an
+            // output recorded only on the Job cannot prove this Revision owns a durable file.
+            if (!fs.lstatSync(file).isFile() || fs.statSync(file).size !== output.size) return false;
+            return revisionOutputs.some((candidate) => candidate.name === output.name
+              && candidate.archive && candidate.size === output.size
+              && fs.realpathSync(path.resolve(ROOT, candidate.archive)) === fs.realpathSync(file));
+          });
+      }
+      // Project Run 的成功狀態若未通過嚴格 Project／Revision gate，retention 也不可繞過。
+      if (j.status === 'done' && isProjectRun && !isCompactableProjectRun) return;
+      const t = Date.parse(j.finishedAt || j.createdAt) || 0;
+      const retentionExpired = idx >= KEEP_RECENT && t <= cutoff;
+      if (!isCompactableProjectRun && !retentionExpired) return;
+      for (const sub of ['input', 'state', 'thumbs']) {
+        const d = ownedJobPayloadDir(j.id, sub);
+        if (!d) continue;
+        freed += dirSize(d);
+        rmrf(d);
+      }
+      // 只有每一份輸出都能在成品庫驗證時，才可刪除 Run out/。封存失敗或 archive
+      // 遺失時，out/ 可能是唯一完成品，不能只因超過 retention 就清掉。
+      if (hasDurableOutputs) {
+        const d = ownedJobPayloadDir(j.id, 'out');
+        if (canRemoveRunOutputDir(d, outputs, verifiedOutputs)) {
+          freed += dirSize(d);
+          rmrf(d);
+        }
+      }
+    } catch (_) {
+      // 單一損壞 Job 不得中止其他 cleanup，更不得讓 server 或成功 render 失敗。
     }
   });
   return freed;
+}
+
+function pruneOldJobsNonFatal(context) {
+  try {
+    return pruneOldJobs();
+  } catch (error) {
+    console.warn(`⚠️ ${context}的 Run cleanup 失敗，保留 payload 稍後重試：${error.message}`);
+    return 0;
+  }
 }
 
 
@@ -1935,7 +2076,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 }
 
 server.listen(PORT, HOST, () => {
-  if (!TEST_MODE && envFlag('AUTO_PRUNE_ON_START')) pruneOldJobs();
+  if (envFlag('AUTO_PRUNE_ON_START')) pruneOldJobsNonFatal('啟動時');
   const ip = lanIP();
   const address = server.address();
   const actualPort = typeof address === 'object' && address ? address.port : PORT;
@@ -1955,7 +2096,8 @@ server.listen(PORT, HOST, () => {
   console.log(`  資料根目錄：${DATA_DIR}`);
   console.log(`  工作資料夾：${JOBS_DIR}/  （${JOBS.length} 筆，${(dirSize(JOBS_DIR) / 1048576).toFixed(0)} MB）`);
   console.log(`  Worker：      ${DISABLE_WORKER ? '停用（安全模式）' : '啟用'}`);
-  console.log(`  自動清理：  留最近 ${KEEP_RECENT} 支或 ${KEEP_DAYS} 天內；更舊的只留紀錄不留影片`);
+  console.log('  Project Run：成品驗證後立即清除大型 payload，只留最小紀錄');
+  console.log(`  Legacy／失敗／取消 Run：留最近 ${KEEP_RECENT} 支或 ${KEEP_DAYS} 天內`);
   console.log(`  成品庫：    ${ARCHIVE_DIR}/  （不會自動清，這份要自己管）`);
   console.log('  按 Ctrl+C 結束');
   console.log('');
