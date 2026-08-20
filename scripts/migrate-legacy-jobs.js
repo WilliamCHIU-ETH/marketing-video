@@ -261,10 +261,23 @@ function locateOutput(sourceRoot, record, output) {
       candidates.push(output.archive);
     } else {
       const parts = output.archive.split(/[\\/]+/).filter(Boolean);
-      invariant(parts.length > 0 && !parts.includes('.') && !parts.includes('..'),
+      invariant(parts.length > 0 && !parts.includes('.'),
         `job ${record.job.id} 的 archive 相對路徑不安全`);
-      const encodedFromRepoRoot = ['runtime-data', path.basename(sourceRoot)].includes(parts[0]);
-      const sourceRelativeParts = encodedFromRepoRoot ? parts.slice(1) : parts;
+      let sourceRelativeParts;
+      if (parts[0] === '..') {
+        const externalPrefix = ['..', 'data', 'runtime'];
+        const documentedExternalLayout = path.basename(sourceRoot) === 'runtime'
+          && path.basename(path.dirname(sourceRoot)) === 'data';
+        const exactExternalPrefix = externalPrefix.every((part, index) => parts[index] === part);
+        sourceRelativeParts = parts.slice(externalPrefix.length);
+        invariant(documentedExternalLayout && exactExternalPrefix
+          && sourceRelativeParts[0] === 'archive' && !sourceRelativeParts.includes('..'),
+          `job ${record.job.id} 的 archive 相對路徑不安全`);
+      } else {
+        invariant(!parts.includes('..'), `job ${record.job.id} 的 archive 相對路徑不安全`);
+        const encodedFromRepoRoot = ['runtime-data', path.basename(sourceRoot)].includes(parts[0]);
+        sourceRelativeParts = encodedFromRepoRoot ? parts.slice(1) : parts;
+      }
       invariant(sourceRelativeParts.length > 0,
         `job ${record.job.id} 的 archive 相對路徑缺少檔名`);
       candidates.push(path.join(sourceRoot, ...sourceRelativeParts));

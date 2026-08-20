@@ -67,6 +67,14 @@ function makeFixture() {
   return { root, source, dataDir };
 }
 
+function makeExternalRuntimeFixture() {
+  const fixture = makeFixture();
+  const source = path.join(fixture.root, 'data', 'runtime');
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.renameSync(fixture.source, source);
+  return { ...fixture, source };
+}
+
 function options(source, dataDir, extra = {}) {
   return { source, dataDir, apply: false, verify: false, ...extra };
 }
@@ -207,6 +215,53 @@ test('dry-run honors repository-relative legacy archive paths without a Run outp
   assert.equal(result.mode, 'preview');
   assert.equal(result.revisions, 5);
   assert.equal(fs.existsSync(fixture.dataDir), false);
+});
+
+test('dry-run translates the documented external DATA_DIR archive encoding only', (t) => {
+  const external = makeExternalRuntimeFixture();
+  t.after(() => fs.rmSync(external.root, { recursive: true, force: true }));
+  const jobDir = path.join(external.source, 'jobs', 'job-v2');
+  const archived = path.join(external.source, 'archive', '2026-08', 'final.mp4');
+  fs.mkdirSync(path.dirname(archived), { recursive: true });
+  fs.renameSync(path.join(jobDir, 'out', 'final.mp4'), archived);
+  const jobFile = path.join(jobDir, 'job.json');
+  const job = JSON.parse(fs.readFileSync(jobFile, 'utf8'));
+  job.outputs[0].archive = '../data/runtime/archive/2026-08/final.mp4';
+  writeJson(jobFile, job);
+
+  const result = run(options(external.source, external.dataDir));
+  assert.equal(result.mode, 'preview');
+  assert.equal(result.revisions, 5);
+  assert.equal(fs.existsSync(external.dataDir), false);
+
+  const decoy = makeExternalRuntimeFixture();
+  t.after(() => fs.rmSync(decoy.root, { recursive: true, force: true }));
+  const decoyJobDir = path.join(decoy.source, 'jobs', 'job-v2');
+  const decoyFile = path.join(decoy.source, 'archive', 'decoy.mp4');
+  fs.mkdirSync(path.dirname(decoyFile), { recursive: true });
+  fs.renameSync(path.join(decoyJobDir, 'out', 'final.mp4'), decoyFile);
+  const decoyJobFile = path.join(decoyJobDir, 'job.json');
+  const decoyJob = JSON.parse(fs.readFileSync(decoyJobFile, 'utf8'));
+  decoyJob.outputs[0].archive = '../data/runtime/archive/../archive/decoy.mp4';
+  writeJson(decoyJobFile, decoyJob);
+
+  assert.throws(() => run(options(decoy.source, decoy.dataDir)), /archive 相對路徑不安全/);
+  assert.equal(fs.existsSync(decoy.dataDir), false);
+
+  const wrongLayout = makeFixture();
+  t.after(() => fs.rmSync(wrongLayout.root, { recursive: true, force: true }));
+  const wrongJobDir = path.join(wrongLayout.source, 'jobs', 'job-v2');
+  const wrongDecoy = path.join(wrongLayout.source, 'archive', 'decoy.mp4');
+  fs.mkdirSync(path.dirname(wrongDecoy), { recursive: true });
+  fs.renameSync(path.join(wrongJobDir, 'out', 'final.mp4'), wrongDecoy);
+  const wrongJobFile = path.join(wrongJobDir, 'job.json');
+  const wrongJob = JSON.parse(fs.readFileSync(wrongJobFile, 'utf8'));
+  wrongJob.outputs[0].archive = '../data/runtime/archive/decoy.mp4';
+  writeJson(wrongJobFile, wrongJob);
+
+  assert.throws(() => run(options(wrongLayout.source, wrongLayout.dataDir)),
+    /archive 相對路徑不安全/);
+  assert.equal(fs.existsSync(wrongLayout.dataDir), false);
 });
 
 test('dry-run rejects symlinked input directories and supported media entries', (t) => {

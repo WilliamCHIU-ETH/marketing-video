@@ -6,7 +6,7 @@
 
 ## Source 與 target
 
-`--source` 必須指向 legacy runtime root，底下要有 `jobs/<job-id>/job.json`。Job 引用的 archive 也必須位於這個 source root；工具拒絕 symlink、path escape、缺檔、size 不符與無法辨識的素材。
+`--source` 必須指向 legacy runtime root，底下要有 `jobs/<job-id>/job.json`。Job 引用的 archive 也必須位於這個 source root；工具只額外翻譯 documented sibling `data/runtime` 所產生的 `../data/runtime/archive/...` 編碼，並拒絕其他 symlink、path escape、缺檔、size 不符與無法辨識的素材。
 
 `--data-dir` 是新的 runtime root。第一次 apply 要使用空白 target；若只存在部分預期 Project／Run，工具會 fail closed，不會補寫或覆寫。
 
