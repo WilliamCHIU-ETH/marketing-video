@@ -237,6 +237,69 @@ test('dry-run rejects symlinked input directories and supported media entries', 
     /legacy input 目錄不是安全的實體目錄/);
 });
 
+test('legacy input videos require an explicit B-Roll or speaker naming convention', (t) => {
+  const explicit = makeFixture();
+  t.after(() => fs.rmSync(explicit.root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(explicit.source, 'jobs', 'job-v2', 'input', 'broll1.mp4'), 'b-roll fixture');
+  const explicitRecord = loadPlan(options(explicit.source, explicit.dataDir))
+    .flatMap((plan) => plan.records)
+    .find((record) => record.job.id === 'job-v2');
+  assert.equal(explicitRecord.assets.some((asset) => asset.name === 'broll1.mp4' && asset.kind === 'video'), true);
+
+  const ambiguous = makeFixture();
+  t.after(() => fs.rmSync(ambiguous.root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(ambiguous.source, 'jobs', 'job-v2', 'input', 'presenter.mp4'), 'ambiguous fixture');
+  assert.throws(() => loadPlan(options(ambiguous.source, ambiguous.dataDir)),
+    /legacy input 影片缺少明確 B-Roll 或講者命名/);
+});
+
+test('legacy paid speaker master must be a regular owned file when present', (t) => {
+  const regular = makeFixture();
+  t.after(() => fs.rmSync(regular.root, { recursive: true, force: true }));
+  const regularState = path.join(regular.source, 'jobs', 'job-v2', 'state', 'public');
+  fs.mkdirSync(regularState, { recursive: true });
+  fs.writeFileSync(path.join(regularState, 'heygen.mp4'), 'regular speaker fixture');
+  const regularRecord = loadPlan(options(regular.source, regular.dataDir))
+    .flatMap((plan) => plan.records)
+    .find((record) => record.job.id === 'job-v2');
+  assert.equal(regularRecord.assets.some((asset) => asset.kind === 'speaker-video'), true);
+
+  const linked = makeFixture();
+  t.after(() => fs.rmSync(linked.root, { recursive: true, force: true }));
+  const linkedState = path.join(linked.source, 'jobs', 'job-v2', 'state', 'public');
+  fs.mkdirSync(linkedState, { recursive: true });
+  const linkedSource = path.join(linked.source, 'speaker-source.mp4');
+  fs.writeFileSync(linkedSource, 'speaker fixture');
+  fs.symlinkSync(linkedSource, path.join(linkedState, 'heygen.mp4'));
+  assert.throws(() => loadPlan(options(linked.source, linked.dataDir)),
+    /legacy paid speaker master 不是安全的實體檔案/);
+
+  const dangling = makeFixture();
+  t.after(() => fs.rmSync(dangling.root, { recursive: true, force: true }));
+  const danglingState = path.join(dangling.source, 'jobs', 'job-v2', 'state', 'public');
+  fs.mkdirSync(danglingState, { recursive: true });
+  fs.symlinkSync(path.join(dangling.source, 'missing-speaker.mp4'), path.join(danglingState, 'heygen.mp4'));
+  assert.throws(() => loadPlan(options(dangling.source, dangling.dataDir)),
+    /legacy paid speaker master 不是安全的實體檔案/);
+
+  const directory = makeFixture();
+  t.after(() => fs.rmSync(directory.root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(directory.source, 'jobs', 'job-v2', 'state', 'public', 'heygen.mp4'), { recursive: true });
+  assert.throws(() => loadPlan(options(directory.source, directory.dataDir)),
+    /legacy paid speaker master 不是安全的實體檔案/);
+
+  const escaped = makeFixture();
+  t.after(() => fs.rmSync(escaped.root, { recursive: true, force: true }));
+  const escapedState = path.join(escaped.source, 'jobs', 'job-v2', 'state');
+  const outsidePublic = path.join(escaped.root, 'outside-public');
+  fs.mkdirSync(escapedState, { recursive: true });
+  fs.mkdirSync(outsidePublic, { recursive: true });
+  fs.writeFileSync(path.join(outsidePublic, 'heygen.mp4'), 'outside speaker fixture');
+  fs.symlinkSync(outsidePublic, path.join(escapedState, 'public'));
+  assert.throws(() => loadPlan(options(escaped.source, escaped.dataDir)),
+    /legacy paid speaker master 超出 source 或不安全/);
+});
+
 test('dry-run rejects prefixed archive traversal even when an in-source decoy exists', (t) => {
   const fixture = makeFixture();
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));

@@ -129,8 +129,12 @@ function timestamp(job) {
 function classifyAsset(name) {
   if (/^heygen\.mp4$/i.test(name)) return 'speaker-video';
   if (/\.(png|jpe?g)$/i.test(name)) return 'image';
-  if (/\.(mp4|mov|m4v|webm)$/i.test(name)) return 'video';
+  if (/^broll\d{1,3}\.(mp4|mov|m4v|webm)$/i.test(name)) return 'video';
   return null;
+}
+
+function isSupportedVideoName(name) {
+  return /\.(mp4|mov|m4v|webm)$/i.test(name);
 }
 
 function collectAssetSources(sourceRoot, jobDir) {
@@ -142,6 +146,8 @@ function collectAssetSources(sourceRoot, jobDir) {
       `legacy input 目錄不是安全的實體目錄：${inputDir}`);
     for (const entry of fs.readdirSync(inputDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const kind = classifyAsset(entry.name);
+      invariant(kind || !isSupportedVideoName(entry.name),
+        `legacy input 影片缺少明確 B-Roll 或講者命名：${path.join(inputDir, entry.name)}`);
       if (!kind) continue;
       invariant(entry.isFile() && !entry.isSymbolicLink(),
         `legacy input 素材不是安全的實體檔案：${path.join(inputDir, entry.name)}`);
@@ -150,7 +156,15 @@ function collectAssetSources(sourceRoot, jobDir) {
       assets.push({ name: entry.name, kind, file });
     }
   }
-  const paidMaster = regularOwnedFile(sourceRoot, path.join(jobDir, 'state', 'public', 'heygen.mp4'));
+  const paidMasterPath = path.join(jobDir, 'state', 'public', 'heygen.mp4');
+  const paidMasterStat = fs.lstatSync(paidMasterPath, { throwIfNoEntry: false });
+  let paidMaster = null;
+  if (paidMasterStat) {
+    invariant(paidMasterStat.isFile() && !paidMasterStat.isSymbolicLink(),
+      `legacy paid speaker master 不是安全的實體檔案：${paidMasterPath}`);
+    paidMaster = regularOwnedFile(sourceRoot, paidMasterPath);
+    invariant(paidMaster, `legacy paid speaker master 超出 source 或不安全：${paidMasterPath}`);
+  }
   if (paidMaster && !assets.some((asset) => asset.kind === 'speaker-video' && hashFile(asset.file) === hashFile(paidMaster)))
     assets.push({ name: 'heygen.mp4', kind: 'speaker-video', file: paidMaster });
   return assets;

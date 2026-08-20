@@ -34,6 +34,7 @@ npm run migrate:legacy -- --source /path/to/legacy-runtime --data-dir /path/to/n
 
 - 相同 template 加上相同的非空 title，或相同 paid speaker master SHA-256，才會合併成同一 Project；空 title 各自獨立。
 - 素材在 Project 內依 role 加 SHA-256 去重，共用於多個 Revision。
+- Legacy input 只把 `heygen.mp4` 視為講者影片、`broll<N>.(mp4|mov|m4v|webm)` 視為 B-Roll；其他影片檔名、非實體或超出 source 的 paid speaker master 都會 fail closed。
 - output 必須通過 containment、size 與 SHA-256；成品只保存於 Project outputs。
 - legacy Run 只建立目前 UI 所需的 `job.json`／`log.txt`，不複製大型 input/state/out payload。
 - 非終態 legacy Job 不能跨版本安全續跑，會標成 `failed`，但其可辨識素材與 metadata 仍保留。
