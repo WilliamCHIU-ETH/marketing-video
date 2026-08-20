@@ -135,12 +135,18 @@ function classifyAsset(name) {
 function collectAssetSources(sourceRoot, jobDir) {
   const assets = [];
   const inputDir = path.join(jobDir, 'input');
-  if (fs.existsSync(inputDir) && fs.lstatSync(inputDir).isDirectory() && !fs.lstatSync(inputDir).isSymbolicLink()) {
+  if (fs.existsSync(inputDir)) {
+    const inputStat = fs.lstatSync(inputDir);
+    invariant(inputStat.isDirectory() && !inputStat.isSymbolicLink(),
+      `legacy input 目錄不是安全的實體目錄：${inputDir}`);
     for (const entry of fs.readdirSync(inputDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile() || entry.isSymbolicLink()) continue;
       const kind = classifyAsset(entry.name);
+      if (!kind) continue;
+      invariant(entry.isFile() && !entry.isSymbolicLink(),
+        `legacy input 素材不是安全的實體檔案：${path.join(inputDir, entry.name)}`);
       const file = regularOwnedFile(sourceRoot, path.join(inputDir, entry.name));
-      if (kind && file) assets.push({ name: entry.name, kind, file });
+      invariant(file, `legacy input 素材超出 source 或不安全：${path.join(inputDir, entry.name)}`);
+      assets.push({ name: entry.name, kind, file });
     }
   }
   const paidMaster = regularOwnedFile(sourceRoot, path.join(jobDir, 'state', 'public', 'heygen.mp4'));
@@ -230,8 +236,17 @@ function locateOutput(sourceRoot, record, output) {
   const name = path.basename(String(output && output.name || ''));
   invariant(name, `job ${record.job.id} 的 output 缺少 name`);
   const candidates = [];
-  if (output.archive && typeof output.archive === 'string')
-    candidates.push(path.isAbsolute(output.archive) ? output.archive : path.resolve(sourceRoot, output.archive));
+  if (output.archive && typeof output.archive === 'string') {
+    if (path.isAbsolute(output.archive)) {
+      candidates.push(output.archive);
+    } else {
+      const normalized = path.normalize(output.archive);
+      candidates.push(path.resolve(sourceRoot, normalized));
+      const parts = normalized.split(path.sep).filter(Boolean);
+      if (parts.length > 1 && ['runtime-data', path.basename(sourceRoot)].includes(parts[0]))
+        candidates.unshift(path.join(sourceRoot, ...parts.slice(1)));
+    }
+  }
   candidates.push(path.join(record.sourceDir, 'out', name));
   for (const candidate of candidates) {
     const file = regularOwnedFile(sourceRoot, candidate);

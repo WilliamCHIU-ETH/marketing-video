@@ -149,6 +149,45 @@ test('dry-run fails closed for missing output and unsafe archive', (t) => {
   assert.throws(() => run(options(fixture.source, fixture.dataDir)), /找不到 job job-v2 的成品/);
 });
 
+test('dry-run honors repository-relative legacy archive paths without a Run output fallback', (t) => {
+  const fixture = makeFixture();
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const jobDir = path.join(fixture.source, 'jobs', 'job-v2');
+  const fallback = path.join(jobDir, 'out', 'final.mp4');
+  const archived = path.join(fixture.source, 'archive', '2026-08', 'final.mp4');
+  fs.mkdirSync(path.dirname(archived), { recursive: true });
+  fs.renameSync(fallback, archived);
+  const jobFile = path.join(jobDir, 'job.json');
+  const job = JSON.parse(fs.readFileSync(jobFile, 'utf8'));
+  job.outputs[0].archive = 'runtime-data/archive/2026-08/final.mp4';
+  writeJson(jobFile, job);
+
+  const result = run(options(fixture.source, fixture.dataDir));
+  assert.equal(result.mode, 'preview');
+  assert.equal(result.revisions, 5);
+  assert.equal(fs.existsSync(fixture.dataDir), false);
+});
+
+test('dry-run rejects symlinked input directories and supported media entries', (t) => {
+  const linkedDirectory = makeFixture();
+  t.after(() => fs.rmSync(linkedDirectory.root, { recursive: true, force: true }));
+  const inputDir = path.join(linkedDirectory.source, 'jobs', 'job-v2', 'input');
+  const realInputDir = path.join(linkedDirectory.source, 'jobs', 'job-v2', 'input-real');
+  fs.renameSync(inputDir, realInputDir);
+  fs.symlinkSync(realInputDir, inputDir);
+  assert.throws(() => run(options(linkedDirectory.source, linkedDirectory.dataDir)),
+    /legacy input 目錄不是安全的實體目錄/);
+
+  const linkedMedia = makeFixture();
+  t.after(() => fs.rmSync(linkedMedia.root, { recursive: true, force: true }));
+  const media = path.join(linkedMedia.source, 'jobs', 'job-v2', 'input', 'shared.png');
+  const shared = path.join(linkedMedia.source, 'shared.png');
+  fs.renameSync(media, shared);
+  fs.symlinkSync(shared, media);
+  assert.throws(() => run(options(linkedMedia.source, linkedMedia.dataDir)),
+    /legacy input 素材不是安全的實體檔案/);
+});
+
 test('verify detects byte tampering and partial targets block apply', (t) => {
   const fixture = makeFixture();
   t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
