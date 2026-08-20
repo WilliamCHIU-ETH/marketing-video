@@ -111,11 +111,12 @@ function parseLegacyScript(file, fallbackTitle) {
   if (!file) return { title: fallbackTitle || '', body: '', voice: '' };
   const raw = fs.readFileSync(file, 'utf8');
   const sections = raw.split(/^===\s*$/m);
-  if (sections.length >= 4) {
+  if (sections.length >= 3) {
+    const header = sections.slice(0, -2).map((section) => section.trim()).filter(Boolean);
     return {
-      voice: sections[1].trim(),
-      title: sections[2].trim() || fallbackTitle || '',
-      body: sections.slice(3).join('\n===\n').trim(),
+      voice: header.join('\n'),
+      title: sections.at(-2).trim() || fallbackTitle || '',
+      body: sections.at(-1).trim(),
     };
   }
   return { title: fallbackTitle || '', body: raw.trim(), voice: '' };

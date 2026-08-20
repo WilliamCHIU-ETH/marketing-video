@@ -35,7 +35,10 @@ function fixtureJob(source, {
   fs.mkdirSync(inputDir, { recursive: true });
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(inputDir, 'shared.png'), image);
-  fs.writeFileSync(path.join(inputDir, 'script.txt'), `===\nvoice\n===\n${title}\n===\nbody ${id}\n`);
+  fs.writeFileSync(
+    path.join(inputDir, 'script.txt'),
+    `台積電→台基店\n===\n===\n${title}\n===\nbody ${id}\n`,
+  );
   const outputBytes = Buffer.from(output);
   fs.writeFileSync(path.join(outDir, 'final.mp4'), outputBytes);
   writeJson(path.join(jobDir, 'job.json'), {
@@ -137,6 +140,10 @@ test('apply is transactional, deduplicates Project Assets, emits minimal Runs, a
   assert.equal(project.latestRevision, 3);
   assert.equal(project.assets.length, 1);
   assert.deepEqual(project.revisions.map((revision) => revision.id), ['v001', 'v002', 'v003']);
+  const firstRevision = JSON.parse(fs.readFileSync(path.join(projectDir, 'revisions', 'v001.json'), 'utf8'));
+  assert.equal(firstRevision.script.voice, '台積電→台基店');
+  assert.equal(firstRevision.script.title, '共同專案');
+  assert.equal(firstRevision.script.body, 'body job-v1');
   for (const id of ['job-v1', 'job-v2', 'job-v3']) {
     const entries = fs.readdirSync(path.join(fixture.dataDir, 'jobs', id)).sort();
     assert.deepEqual(entries, ['job.json', 'log.txt']);
