@@ -186,6 +186,31 @@ test('dry-run rejects symlinked input directories and supported media entries', 
   fs.symlinkSync(shared, media);
   assert.throws(() => run(options(linkedMedia.source, linkedMedia.dataDir)),
     /legacy input 素材不是安全的實體檔案/);
+
+  const danglingDirectory = makeFixture();
+  t.after(() => fs.rmSync(danglingDirectory.root, { recursive: true, force: true }));
+  const danglingInput = path.join(danglingDirectory.source, 'jobs', 'job-v2', 'input');
+  fs.rmSync(danglingInput, { recursive: true });
+  fs.symlinkSync(path.join(danglingDirectory.source, 'missing-input'), danglingInput);
+  assert.throws(() => run(options(danglingDirectory.source, danglingDirectory.dataDir)),
+    /legacy input 目錄不是安全的實體目錄/);
+});
+
+test('dry-run rejects prefixed archive traversal even when an in-source decoy exists', (t) => {
+  const fixture = makeFixture();
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const jobDir = path.join(fixture.source, 'jobs', 'job-v2');
+  const decoy = path.join(fixture.source, 'archive', 'decoy.mp4');
+  fs.mkdirSync(path.dirname(decoy), { recursive: true });
+  fs.writeFileSync(decoy, 'video-job-v2');
+  fs.unlinkSync(path.join(jobDir, 'out', 'final.mp4'));
+  const jobFile = path.join(jobDir, 'job.json');
+  const job = JSON.parse(fs.readFileSync(jobFile, 'utf8'));
+  job.outputs[0].archive = 'runtime-data/../archive/decoy.mp4';
+  writeJson(jobFile, job);
+
+  assert.throws(() => run(options(fixture.source, fixture.dataDir)), /archive 相對路徑不安全/);
+  assert.equal(fs.existsSync(fixture.dataDir), false);
 });
 
 test('verify detects byte tampering and partial targets block apply', (t) => {

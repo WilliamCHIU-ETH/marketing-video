@@ -135,8 +135,8 @@ function classifyAsset(name) {
 function collectAssetSources(sourceRoot, jobDir) {
   const assets = [];
   const inputDir = path.join(jobDir, 'input');
-  if (fs.existsSync(inputDir)) {
-    const inputStat = fs.lstatSync(inputDir);
+  const inputStat = fs.lstatSync(inputDir, { throwIfNoEntry: false });
+  if (inputStat) {
     invariant(inputStat.isDirectory() && !inputStat.isSymbolicLink(),
       `legacy input 目錄不是安全的實體目錄：${inputDir}`);
     for (const entry of fs.readdirSync(inputDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -240,11 +240,14 @@ function locateOutput(sourceRoot, record, output) {
     if (path.isAbsolute(output.archive)) {
       candidates.push(output.archive);
     } else {
-      const normalized = path.normalize(output.archive);
-      candidates.push(path.resolve(sourceRoot, normalized));
-      const parts = normalized.split(path.sep).filter(Boolean);
-      if (parts.length > 1 && ['runtime-data', path.basename(sourceRoot)].includes(parts[0]))
-        candidates.unshift(path.join(sourceRoot, ...parts.slice(1)));
+      const parts = output.archive.split(/[\\/]+/).filter(Boolean);
+      invariant(parts.length > 0 && !parts.includes('.') && !parts.includes('..'),
+        `job ${record.job.id} 的 archive 相對路徑不安全`);
+      const encodedFromRepoRoot = ['runtime-data', path.basename(sourceRoot)].includes(parts[0]);
+      const sourceRelativeParts = encodedFromRepoRoot ? parts.slice(1) : parts;
+      invariant(sourceRelativeParts.length > 0,
+        `job ${record.job.id} 的 archive 相對路徑缺少檔名`);
+      candidates.push(path.join(sourceRoot, ...sourceRelativeParts));
     }
   }
   candidates.push(path.join(record.sourceDir, 'out', name));
