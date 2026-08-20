@@ -965,9 +965,13 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
     return file.startsWith(projectDir(projectId) + path.sep) ? file : null;
   }
 
+  function outputDir(projectId) {
+    return path.join(projectDir(projectId), 'outputs');
+  }
+
   function outputPath(projectId, revisionId, name) {
     const safeName = path.basename(name).replace(/[^\p{L}\p{N}._-]+/gu, '-');
-    const dir = path.join(projectDir(projectId), 'outputs');
+    const dir = outputDir(projectId);
     ensureDir(dir);
     let target = path.join(dir, `${safeId(revisionId, 'Revision ID')}-${safeName}`);
     let n = 2;
@@ -996,6 +1000,8 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
     ingestAsset,
     materializeAsset,
     assetPath,
+    projectDir,
+    outputDir,
     outputPath,
     detail,
   };

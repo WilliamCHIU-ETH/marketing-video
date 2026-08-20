@@ -458,6 +458,14 @@ async function main() {
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
+  const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  const renderDoneBlock = serverSource.match(
+    /job\.status = 'done';[\s\S]{0,600}saveJob\(job\);/);
+  assert.ok(renderDoneBlock, 'render 完成狀態必須先保存，再交給 cleanup');
+  assert.doesNotMatch(renderDoneBlock[0],
+    /rmrf\(path\.join\(jobDir\(job\.id\), 'state'\)\);/);
+  assert.match(serverSource,
+    /\.finally\(\(\) => \{[\s\S]{0,200}pruneOldJobsNonFatal\('工作結束'\);/);
 
   const health = await request(base, '/api/health');
   assert.equal(health.ok, true);
@@ -969,8 +977,293 @@ async function main() {
   assert.deepEqual(timestampState(await request(base,
     `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`)), stableTimestamps);
 
-  // 超過 retention 的 Run 仍可能握有唯一完成品：即使 manifest 有 archive 路徑，
-  // archive 檔不存在就不能刪除 fallback out/；input／thumbs 仍可正常清理。
+  // 成功的 Project Run 不需要等 retention：正式 output 已在 Project 後，Run 只保留
+  // job.json／log.txt。清掉 input/state/thumbs/out 後，Revision、播放與下一版重用仍要成立。
+  const compactable = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-run-compaction',
+      title: 'Run payload 立即清理測試',
+      body: '正式資料進入 Project 後，Run 素材可以直接清掉。',
+      skipGenerate: false,
+    }),
+  });
+  const compactUpload = await request(base,
+    `/api/jobs/${compactable.job.id}/upload?name=shot1.png&originalName=shared.png`, {
+      method: 'POST', body: PNG_FIXTURE,
+    });
+  await request(base, `/api/jobs/${compactable.job.id}/submit`, { method: 'POST' });
+
+  const createQueuedCompactionFixture = async (title) => {
+    const createdRun = await request(base, '/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template: 'focusstock',
+        owner: 'smoke-run-compaction',
+        title,
+        body: `${title} 不得造成錯誤的立即清理。`,
+        skipGenerate: false,
+      }),
+    });
+    await request(base, `/api/jobs/${createdRun.job.id}/submit`, { method: 'POST' });
+    return createdRun;
+  };
+  const missingSizeRun = await createQueuedCompactionFixture('缺少 output size');
+  const wrongProjectRun = await createQueuedCompactionFixture('錯誤 Project output');
+  const wrongRunRevision = await createQueuedCompactionFixture('Revision 屬於錯誤 Run');
+  const missingProjectIdentityRun = await createQueuedCompactionFixture('遺失 Project identity');
+  const symlinkOutputRun = await createQueuedCompactionFixture('Project outputs 是 symlink');
+  const extraFallbackRun = await createQueuedCompactionFixture('未列入 manifest 的 fallback');
+  const hashMismatchRun = await createQueuedCompactionFixture('同 size 不同內容 fallback');
+  const protectedDraft = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-run-compaction',
+      title: 'Active Run fail closed',
+      body: 'draft／queued 的 payload 不得由 prune 清掉。',
+    }),
+  });
+  const compactionFixtures = [
+    compactable,
+    missingSizeRun,
+    wrongProjectRun,
+    wrongRunRevision,
+    missingProjectIdentityRun,
+    symlinkOutputRun,
+    extraFallbackRun,
+    hashMismatchRun,
+    protectedDraft,
+  ];
+  for (const run of compactionFixtures) {
+    const stateDir = path.join(DATA_DIR, 'jobs', run.job.id, 'state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'active.json'), '{}');
+  }
+  await request(base, '/api/prune', { method: 'POST' });
+  for (const run of compactionFixtures) {
+    assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', run.job.id, 'input')), true);
+    assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', run.job.id, 'state')), true);
+  }
+  await stopTestServer(child);
+
+  const compactJobDir = path.join(DATA_DIR, 'jobs', compactable.job.id);
+  const compactJobFile = path.join(compactJobDir, 'job.json');
+  const compactStore = createProjectStore({
+    dataDir: DATA_DIR,
+    nowISO: () => new Date().toISOString(),
+    idFactory: () => 'unused-in-compaction-test',
+  });
+  const compactOutput = compactStore.outputPath(
+    compactable.job.projectId, compactable.job.revisionId, 'final.mp4');
+  fs.writeFileSync(compactOutput, MP4_FIXTURE);
+  const compactOutputRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, compactOutput),
+  };
+  const markDoneProjectRun = (run, outputRecord) => {
+    const runDir = path.join(DATA_DIR, 'jobs', run.job.id);
+    const runFile = path.join(runDir, 'job.json');
+    const runJson = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    runJson.status = 'done';
+    runJson.finishedAt = new Date().toISOString();
+    runJson.outputs = [outputRecord];
+    runJson.archived = [outputRecord.archive];
+    fs.writeFileSync(runFile, JSON.stringify(runJson, null, 2));
+    compactStore.updateRevision(run.job.projectId, run.job.revisionId, {
+      status: 'done',
+      outputs: [outputRecord],
+      archived: [outputRecord.archive],
+      finishedAt: runJson.finishedAt,
+    });
+    for (const sub of ['state', 'thumbs', 'out'])
+      fs.mkdirSync(path.join(runDir, sub), { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'state', 'derived.json'), '{}');
+    fs.writeFileSync(path.join(runDir, 'thumbs', 'derived.png'), PNG_FIXTURE);
+    fs.writeFileSync(path.join(runDir, 'out', outputRecord.name), MP4_FIXTURE);
+    return runDir;
+  };
+  markDoneProjectRun(compactable, compactOutputRecord);
+  fs.writeFileSync(path.join(compactJobDir, 'log.txt'), 'minimal run trace\n');
+
+  const missingSizeOutput = compactStore.outputPath(
+    missingSizeRun.job.projectId, missingSizeRun.job.revisionId, 'final.mp4');
+  fs.writeFileSync(missingSizeOutput, MP4_FIXTURE);
+  const missingSizeRecord = {
+    name: 'final.mp4',
+    archive: path.relative(ROOT, missingSizeOutput),
+  };
+  const missingSizeDir = markDoneProjectRun(missingSizeRun, missingSizeRecord);
+
+  const wrongProjectRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, compactOutput),
+  };
+  const wrongProjectDir = markDoneProjectRun(wrongProjectRun, wrongProjectRecord);
+
+  const wrongRunOutput = compactStore.outputPath(
+    wrongRunRevision.job.projectId, wrongRunRevision.job.revisionId, 'final.mp4');
+  fs.writeFileSync(wrongRunOutput, MP4_FIXTURE);
+  const wrongRunRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, wrongRunOutput),
+  };
+  const wrongRunDir = markDoneProjectRun(wrongRunRevision, wrongRunRecord);
+  compactStore.updateRevision(wrongRunRevision.job.projectId, wrongRunRevision.job.revisionId, {
+    jobId: compactable.job.id,
+    runId: compactable.job.id,
+  });
+
+  const missingIdentityOutput = compactStore.outputPath(
+    missingProjectIdentityRun.job.projectId, missingProjectIdentityRun.job.revisionId, 'final.mp4');
+  fs.writeFileSync(missingIdentityOutput, MP4_FIXTURE);
+  const missingIdentityRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, missingIdentityOutput),
+  };
+  const missingIdentityDir = markDoneProjectRun(missingProjectIdentityRun, missingIdentityRecord);
+  const missingIdentityJobFile = path.join(missingIdentityDir, 'job.json');
+  const missingIdentityJob = JSON.parse(fs.readFileSync(missingIdentityJobFile, 'utf8'));
+  delete missingIdentityJob.projectId;
+  delete missingIdentityJob.revisionId;
+  fs.writeFileSync(missingIdentityJobFile, JSON.stringify(missingIdentityJob, null, 2));
+
+  const symlinkProjectDir = compactStore.projectDir(symlinkOutputRun.job.projectId);
+  const symlinkOutputDir = compactStore.outputDir(symlinkOutputRun.job.projectId);
+  const outsideProjectOutputDir = path.join(DATA_DIR, 'outside-project-output');
+  fs.mkdirSync(outsideProjectOutputDir, { recursive: true });
+  fs.rmSync(symlinkOutputDir, { recursive: true });
+  fs.symlinkSync(outsideProjectOutputDir, symlinkOutputDir, 'dir');
+  const symlinkOutput = path.join(symlinkOutputDir, 'final.mp4');
+  fs.writeFileSync(symlinkOutput, MP4_FIXTURE);
+  const symlinkOutputRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, symlinkOutput),
+  };
+  const symlinkOutputRunDir = markDoneProjectRun(symlinkOutputRun, symlinkOutputRecord);
+  assert.equal(fs.lstatSync(path.join(symlinkProjectDir, 'outputs')).isSymbolicLink(), true);
+
+  const extraFallbackOutput = compactStore.outputPath(
+    extraFallbackRun.job.projectId, extraFallbackRun.job.revisionId, 'final.mp4');
+  fs.writeFileSync(extraFallbackOutput, MP4_FIXTURE);
+  const extraFallbackRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, extraFallbackOutput),
+  };
+  const extraFallbackDir = markDoneProjectRun(extraFallbackRun, extraFallbackRecord);
+  fs.writeFileSync(path.join(extraFallbackDir, 'out', 'unlisted.mp4'), MP4_FIXTURE);
+
+  const hashMismatchOutput = compactStore.outputPath(
+    hashMismatchRun.job.projectId, hashMismatchRun.job.revisionId, 'final.mp4');
+  fs.writeFileSync(hashMismatchOutput, MP4_FIXTURE);
+  const hashMismatchRecord = {
+    name: 'final.mp4',
+    size: MP4_FIXTURE.length,
+    archive: path.relative(ROOT, hashMismatchOutput),
+  };
+  const hashMismatchDir = markDoneProjectRun(hashMismatchRun, hashMismatchRecord);
+  const sameSizeDifferentOutput = Buffer.from(MP4_FIXTURE);
+  sameSizeDifferentOutput[sameSizeDifferentOutput.length - 1] ^= 0xff;
+  fs.writeFileSync(path.join(hashMismatchDir, 'out', 'final.mp4'), sameSizeDifferentOutput);
+  assert.equal(sameSizeDifferentOutput.length, MP4_FIXTURE.length);
+
+  const outsideRunDir = path.join(DATA_DIR, 'outside-run');
+  fs.mkdirSync(outsideRunDir, { recursive: true });
+  const outsideMarker = path.join(outsideRunDir, 'must-survive.txt');
+  fs.writeFileSync(outsideMarker, 'keep');
+  const mismatchedManifestDir = path.join(DATA_DIR, 'jobs', 'mismatched-manifest');
+  fs.mkdirSync(mismatchedManifestDir, { recursive: true });
+  fs.writeFileSync(path.join(mismatchedManifestDir, 'job.json'), JSON.stringify({
+    id: '../outside-run', status: 'done', outputs: [compactOutputRecord],
+  }));
+  fs.symlinkSync(outsideRunDir, path.join(DATA_DIR, 'jobs', 'symlink-run'), 'dir');
+  const malformedOutputDir = path.join(DATA_DIR, 'jobs', 'malformed-output');
+  fs.mkdirSync(path.join(malformedOutputDir, 'input'), { recursive: true });
+  fs.writeFileSync(path.join(malformedOutputDir, 'input', 'must-survive.txt'), 'keep');
+  fs.writeFileSync(path.join(malformedOutputDir, 'job.json'), JSON.stringify({
+    id: 'malformed-output',
+    createdAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    status: 'done',
+    outputs: [{ archive: 123, name: ['not-a-name'] }],
+  }));
+
+  child = startTestServer({ AUTO_PRUNE_ON_START: '1' });
+  const compactRestartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${compactRestartReady.port}`;
+  for (const sub of ['input', 'state', 'thumbs', 'out'])
+    assert.equal(fs.existsSync(path.join(compactJobDir, sub)), false, `${sub} 應立即清理`);
+  assert.equal(fs.existsSync(compactJobFile), true);
+  assert.equal(fs.readFileSync(path.join(compactJobDir, 'log.txt'), 'utf8'), 'minimal run trace\n');
+  assert.deepEqual(fs.readFileSync(compactOutput), MP4_FIXTURE);
+  const compactProject = await request(base,
+    `/api/projects/${compactable.job.projectId}?revision=${compactable.job.revisionId}`);
+  assert.equal(compactProject.revision.status, 'done');
+  assert.deepEqual(compactProject.revision.assetRefs, [compactUpload.asset.id]);
+  assert.deepEqual(compactProject.revision.outputs, [compactOutputRecord]);
+  const compactPlayback = await fetch(base + `/api/jobs/${compactable.job.id}/file/final.mp4`);
+  assert.equal(compactPlayback.status, 200);
+  assert.deepEqual(Buffer.from(await compactPlayback.arrayBuffer()), MP4_FIXTURE);
+  const strictGateDirs = [
+    missingSizeDir,
+    wrongProjectDir,
+    wrongRunDir,
+    missingIdentityDir,
+    symlinkOutputRunDir,
+  ];
+  for (const runDir of strictGateDirs) {
+    for (const sub of ['input', 'state', 'thumbs', 'out'])
+      assert.equal(fs.existsSync(path.join(runDir, sub)), true, `${sub} 必須 fail closed`);
+  }
+  assert.equal(fs.existsSync(path.join(extraFallbackDir, 'input')), false);
+  assert.equal(fs.existsSync(path.join(extraFallbackDir, 'state')), false);
+  assert.equal(fs.existsSync(path.join(extraFallbackDir, 'thumbs')), false);
+  assert.equal(fs.existsSync(path.join(extraFallbackDir, 'out', 'final.mp4')), true);
+  assert.equal(fs.existsSync(path.join(extraFallbackDir, 'out', 'unlisted.mp4')), true);
+  for (const sub of ['input', 'state', 'thumbs'])
+    assert.equal(fs.existsSync(path.join(hashMismatchDir, sub)), false);
+  assert.equal(fs.existsSync(path.join(hashMismatchDir, 'out', 'final.mp4')), true);
+  assert.deepEqual(fs.readFileSync(path.join(hashMismatchDir, 'out', 'final.mp4')),
+    sameSizeDifferentOutput);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', protectedDraft.job.id, 'input')), true);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', protectedDraft.job.id, 'state')), true);
+  assert.equal(fs.readFileSync(outsideMarker, 'utf8'), 'keep');
+  assert.equal(fs.readFileSync(path.join(malformedOutputDir, 'input', 'must-survive.txt'), 'utf8'), 'keep');
+  const jobsAfterUnsafeManifests = await request(base, '/api/jobs');
+  assert.equal(jobsAfterUnsafeManifests.jobs.some((job) => job.id === '../outside-run'), false);
+
+  const afterCompaction = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: compactable.job.projectId,
+      reuseAssetIds: [compactUpload.asset.id],
+      template: 'focusstock',
+      owner: 'smoke-run-compaction',
+      title: '清理後的 V2',
+      body: '沿用 Project 素材建立下一版。',
+    }),
+  });
+  assert.equal(afterCompaction.job.revisionNumber, 2);
+  assert.deepEqual(afterCompaction.job.assetRefs, [compactUpload.asset.id]);
+  assert.equal(fs.existsSync(path.join(DATA_DIR, 'jobs', afterCompaction.job.id,
+    'input', 'shot1.png')), true);
+  const projectAfterCompaction = await request(base, `/api/projects/${compactable.job.projectId}`);
+  assert.equal(projectAfterCompaction.project.assets.filter((asset) => asset.kind === 'image').length, 1);
+  await request(base, `/api/jobs/${afterCompaction.job.id}/abort`, { method: 'POST' });
+
+  // 成功 Project Run 若 archive 缺檔，就可能握有唯一完成品；即使已超過 retention，
+  // 整份 payload 都必須 fail closed，不能只留下看似最重要的 fallback out/。
   const fallbackRetention = await request(base, '/api/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -996,10 +1289,12 @@ async function main() {
     archive: path.relative(ROOT, missingArchive),
   }];
   fs.writeFileSync(fallbackJobFile, JSON.stringify(fallbackJobJson, null, 2));
-  for (const sub of ['out', 'input', 'thumbs']) fs.mkdirSync(path.join(fallbackJobDir, sub), { recursive: true });
+  for (const sub of ['out', 'input', 'state', 'thumbs'])
+    fs.mkdirSync(path.join(fallbackJobDir, sub), { recursive: true });
   const fallbackOutput = path.join(fallbackJobDir, 'out', 'fallback.mp4');
   fs.writeFileSync(fallbackOutput, MP4_FIXTURE);
   fs.writeFileSync(path.join(fallbackJobDir, 'input', 'expired.txt'), 'expired');
+  fs.writeFileSync(path.join(fallbackJobDir, 'state', 'recovery.json'), '{}');
   fs.writeFileSync(path.join(fallbackJobDir, 'thumbs', 'expired.png'), PNG_FIXTURE);
 
   child = startTestServer({ KEEP_RECENT: '0', KEEP_DAYS: '0' });
@@ -1008,8 +1303,16 @@ async function main() {
   await request(base, '/api/prune', { method: 'POST' });
   assert.equal(fs.existsSync(fallbackOutput), true);
   assert.deepEqual(fs.readFileSync(fallbackOutput), MP4_FIXTURE);
-  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'input')), false);
-  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'thumbs')), false);
+  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'input')), true);
+  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'state')), true);
+  assert.equal(fs.existsSync(path.join(fallbackJobDir, 'thumbs')), true);
+  assert.equal(fs.existsSync(path.join(hashMismatchDir, 'out', 'final.mp4')), true);
+  for (const runDir of strictGateDirs) {
+    for (const sub of ['input', 'state', 'thumbs', 'out'])
+      assert.equal(fs.existsSync(path.join(runDir, sub)), true,
+        `${path.basename(runDir)} 不得由 retention 繞過 Project gate`);
+  }
+  assert.equal(fs.readFileSync(path.join(malformedOutputDir, 'input', 'must-survive.txt'), 'utf8'), 'keep');
 
   fs.writeFileSync(path.join(DATA_DIR, '.run.lock'), String(Date.now()));
   const unsafeUnlock = await fetch(base + '/api/unlock', { method: 'POST' });
@@ -1038,7 +1341,8 @@ async function main() {
   console.log('✅ submit 後不可重複排隊或覆寫 input');
   console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
   console.log('✅ detached 不可取消；spawn intent 不誤收，owner token 相符才保存 Avatar 並放行');
-  console.log('✅ retention 只清 Run 暫存；archive 缺失時保留唯一 fallback 完成品');
+  console.log('✅ 成功 Project Run 立即清 payload；Project 素材、Revision、成品與下一版仍可用');
+  console.log('✅ Project durable gate 不可由 retention 繞過；archive 缺失時保留完整 payload');
   console.log('✅ 未知／活躍 lock 不可由 API 強制刪除');
   console.log('✅ LAN bind 未明確 opt-in 時拒絕啟動');
   console.log('✅ TEST_MODE 拒絕 repo 內路徑與 symlink 回指');
