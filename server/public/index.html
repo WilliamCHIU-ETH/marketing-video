@@ -113,6 +113,17 @@
   .asset-summary-file{display:flex;align-items:baseline;gap:8px;min-width:0}
   .asset-summary-file b{font-size:13.5px;overflow-wrap:anywhere}
   .asset-summary-file span,.asset-summary-empty{font-size:12px;color:var(--dim);white-space:nowrap}
+  .asset-summary-file .asset-state{white-space:normal}
+  .asset-state.selected{color:var(--accent);font-weight:600}
+  .project-asset-library{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+  .project-asset-library h3{font-size:14px;margin:0 0 4px}
+  .project-asset-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:10px}
+  .project-asset-option{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px;align-items:center;
+    border:1px solid var(--line);border-radius:9px;padding:9px;background:#fff}
+  .project-asset-option img,.project-asset-option video{width:72px;height:54px;object-fit:cover;border-radius:6px;margin:0}
+  .project-asset-option b{display:block;font-size:12.5px;overflow-wrap:anywhere}
+  .project-asset-option span{display:block;color:var(--dim);font-size:11.5px;margin:2px 0 6px}
+  .project-asset-option button{padding:5px 9px;font-size:12px}
   details.adv{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
   details.adv summary{cursor:pointer;font-size:13px;color:var(--dim);list-style:none}
   details.adv summary::-webkit-details-marker{display:none}
@@ -291,6 +302,7 @@
       <h2>4・圖片與 B-Roll 影片素材</h2>
       <div class="hint" id="assetHint" style="margin-bottom:12px"></div>
       <div class="slots" id="slots"></div>
+      <div class="project-asset-library" id="projectAssetLibrary" hidden></div>
       <input type="file" id="picker" accept=".png,.jpg,.jpeg,.mp4,.mov,.m4v,.webm,image/png,image/jpeg,video/mp4,video/quicktime,video/webm" hidden>
     </div>
 
@@ -616,6 +628,42 @@ function drawSlots() {
   $('#assetHint').textContent = activeProject
     ? `已帶入 ${reusedAssets.length} 個專案素材；可以移除不需要的素材，或繼續新增圖片與 B-Roll。`
     : '圖片與 B-Roll 會保存為專案素材，下一個版本可以直接沿用。';
+  drawProjectAssetLibrary();
+}
+
+function drawProjectAssetLibrary() {
+  const wrap = $('#projectAssetLibrary');
+  if (!activeProject) {
+    wrap.hidden = true;
+    wrap.replaceChildren();
+    return;
+  }
+  const selected = new Set(reusedAssets.map((asset) => String(asset.id)));
+  const available = (activeProject.assets || []).filter((asset) =>
+    ['image', 'video'].includes(asset.kind) && !selected.has(String(asset.id)));
+  wrap.hidden = false;
+  const intro = [
+    el('h3', {}, 'Project 其他可用素材'),
+    el('div', { class: 'hint' }, '這些素材已在 Project 中，但目前尚未選入這一版。加入後送出，才會成為新 Revision 的選取素材。'),
+  ];
+  if (!available.length) {
+    wrap.replaceChildren(...intro,
+      el('div', { class: 'hint', style: 'margin-top:8px' }, '目前沒有其他可沿用的圖片或 B-Roll。'));
+    return;
+  }
+  const options = el('div', { class: 'project-asset-options' }, ...available.map((asset) => {
+    const kind = asset.kind === 'video' ? 'video' : 'image';
+    return el('div', { class: 'project-asset-option' },
+      mediaPreview(kind, `/api/projects/${activeProject.id}/assets/${asset.id}`, asset),
+      el('div', {},
+        el('b', {}, asset.originalName || '未命名素材'),
+        el('span', {}, `${kind === 'video' ? 'B-Roll 影片' : '圖片'}・${fileSize(asset.size)}`),
+        el('button', { type: 'button', class: 'ghost', onclick: () => {
+          reusedAssets.push(asset);
+          drawSlots();
+        } }, '加入本版')));
+  }));
+  wrap.replaceChildren(...intro, options);
 }
 
 // ── 講者 Avatar ──
@@ -865,10 +913,10 @@ async function loadJobs() {
 // ── 詳情 ──
 let edits = {};
 let jobSig = null;   // 上次畫出來的內容特徵
-function revisionAssetCard(projectDetail, job) {
+function projectAssetCard(projectDetail, job) {
   const refs = new Set(((projectDetail.revision && projectDetail.revision.assetRefs)
     || job.assetRefs || []).map(String));
-  const assets = (projectDetail.project.assets || []).filter((asset) => refs.has(String(asset.id)));
+  const assets = projectDetail.project.assets || [];
   const groups = [
     { kind: 'speaker-video', label: '講者 Avatar' },
     { kind: 'image', label: '圖片' },
@@ -879,12 +927,16 @@ function revisionAssetCard(projectDetail, job) {
     const files = assets.filter((asset) => asset.kind === group.kind);
     const fileBox = el('div', { class: 'asset-summary-files' });
     if (!files.length) {
-      fileBox.append(el('span', { class: 'asset-summary-empty' }, '這一版尚無檔案'));
+      fileBox.append(el('span', { class: 'asset-summary-empty' }, 'Project 尚無這類素材'));
     } else {
       for (const asset of files) {
+        const selected = refs.has(String(asset.id));
         fileBox.append(el('div', { class: 'asset-summary-file' },
           el('b', {}, asset.originalName || '未命名檔案'),
           el('span', {}, fileSize(asset.size)),
+          el('span', { class: `asset-state${selected ? ' selected' : ''}` }, selected
+            ? '本版已選取・是否進入成片仍待確認'
+            : 'Project 可用・本版未選'),
           el('a', { href: `/api/projects/${projectDetail.project.id}/assets/${asset.id}?dl=1`,
             download: '' }, '下載')));
       }
@@ -894,9 +946,9 @@ function revisionAssetCard(projectDetail, job) {
   }
   const version = (projectDetail.revision && projectDetail.revision.number) || job.revisionNumber;
   return el('div', { class: 'card' },
-    el('h2', {}, '本版素材'),
+    el('h2', {}, 'Project 素材與本版選取'),
     el('div', { class: 'hint', style: 'margin-top:-10px;margin-bottom:14px' },
-      `只列出 V${version || '—'} 實際使用的檔案；其他版本的素材不會混在這裡。`),
+      `「本版已選取」只代表 V${version || '—'} 引用了素材，不等於已剪進成片；有安排位置的證據時會在下方「配圖計畫」顯示。`),
     summary);
 }
 
@@ -918,8 +970,11 @@ async function loadJob() {
   // 內容沒變就什麼都不做；工作跑完後特徵不再變動，畫面自然就穩住。
   const revisionRefs = (projectDetail && projectDetail.revision && projectDetail.revision.assetRefs)
     || job.assetRefs || [];
+  const projectAssetSig = projectDetail && projectDetail.project
+    ? (projectDetail.project.assets || []).map((asset) =>
+      [asset.id, asset.kind, asset.originalName, asset.size].join(':')).join('|') : '';
   const sig = [job.id, job.status, (job.outputs || []).length, text.length, job.error || '',
-    revisionRefs.join(',')].join('|');
+    revisionRefs.join(','), projectAssetSig].join('|');
   if (sig === jobSig && box.childElementCount) return;
   jobSig = sig;
   const keep = box.querySelector('pre.log');
@@ -957,13 +1012,13 @@ async function loadJob() {
             openJob = revision.jobId; jobSig = null; loadJob();
           },
         }, `V${revision.number}・${STATUS_TEXT[revision.status] || revision.status}`)))));
-    parts.push(revisionAssetCard(projectDetail, job));
+    parts.push(projectAssetCard(projectDetail, job));
   }
 
   if (job.status === 'detached' || job.status === 'detached-done') {
     const detachedMessage = job.status === 'detached'
-      ? '伺服器重啟後，背景流程仍可能執行。先不要重送或啟動下一支，避免重複呼叫付費服務或覆寫共用 out/；完成後再確認本版素材與成品。'
-      : '背景流程已結束。可驗證的 Avatar 會保存到原影片專案；但重啟後完成的 render 目前不會自動收割回專案。請先確認「本版素材」與共用 out/，再決定是否建立下一版。';
+      ? '伺服器重啟後，背景流程仍可能執行。先不要重送或啟動下一支，避免重複呼叫付費服務或覆寫共用 out/；完成後再確認本版選取素材與成品。'
+      : '背景流程已結束。可驗證的 Avatar 會保存到原影片專案；但重啟後完成的 render 目前不會自動收割回專案。請先確認「Project 素材與本版選取」及共用 out/，再決定是否建立下一版。';
     parts.push(el('div', { class: 'card' },
       el('h2', {}, job.status === 'detached' ? '這支正在背景跑' : '這支已經在背景跑完'),
       el('div', { class: 'note' }, detachedMessage)));

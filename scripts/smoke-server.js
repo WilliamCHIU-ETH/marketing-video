@@ -483,7 +483,10 @@ async function main() {
   assert.match(html, /出片前台/);
   assert.match(html, /3・講者 Avatar/);
   assert.match(html, /4・圖片與 B-Roll 影片素材/);
-  assert.match(html, /本版素材/);
+  assert.match(html, /Project 素材與本版選取/);
+  assert.match(html, /本版已選取/);
+  assert.match(html, /不等於已剪進成片/);
+  assert.match(html, /Project 其他可用素材/);
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
