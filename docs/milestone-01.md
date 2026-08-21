@@ -26,6 +26,8 @@
 - [x] 原專案 cleanup plan 完成且零寫入；因資料異常 fail-closed（exit 2）。
 - [x] 從本地 baseline commit `0c11b89` 的乾淨 checkout，以 Node `22.23.2` 重跑 `npm ci`、依賴樹、typecheck、doctor 與 smoke：通過。
 - [x] 乾淨 checkout 執行正常模式 `npm run dev:server`：首頁 HTTP 200、health `mode=normal`；驗收時以 `DISABLE_WORKER=1` 與 `/tmp` DATA_DIR 避免 provider／正式資料副作用。
+- [x] 空白 `DATA_DIR` 啟動後自動建立非 symlink 的 `projects/` 與 `jobs/`；兩個目錄不需用空檔案提交到 Git。
+- [x] canonical Git index／blob 與 worktree 雙邊 source-boundary scan 通過；runtime/media、machine path、credential 與未去識別 fixture 會 fail closed。
 
 ## Source snapshot
 

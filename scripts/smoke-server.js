@@ -472,11 +472,21 @@ async function main() {
   const mutableRepoPaths = ['public', 'src', 'out', 'backups', 'runtime-data'];
   const before = Object.fromEntries(mutableRepoPaths.map((rel) => [rel, treeState(path.join(ROOT, rel))]));
 
+  const bootstrapDirectories = ['jobs', 'projects'].map((name) => path.join(DATA_DIR, name));
+  for (const directory of bootstrapDirectories) {
+    assert.equal(fs.existsSync(directory), false, `blank DATA_DIR must not pre-create ${directory}`);
+  }
+
   child = startTestServer();
 
   const ready = await waitForReady(child);
   assert.equal(ready.mode, 'test');
   assert.equal(ready.workerEnabled, false);
+  for (const directory of bootstrapDirectories) {
+    const metadata = fs.lstatSync(directory);
+    assert.equal(metadata.isSymbolicLink(), false, `${directory} must not be a symbolic link`);
+    assert.equal(metadata.isDirectory(), true, `${directory} must be a directory`);
+  }
   let base = `http://127.0.0.1:${ready.port}`;
 
   const html = await request(base, '/');

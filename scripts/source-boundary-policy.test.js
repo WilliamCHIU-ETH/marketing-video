@@ -108,6 +108,215 @@ test('canonical clean source allows capped docs images and sanitized text fixtur
   assert.equal(result.trackedCount, 5);
 });
 
+test('sanitized fixtures reject real credentials, identities and non-example endpoints', (t) => {
+  const credentialFieldName = ['api', 'Key'].join('');
+  const secondaryCredentialField = ['client', 'Secret'].join('');
+  const escapedCredentialField = ['api', '\\u004b', 'ey'].join('');
+  const unsafeFixtureValue = ['live', 'secret', 'value'].join('-');
+  const personaField = ['persona', ' name'].join('');
+  const deceptiveFixtureValue = ['test', 'live', 'actual', 'provider', 'secret'].join('-');
+  const root = makeRepository(t, {
+    'fixtures/sanitized/safe.json': JSON.stringify({
+      [credentialFieldName]: 'test-api-key',
+      email: 'fixture@example.com',
+      endpoint: 'https://api.example.com/catalog',
+      projectId: 'test-project-1',
+    }),
+    'fixtures/sanitized/credentials.json': JSON.stringify({
+      [credentialFieldName]: unsafeFixtureValue,
+      [secondaryCredentialField]: ['live', 'client', 'secret'].join('-'),
+    }),
+    'fixtures/sanitized/escaped.json': `{"${escapedCredentialField}":"${unsafeFixtureValue}"}`,
+    'fixtures/sanitized/nested.json': JSON.stringify({
+      meta: {
+        [credentialFieldName]: unsafeFixtureValue,
+        endpoint: 'builder.company.internal',
+        persona: 'Alice Chen',
+      },
+    }),
+    'fixtures/sanitized/spaced-fields.json': JSON.stringify({
+      'api key': unsafeFixtureValue,
+      [personaField]: 'Alice Chen',
+    }),
+    'fixtures/sanitized/deceptive.json': JSON.stringify({
+      [credentialFieldName]: deceptiveFixtureValue,
+      persona: 'fixture Alice Chen',
+    }),
+    'fixtures/sanitized/duplicate.json': '{"meta":{"persona":"Alice Chen","persona":"fixture-persona","endpoint":"builder.company.internal","endpoint":"example.com"}}',
+    'fixtures/sanitized/encoded-endpoint.json': '{"endpoint":"https:\\u002f\\u002fbuilder.company.internal","email":"person\\u0040company.internal"}',
+    'fixtures/sanitized/host.json': '{"host":"10.0.0.1"}',
+    'fixtures/sanitized/identity.json': JSON.stringify({
+      persona: 'Alice Chen',
+      projectId: 'project-123',
+      email: 'person@company.internal',
+      endpoint: 'https://builder.company.internal/catalog',
+    }),
+    'fixtures/sanitized/runtime.json': JSON.stringify({
+      projectId: 'project-123456',
+      userId: 'user-98765',
+    }),
+    'fixtures/sanitized/columns.csv': 'name,status\nfixture,ok\n',
+    'fixtures/sanitized/notes.md': '# fixture\n',
+    'fixtures/sanitized/config.yaml': 'project: fixture-project\n',
+    'fixtures/sanitized/invalid.json': '{"project":',
+  });
+  const result = scanRepository({ root });
+
+  assert.deepEqual(rulesFor(result, 'fixtures/sanitized/safe.json'), []);
+  assertFinding(result, 'fixtures/sanitized/credentials.json', 'sanitized-credential-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/escaped.json', 'sanitized-credential-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/nested.json', 'sanitized-credential-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/nested.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/nested.json', 'sanitized-non-example-url', 'index');
+  assertFinding(result, 'fixtures/sanitized/spaced-fields.json', 'sanitized-credential-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/spaced-fields.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/deceptive.json', 'sanitized-credential-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/deceptive.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/duplicate.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/duplicate.json', 'sanitized-non-example-url', 'index');
+  assertFinding(result, 'fixtures/sanitized/encoded-endpoint.json', 'sanitized-non-example-url', 'index');
+  assertFinding(result, 'fixtures/sanitized/encoded-endpoint.json', 'sanitized-personal-email', 'index');
+  assertFinding(result, 'fixtures/sanitized/host.json', 'sanitized-non-example-url', 'index');
+  assertFinding(result, 'fixtures/sanitized/identity.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/identity.json', 'sanitized-personal-email', 'index');
+  assertFinding(result, 'fixtures/sanitized/identity.json', 'sanitized-non-example-url', 'index');
+  assertFinding(result, 'fixtures/sanitized/runtime.json', 'sanitized-identity-value', 'index');
+  assertFinding(result, 'fixtures/sanitized/columns.csv', 'sanitized-fixture-type');
+  assertFinding(result, 'fixtures/sanitized/columns.csv', 'tracked-sheet-artifact');
+  assertFinding(result, 'fixtures/sanitized/notes.md', 'sanitized-fixture-type');
+  assertFinding(result, 'fixtures/sanitized/config.yaml', 'sanitized-fixture-type');
+  assertFinding(result, 'fixtures/sanitized/invalid.json', 'sanitized-structure-invalid', 'index');
+});
+
+test('credential scan allows source references and explicit test sentinels but rejects literal secrets', (t) => {
+  const heygenKey = ['HEYGEN', 'API', 'KEY'].join('_');
+  const minimaxKey = ['MINIMAX', 'API', 'KEY'].join('_');
+  const minimaxGroup = ['MINIMAX', 'GROUP', 'ID'].join('_');
+  const openaiToken = ['OPENAI', 'ACCESS', 'TOKEN'].join('_');
+  const providerSecrets = ['provider', 'Secrets'].join('');
+  const unsafeFixtureValue = ['live', 'secret', 'value'].join('-');
+  const camelCredentialField = ['api', 'Key'].join('');
+  const deceptiveFixtureValue = ['test', 'live', 'actual', 'provider', 'secret'].join('-');
+  const npmConfigField = ['_auth', 'Token'].join('');
+  const root = makeRepository(t, {
+    'src/provider.js': [
+      `let ${heygenKey};`,
+      `${heygenKey} = ${providerSecrets}.${heygenKey};`,
+      `${minimaxGroup} = ${providerSecrets}.${minimaxGroup};`,
+      `const ${openaiToken} = process.env.${openaiToken};`,
+      `if (${heygenKey} === ${providerSecrets}.${heygenKey}) module.exports = true;`,
+      '',
+    ].join('\n'),
+    'src/provider.test.js': [
+      `const fixture = { ${heygenKey}: 'test-shell-heygen-key' };`,
+      `const fromFile = { ${minimaxKey}: 'test-file-minimax-key' };`,
+      `const blocked = { ${openaiToken}: 'test-must-not-be-read' };`,
+      '',
+    ].join('\n'),
+    'src/leaked.js': `const ${heygenKey} = '${unsafeFixtureValue}';\n`,
+    'src/leaked.test.js': `const ${minimaxKey} = '${unsafeFixtureValue}';\n`,
+    'src/mismatched.js': `${heygenKey} = ${providerSecrets}.${minimaxKey};\n`,
+    'src/group.js': `${minimaxGroup} = '${unsafeFixtureValue}';\n`,
+    'src/provider-fallback.js': `${heygenKey} = ${providerSecrets}.${heygenKey} || '${unsafeFixtureValue}';\n`,
+    'src/environment-fallback.js': `${openaiToken} = process.env.${openaiToken} || '${unsafeFixtureValue}';\n`,
+    'src/multiline-fallback.js': [
+      `${heygenKey} = ${providerSecrets}.${heygenKey}`,
+      `  || '${unsafeFixtureValue}';`,
+      '',
+    ].join('\n'),
+    'src/multiline-literal.js': [
+      `const ${heygenKey} =`,
+      `  '${unsafeFixtureValue}';`,
+      '',
+    ].join('\n'),
+    'src/multiline-gap.js': [
+      `const ${heygenKey} =`,
+      '',
+      `  '${unsafeFixtureValue}';`,
+      '',
+    ].join('\n'),
+    'src/multiline-operator.js': [
+      `const ${heygenKey}`,
+      `  = '${unsafeFixtureValue}';`,
+      '',
+    ].join('\n'),
+    'src/parenthesized-literal.js': [
+      `const ${heygenKey} = (`,
+      `  '${unsafeFixtureValue}'`,
+      ');',
+      '',
+    ].join('\n'),
+    'src/camel-literal.js': `const config = { ${camelCredentialField}: '${unsafeFixtureValue}' };\n`,
+    'src/camel-deceptive.js': `const config = { ${camelCredentialField}: '${deceptiveFixtureValue}' };\n`,
+    'src/camel-reference.js': `const config = { ${camelCredentialField}: ${providerSecrets}.${heygenKey} };\n`,
+    'src/logical-assignments.js': [
+      `config.${camelCredentialField} ||= '${unsafeFixtureValue}';`,
+      `config.${camelCredentialField} ??= '${unsafeFixtureValue}';`,
+      `config.${camelCredentialField} &&= '${unsafeFixtureValue}';`,
+      '',
+    ].join('\n'),
+    'src/destructuring-default.js': `const { ${camelCredentialField}: key = '${unsafeFixtureValue}' } = config;\n`,
+    'config/leaked.json': `{"${camelCredentialField}":\n  "${unsafeFixtureValue}"}\n`,
+    'config/invalid.json': `{"${camelCredentialField}":\n  "${unsafeFixtureValue}",\n}\n`,
+    'config/leaked.yaml': `${camelCredentialField}:\n  ${unsafeFixtureValue}\n`,
+    'server/public/leaked.html': `<script>\nconst ${camelCredentialField} =\n  '${unsafeFixtureValue}';\n</script>\n`,
+    '.env.example': `${heygenKey}=\n`,
+    '.npmrc': `${npmConfigField}=${deceptiveFixtureValue}\n`,
+  });
+  const result = scanRepository({ root });
+  const unsafeEnvironmentRoot = makeRepository(t, {
+    '.env.example': `${heygenKey}=${unsafeFixtureValue}\n`,
+  });
+  const unsafeEnvironmentResult = scanRepository({ root: unsafeEnvironmentRoot });
+
+  assert.deepEqual(rulesFor(result, 'src/provider.js'), []);
+  assert.deepEqual(rulesFor(result, 'src/provider.test.js'), []);
+  assert.deepEqual(rulesFor(result, 'src/camel-reference.js'), []);
+  assert.deepEqual(rulesFor(result, '.env.example'), []);
+  assertFinding(result, 'src/leaked.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/leaked.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/leaked.test.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/leaked.test.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/mismatched.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/mismatched.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/group.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/group.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/provider-fallback.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/provider-fallback.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/environment-fallback.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/environment-fallback.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/multiline-fallback.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/multiline-fallback.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/multiline-literal.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/multiline-literal.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/multiline-gap.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/multiline-gap.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/multiline-operator.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/multiline-operator.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/parenthesized-literal.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/parenthesized-literal.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/camel-literal.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/camel-literal.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/camel-deceptive.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/camel-deceptive.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/logical-assignments.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/logical-assignments.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/destructuring-default.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/destructuring-default.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'config/leaked.json', 'credential-assignment', 'index');
+  assertFinding(result, 'config/leaked.json', 'credential-assignment', 'worktree');
+  assertFinding(result, 'config/invalid.json', 'source-structure-invalid', 'index');
+  assertFinding(result, 'config/invalid.json', 'source-structure-invalid', 'worktree');
+  assertFinding(result, 'config/leaked.yaml', 'credential-assignment', 'index');
+  assertFinding(result, 'config/leaked.yaml', 'credential-assignment', 'worktree');
+  assertFinding(result, 'server/public/leaked.html', 'credential-assignment', 'index');
+  assertFinding(result, 'server/public/leaked.html', 'credential-assignment', 'worktree');
+  assertFinding(result, '.npmrc', 'credential-assignment', 'index');
+  assertFinding(result, '.npmrc', 'credential-assignment', 'worktree');
+  assertFinding(unsafeEnvironmentResult, '.env.example', 'credential-assignment', 'index');
+  assertFinding(unsafeEnvironmentResult, '.env.example', 'credential-assignment', 'worktree');
+});
+
 test('ambient Git variables cannot redirect the canonical index or object store', (t) => {
   const machinePath = ['', 'Users', 'alice', 'private-project'].join('/');
   const target = makeRepository(t, {

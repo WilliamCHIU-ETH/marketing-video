@@ -8,6 +8,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { TextDecoder } = require('node:util');
+const ts = require('typescript');
 
 const ROOT = path.resolve(__dirname, '..');
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
@@ -83,16 +84,11 @@ const IMAGE_EXTENSIONS = new Set([
 const DOCUMENT_EXTENSIONS = new Set(['.pdf']);
 const SHEET_EXTENSIONS = new Set(['.csv', '.numbers', '.ods', '.tsv', '.xls', '.xlsm', '.xlsx']);
 const SANITIZED_FIXTURE_EXTENSIONS = new Set([
-  '.csv',
   '.json',
   '.jsonl',
-  '.md',
-  '.txt',
-  '.tsv',
-  '.yaml',
-  '.yml',
 ]);
 const ALLOWED_INDEX_MODES = new Set(['100644', '100755']);
+const CODE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx']);
 const ARTIFACT_BASENAME_PATTERN = /(?:^|[-_.])(?:capture|final|output|recording|rendered?|screen[-_]?shot)(?:$|[-_.])/i;
 
 const IGNORED_SENTINELS = [
@@ -136,6 +132,91 @@ const PLACEHOLDER_USERNAMES = new Set([
   'username',
   'xxx',
   'you',
+]);
+
+const SANITIZED_CREDENTIAL_FIELDS = [
+  'apikey',
+  'accesstoken',
+  'authtoken',
+  'clientsecret',
+  'credential',
+  'groupid',
+  'keychain',
+  'password',
+  'privatekey',
+  'secret',
+  'secretkey',
+  'token',
+];
+const SANITIZED_IDENTITY_FIELDS = [
+  'accountname',
+  'clientid',
+  'displayname',
+  'email',
+  'fullname',
+  'jobid',
+  'persona',
+  'personaname',
+  'profileid',
+  'projectid',
+  'requestid',
+  'revisionid',
+  'runid',
+  'sessionid',
+  'threadid',
+  'tenantid',
+  'userid',
+  'username',
+  'workspaceruntoken',
+];
+const SANITIZED_NETWORK_FIELDS = ['baseurl', 'endpoint', 'host', 'hostname', 'uri', 'url'];
+const SANITIZED_EXAMPLE_HOSTS = ['example.com', 'example.net', 'example.org'];
+const SANITIZED_SAFE_TOKENS = new Set([
+  'account',
+  'anonymous',
+  'api',
+  'auth',
+  'client',
+  'credential',
+  'dummy',
+  'email',
+  'example',
+  'fake',
+  'file',
+  'fixture',
+  'group',
+  'heygen',
+  'id',
+  'job',
+  'key',
+  'masked',
+  'minimax',
+  'mock',
+  'must',
+  'not',
+  'none',
+  'openai',
+  'persona',
+  'placeholder',
+  'private',
+  'profile',
+  'project',
+  'redacted',
+  'request',
+  'revision',
+  'run',
+  'sample',
+  'secret',
+  'session',
+  'shell',
+  'synthetic',
+  'test',
+  'thread',
+  'token',
+  'read',
+  'user',
+  'value',
+  'be',
 ]);
 
 function fatalUtf8(buffer, label) {
@@ -459,23 +540,343 @@ function lineNumber(text, offset) {
   return line;
 }
 
-function placeholderSecret(value) {
-  const normalized = String(value || '')
-    .trim()
-    .replace(/^['"]|['"]$/g, '')
-    .replace(/[;,)]*$/, '')
-    .trim()
-    .toLowerCase();
+function sanitizedFieldKind(field) {
+  const compact = String(field || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (SANITIZED_CREDENTIAL_FIELDS.some((candidate) => compact === candidate || compact.endsWith(candidate))) {
+    return 'credential';
+  }
+  if (SANITIZED_IDENTITY_FIELDS.some((candidate) => compact === candidate || compact.endsWith(candidate))) {
+    return 'identity';
+  }
+  if (SANITIZED_NETWORK_FIELDS.some((candidate) => compact === candidate || compact.endsWith(candidate))) {
+    return 'network';
+  }
+  return null;
+}
+
+function syntheticFixtureValue(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().replace(/^['"]|['"]$/g, '').trim().toLowerCase();
+  if (!normalized) return true;
+  if (/^0{8}-0{4}-[0-9a-f]{4}-[0-9a-f]{4}-0{12}$/i.test(normalized)) return true;
+  const tokens = normalized.split(/[-_.\s]+/).filter(Boolean);
+  const markerTokens = new Set([
+    'anonymous',
+    'dummy',
+    'example',
+    'fake',
+    'fixture',
+    'masked',
+    'mock',
+    'none',
+    'placeholder',
+    'redacted',
+    'sample',
+    'synthetic',
+    'test',
+  ]);
+  return tokens.some((token) => markerTokens.has(token))
+    && tokens.every((token) => /^\d+$/.test(token)
+    || /^v\d+$/.test(token)
+    || SANITIZED_SAFE_TOKENS.has(token));
+}
+
+function sanitizedExampleHost(hostname) {
+  const normalized = String(hostname || '').trim().toLowerCase().replace(/\.+$/, '');
+  return normalized === 'invalid'
+    || normalized.endsWith('.invalid')
+    || SANITIZED_EXAMPLE_HOSTS.some((host) => normalized === host || normalized.endsWith(`.${host}`));
+}
+
+function sanitizedNetworkValue(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().replace(/^['"]|['"]$/g, '').trim();
+  if (!normalized) return true;
+  if (normalized.startsWith('/') && !normalized.startsWith('//')) return true;
+  try {
+    const parsed = new URL(normalized.includes('://') ? normalized : `https://${normalized}`);
+    return sanitizedExampleHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizedScalarIssue(field, value) {
+  const kind = sanitizedFieldKind(field);
+  if (kind === 'network') return sanitizedNetworkValue(value) ? null : 'sanitized-non-example-url';
+  const emailMatch = typeof value === 'string' ? value.trim().match(/@([^@\s]+)$/) : null;
+  if (kind === 'identity' && emailMatch && sanitizedExampleHost(emailMatch[1])) return null;
+  if (!kind || syntheticFixtureValue(value)) return null;
+  return kind === 'credential' ? 'sanitized-credential-value' : 'sanitized-identity-value';
+}
+
+function scanSanitizedStructure(value, reportIssue) {
+  if (Array.isArray(value)) {
+    for (const item of value) scanSanitizedStructure(item, reportIssue);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [field, child] of Object.entries(value)) {
+    const issue = sanitizedScalarIssue(field, child);
+    if (issue) reportIssue(issue, field);
+    scanSanitizedStructure(child, reportIssue);
+  }
+}
+
+function scanSanitizedFixture(relative, text, report, origin) {
+  const reportAt = (rule, offset = 0) => report(rule, relative, origin, lineNumber(text, Math.max(0, offset)));
+  const semanticText = text
+    .replace(/\\u([0-9a-f]{4})/gi, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)))
+    .replace(/\\\//g, '/');
+
+  const absoluteUrl = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>'"`]+/gi;
+  for (const match of semanticText.matchAll(absoluteUrl)) {
+    const raw = match[0].replace(/[),.;}\]]+$/, '');
+    try {
+      const parsed = new URL(raw);
+      if (!sanitizedExampleHost(parsed.hostname)) reportAt('sanitized-non-example-url', match.index);
+    } catch {
+      reportAt('sanitized-url-invalid', match.index);
+    }
+  }
+
+  const email = /\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b/gi;
+  for (const match of semanticText.matchAll(email)) {
+    if (!sanitizedExampleHost(match[1])) reportAt('sanitized-personal-email', match.index);
+  }
+
+  const fieldValue = /(?=(["']?([A-Za-z][A-Za-z0-9_. -]*?)["']?\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\]\r\n]+)))/g;
+  for (const match of semanticText.matchAll(fieldValue)) {
+    let value = match[3].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    const issue = sanitizedScalarIssue(match[2], value);
+    if (issue) reportAt(issue, match.index);
+  }
+
+  const extension = path.posix.extname(relative).toLowerCase();
+  if (extension === '.json' || extension === '.jsonl') {
+    const documents = extension === '.json'
+      ? [text]
+      : text.split(/\r?\n/).filter((line) => line.trim());
+    for (const document of documents) {
+      try {
+        const parsed = JSON.parse(document);
+        scanSanitizedStructure(parsed, (rule, field) => {
+          const fieldOffset = semanticText.search(new RegExp(`["']${String(field).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`));
+          reportAt(rule, fieldOffset < 0 ? 0 : fieldOffset);
+        });
+      } catch {
+        reportAt('sanitized-structure-invalid');
+        break;
+      }
+    }
+  }
+}
+
+function sourceCredentialExpressionSafe(value, relative, variableName = '') {
+  const raw = String(value || '').trim().replace(/[;,]*$/, '').trim();
+  const shellSequence = raw.match(/^(\S+)(?:\s+[A-Z][A-Z0-9_]*=)/);
+  if (shellSequence) return strictSourcePlaceholder(shellSequence[1]);
+  const directReference = raw.match(/^(?:providerSecrets|process\.env)\.([A-Z][A-Z0-9_]*)$/);
+  if (directReference && variableName) {
+    return directReference[1] === variableName
+      || (variableName === 'API_KEY' && directReference[1].endsWith('_API_KEY'));
+  }
+  const literals = [...raw.matchAll(/"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|`((?:\\.|[^`\\])*)`/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3] ?? '');
+  if (literals.length) return literals.every((literal) => strictSourcePlaceholder(literal));
+  const extension = path.posix.extname(relative).toLowerCase();
+  if (path.posix.basename(relative).endsWith('.env.example')
+      || ['.env', '.json', '.jsonl', '.toml', '.yaml', '.yml'].includes(extension)) {
+    return strictSourcePlaceholder(raw);
+  }
+  return true;
+}
+
+function strictSourcePlaceholder(value) {
+  const normalized = String(value || '').trim().replace(/^['"]|['"]$/g, '').trim();
   return !normalized
-    || normalized.includes('...')
-    || normalized.startsWith('${')
-    || normalized.startsWith('process.env.')
-    || normalized.startsWith('<')
-    || normalized.startsWith('your-')
-    || normalized.startsWith('example')
-    || normalized.startsWith('fake-')
-    || normalized.startsWith('test-')
-    || ['xxx', 'changeme', 'placeholder', 'must-not-be-readable'].includes(normalized);
+    || ['changeme', 'must-not-be-readable', 'placeholder', 'xxx'].includes(normalized.toLowerCase())
+    || /^<[^>]+>$/.test(normalized)
+    || syntheticFixtureValue(normalized);
+}
+
+function sourceCredentialField(field) {
+  const compact = String(field || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return [
+    'apikey',
+    'accesstoken',
+    'authtoken',
+    'bearertoken',
+    'clientsecret',
+    'credential',
+    'groupid',
+    'keychain',
+    'password',
+    'privatekey',
+    'providertoken',
+    'refreshtoken',
+    'secret',
+    'secretkey',
+  ].some((candidate) => compact === candidate || compact.endsWith(candidate));
+}
+
+function sourceFieldName(node) {
+  if (!node) return '';
+  if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node)) return node.text;
+  if (ts.isComputedPropertyName(node) && ts.isStringLiteralLike(node.expression)) return node.expression.text;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && node.argumentExpression
+      && ts.isStringLiteralLike(node.argumentExpression)) return node.argumentExpression.text;
+  return '';
+}
+
+function dottedSourceReference(node) {
+  let current = node;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  if (ts.isIdentifier(current)) return current.text;
+  if (ts.isPropertyAccessExpression(current)) {
+    const parent = dottedSourceReference(current.expression);
+    return parent ? `${parent}.${current.name.text}` : '';
+  }
+  return '';
+}
+
+function sourceCredentialNodeSafe(node, variableName = '') {
+  const directReference = dottedSourceReference(node).match(/^(?:providerSecrets|process\.env)\.([A-Z][A-Z0-9_]*)$/);
+  if (directReference && variableName) {
+    return directReference[1] === variableName
+      || (variableName === 'API_KEY' && directReference[1].endsWith('_API_KEY'));
+  }
+
+  const literalValues = [];
+  let numericLiteral = false;
+  const visit = (current) => {
+    if (ts.isStringLiteralLike(current)) {
+      literalValues.push(current.text);
+      return;
+    }
+    if (ts.isTemplateExpression(current)) {
+      literalValues.push(current.head.text, ...current.templateSpans.map((span) => span.literal.text));
+    }
+    if (ts.isNumericLiteral(current)) numericLiteral = true;
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  if (numericLiteral) return false;
+  return literalValues.every((value) => strictSourcePlaceholder(value));
+}
+
+function scanCodeCredentials(relative, text, report, origin) {
+  const extension = path.posix.extname(relative).toLowerCase();
+  const scriptKind = extension === '.ts'
+    ? ts.ScriptKind.TS
+    : extension === '.tsx'
+      ? ts.ScriptKind.TSX
+      : extension === '.jsx'
+        ? ts.ScriptKind.JSX
+        : ts.ScriptKind.JS;
+  const source = ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true, scriptKind);
+  if (source.parseDiagnostics.length) {
+    const first = source.parseDiagnostics[0];
+    const location = source.getLineAndCharacterOfPosition(first.start || 0);
+    report('source-parse-invalid', relative, origin, location.line + 1);
+    return;
+  }
+
+  const inspect = (fieldNode, initializer, locationNode) => {
+    const field = sourceFieldName(fieldNode);
+    if (!initializer || !sourceCredentialField(field)) return;
+    const uppercaseVariable = /^[A-Z][A-Z0-9_]*$/.test(field) ? field : '';
+    if (!sourceCredentialNodeSafe(initializer, uppercaseVariable)) {
+      const location = source.getLineAndCharacterOfPosition(locationNode.getStart(source));
+      report('credential-assignment', relative, origin, location.line + 1);
+    }
+  };
+
+  const visit = (node) => {
+    if (ts.isVariableDeclaration(node)
+        || ts.isPropertyAssignment(node)
+        || ts.isPropertyDeclaration(node)
+        || ts.isParameter(node)) {
+      inspect(node.name, node.initializer, node);
+    } else if (ts.isBindingElement(node)) {
+      inspect(node.propertyName || node.name, node.initializer, node);
+    } else if (ts.isBinaryExpression(node)
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      inspect(node.left, node.right, node);
+    } else if (ts.isJsxAttribute(node)) {
+      const initializer = node.initializer && ts.isJsxExpression(node.initializer)
+        ? node.initializer.expression
+        : node.initializer;
+      inspect(node.name, initializer, node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+}
+
+function scanStructuredSourceCredentials(relative, text, report, origin) {
+  const extension = path.posix.extname(relative).toLowerCase();
+  if (extension !== '.json' && extension !== '.jsonl') return;
+  const documents = extension === '.json'
+    ? [text]
+    : text.split(/\r?\n/).filter((line) => line.trim());
+  const inspect = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) inspect(item);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [field, child] of Object.entries(value)) {
+      if (sourceCredentialField(field) && child !== null && typeof child !== 'object'
+          && !strictSourcePlaceholder(String(child))) {
+        const fieldPattern = new RegExp(`["']${String(field).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`);
+        const offset = text.search(fieldPattern);
+        report('credential-assignment', relative, origin, lineNumber(text, Math.max(0, offset)));
+      }
+      inspect(child);
+    }
+  };
+  for (const document of documents) {
+    try {
+      inspect(JSON.parse(document));
+    } catch {
+      report('source-structure-invalid', relative, origin, 1);
+      break;
+    }
+  }
+}
+
+function scanYamlCredentials(relative, text, report, origin) {
+  const extension = path.posix.extname(relative).toLowerCase();
+  if (extension !== '.yaml' && extension !== '.yml') return;
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(\s*)(?:-\s*)?["']?([A-Za-z][A-Za-z0-9_. -]*?)["']?\s*:\s*(.*?)\s*$/);
+    if (!match || !sourceCredentialField(match[2])) continue;
+    let raw = match[3].replace(/\s+#.*$/, '').trim();
+    if (!raw) {
+      const parentIndent = match[1].length;
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const candidate = lines[next];
+        if (!candidate.trim() || /^\s*#/.test(candidate)) continue;
+        const indent = candidate.match(/^\s*/)[0].length;
+        if (indent <= parentIndent) break;
+        raw = candidate.trim().replace(/^-\s*/, '');
+        break;
+      }
+    }
+    const uppercaseVariable = /^[A-Z][A-Z0-9_]*$/.test(match[2]) ? match[2] : '';
+    if (!sourceCredentialExpressionSafe(raw, relative, uppercaseVariable)) {
+      report('credential-assignment', relative, origin, index + 1);
+    }
+  }
 }
 
 function scanText(relative, text, report, origin) {
@@ -510,17 +911,29 @@ function scanText(relative, text, report, origin) {
     }
   }
 
-  const assignment = /\b([A-Z][A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|PASSWORD|PRIVATE_KEY))\b["']?[ \t]*[:=][ \t]*([^\s,}\]]*)/g;
-  for (const match of text.matchAll(assignment)) {
-    if (!placeholderSecret(match[2])) {
-      report('credential-assignment', relative, origin, lineNumber(text, match.index));
+  const extension = path.posix.extname(relative).toLowerCase();
+  if (CODE_EXTENSIONS.has(extension)) {
+    scanCodeCredentials(relative, text, report, origin);
+  } else {
+    const assignment = /(?=(\b["']?([A-Za-z][A-Za-z0-9_. -]*?)["']?[ \t]*(?::|=(?![=>]))[ \t]*([^,}\]\r\n]*)))/g;
+    for (const match of text.matchAll(assignment)) {
+      if (!sourceCredentialField(match[2])) continue;
+      const uppercaseVariable = /^[A-Z][A-Z0-9_]*$/.test(match[2]) ? match[2] : '';
+      const raw = match[3].trim();
+      const emptyExampleEnvironment = !raw && path.posix.basename(relative).endsWith('.env.example');
+      if ((!raw && !emptyExampleEnvironment)
+          || !sourceCredentialExpressionSafe(raw, relative, uppercaseVariable)) {
+        report('credential-assignment', relative, origin, lineNumber(text, match.index));
+      }
     }
+    scanStructuredSourceCredentials(relative, text, report, origin);
+    scanYamlCredentials(relative, text, report, origin);
   }
 
   if (normalizeRelative(relative) === '.npmrc') {
     const npmToken = /(?:^|\n)[^#\n]*(?:_authToken|_auth|password)\s*=\s*([^\s#]+)/gi;
     for (const match of text.matchAll(npmToken)) {
-      if (!placeholderSecret(match[1])) {
+      if (!strictSourcePlaceholder(match[1])) {
         report('credential-assignment', relative, origin, lineNumber(text, match.index));
       }
     }
@@ -593,6 +1006,7 @@ function inspectBytes(relative, buffer, origin, report) {
     report('git-lfs-pointer', relative, origin);
   }
   scanText(relative, text, report, origin);
+  if (isSanitizedFixture(relative)) scanSanitizedFixture(relative, text, report, origin);
 }
 
 function isIgnored(relative, context, gitRunner) {

@@ -19,7 +19,10 @@ jobs:
       - name: Use Node 22
         uses: actions/setup-node@v4
         with:
+          cache: npm
           node-version: 22
+      - name: Install locked dependencies
+        run: npm ci
       - name: Test canonical source boundary
         run: npm run test:source-boundary
 
@@ -36,6 +39,8 @@ jobs:
           node-version: 22
       - name: Install locked dependencies
         run: npm ci
+      - name: Check localhost startup contract
+        run: npm run doctor
       - name: Run TypeScript checks
         run: npm run typecheck
 

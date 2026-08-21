@@ -30,13 +30,20 @@ npm run smoke
 - `doctor:full` 會把 `whisper-cli`、模型檔與 SHA-256、FFmpeg、Tesseract、npm packages 等完整出片條件納入 gate。
 - `smoke` 使用 repo 外的 OS 暫存目錄、`TEST_MODE=1` 與停用 worker；provider keys 會被清空，child process／outbound network 嘗試會被 guard 擋下並使測試失敗。
 
-GitHub CI 把 source-boundary、typecheck 與 provider-free smoke 拆成獨立 jobs；source-boundary 不會呼叫 provider，smoke job 明確清空 HeyGen、MiniMax 與 OpenAI keys。
+GitHub CI 把 source-boundary、doctor／typecheck 與 provider-free smoke 拆成獨立 jobs；source-boundary 不會呼叫 provider，smoke job 明確清空 HeyGen、MiniMax 與 OpenAI keys。
 
 ### 可進 Git 的非程式檔邊界
 
 - 文件圖只允許放在 `docs/images/`，限 PNG／JPEG／WebP／SVG、每檔最大 512 KiB，並驗證內容 signature；`final`、`screenshot`、`recording` 等 runtime 命名仍會被拒絕。
-- 可重建的去識別文字 fixture 只允許放在 `fixtures/sanitized/`，限 JSON／JSONL／YAML／Markdown／TXT／CSV／TSV，每檔最大 64 KiB；密鑰、個人機器路徑與真實 runtime 值仍會被內容掃描拒絕。
+- 可重建的去識別 fixture 只允許放在 `fixtures/sanitized/`，限可遞迴驗證的 JSON／JSONL、每檔最大 64 KiB；內容掃描會拒絕非 placeholder 的 credential／persona／runtime identity 欄位、非 `example.*`／`.invalid` 的絕對 URL 與 email，以及個人機器路徑。Markdown／TXT／YAML／CSV／TSV 等自由文字或資料表視為 instance data，不納入 Git。
 - 影片、音訊、PDF、試算表、截圖、錄影與成品不是 source；放進 ignored runtime／data directory，不用放寬 scanner 來追蹤。
+
+### Git ownership 與 clean-clone 契約
+
+- `origin/main` 是同事 clone 後唯一必須可重建的 source contract；功能分支／worktree 必須有明確 owner、ADR Issue 與待合併 PR，不能把本機 worktree 當成已上線功能。
+- stash、custom local ref、未追蹤素材與 runtime data 只屬本機保存狀態，不是 clean clone 的一部分；有唯一 source 的內容在形成可回查 commit／PR 或明確判定不保留前，不得清除。
+- `.gitignore` 只排除 instance data，不負責保存資料夾骨架。空白 `DATA_DIR` 啟動時會由程式建立普通的 `projects/` 與 `jobs/` 目錄；smoke 直接驗證這個 bootstrap contract。
+- 不得用 `.gitignore` 隱藏 code、configuration、文件或 sanitized fixture；source-boundary 會用 visible sentinels 驗證這些路徑仍可被 Git 看見。
 
 ## 啟動 localhost
 

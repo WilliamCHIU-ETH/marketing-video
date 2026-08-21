@@ -124,7 +124,7 @@ test('trace env 在 dotenv 前快照，provider .env 只能補 secrets 且不改
   assert.equal(Object.isFrozen(traceEnvironment), true);
 
   const paidEnvironment = {
-    HEYGEN_API_KEY: 'shell-heygen-key',
+    HEYGEN_API_KEY: 'test-shell-heygen-key',
     MINIMAX_API_KEY: '',
     HEYGEN_EXPERIMENT_ID: 'EXP-042',
   };
@@ -138,9 +138,9 @@ test('trace env 在 dotenv 前快照，provider .env 只能補 secrets 且不改
         assert.notEqual(isolatedEnvironment, paidEnvironment);
         assert.equal(options.quiet, true);
         Object.assign(isolatedEnvironment, {
-          HEYGEN_API_KEY: 'file-heygen-key',
-          MINIMAX_API_KEY: 'file-minimax-key',
-          MINIMAX_GROUP_ID: 'file-minimax-group',
+          HEYGEN_API_KEY: 'test-file-heygen-key',
+          MINIMAX_API_KEY: 'test-file-minimax-key',
+          MINIMAX_GROUP_ID: 'test-file-minimax-group',
           HEYGEN_EXPERIMENT_ID: 'EXP-999',
           HEYGEN_VIDEO_TITLE: 'hostile-dotenv-title',
           DATA_DIR: '/hostile/runtime-data',
@@ -150,9 +150,9 @@ test('trace env 在 dotenv 前快照，provider .env 只能補 secrets 且不改
     },
   });
   assert.deepEqual(providerSecrets, {
-    HEYGEN_API_KEY: 'shell-heygen-key',
+    HEYGEN_API_KEY: 'test-shell-heygen-key',
     MINIMAX_API_KEY: '',
-    MINIMAX_GROUP_ID: 'file-minimax-group',
+    MINIMAX_GROUP_ID: 'test-file-minimax-group',
   });
   assert.equal(Object.isFrozen(providerSecrets), true);
   assert.deepEqual(paidEnvironment, originalPaidEnvironment);
@@ -567,7 +567,7 @@ test('tracer 初始化後 provider-ledgers 被置換時在 callback/fetch 前 fa
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -697,9 +697,9 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
   const childEnv = {
     ...process.env,
     DATA_DIR: dataDir,
-    HEYGEN_API_KEY: 'must-not-be-read',
-    MINIMAX_API_KEY: 'must-not-be-read',
-    MINIMAX_GROUP_ID: 'must-not-be-read',
+    HEYGEN_API_KEY: 'test-must-not-be-read',
+    MINIMAX_API_KEY: 'test-must-not-be-read',
+    MINIMAX_GROUP_ID: 'test-must-not-be-read',
     HEYGEN_TEST_GUARD_LOG: guardLog,
     NODE_OPTIONS: `--require=${guardModule}`,
   };
@@ -1064,7 +1064,7 @@ test('managed-first/manual-second 共用 canonical reservation，第二次在 fe
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer: manual,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -1114,7 +1114,7 @@ test('manual-first/managed-second 共用 canonical reservation，第二次在 fe
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer: managed,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -1491,7 +1491,7 @@ test('onPrepared 置換 provider-ledgers 後會重驗 reservation，fetch 絕不
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -1539,7 +1539,7 @@ test('預先保留 request 在 callback 後同樣重驗，ledger root 置換時 
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v2/videos',
       api: 'v2-audio',
       payload,
@@ -1759,7 +1759,7 @@ test('同一 pre-reserved create 並行 submit 只有一個 fetch winner', async
   const invoke = (tracer) => submitTracedHeyGenCreate({
     fetchImpl,
     tracer,
-    apiKey: 'fixture-key-never-sent',
+    apiKey: 'test-api-key',
     endpoint: 'https://api.heygen.com/v3/videos',
     api: 'v3-text',
     payload,
@@ -1891,7 +1891,7 @@ test('immutable publish 遇到 destination 競爭者時不覆寫 reservation 且
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -1944,7 +1944,7 @@ test('immutable publish 的 temp 被替換時以 inode 證明拒絕，fetch 為�
     () => submitTracedHeyGenCreate({
       fetchImpl: async () => { fetchCalls += 1; },
       tracer,
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v3/videos',
       api: 'v3-text',
       payload,
@@ -1987,7 +1987,7 @@ test('fake transport 觀察到 fetch 前 ledger 已是 prepared，成功後才�
       };
     },
     tracer,
-    apiKey: 'fixture-key-never-sent',
+    apiKey: 'test-api-key',
     endpoint: 'https://api.heygen.com/v3/videos',
     api: 'v3-text',
     payload,
@@ -1998,7 +1998,7 @@ test('fake transport 觀察到 fetch 前 ledger 已是 prepared，成功後才�
     ledgerRequestId: 'request-before-fetch',
   });
   assert.equal(tracer.snapshot().requests[0].status, 'submitted');
-  assert.equal(JSON.stringify(tracer.snapshot()).includes('fixture-key-never-sent'), false);
+  assert.equal(JSON.stringify(tracer.snapshot()).includes('test-api-key'), false);
 });
 
 test('預先保留的 audio request 可被 create 使用一次，不一致時 fetch 絕不執行', async (t) => {
@@ -2085,7 +2085,7 @@ test('ledger prepare 失敗時 fake transport 絕不執行', async () => {
       tracer: {
         prepare() { throw new Error('ledger unavailable'); },
       },
-      apiKey: 'fixture-key-never-sent',
+      apiKey: 'test-api-key',
       endpoint: 'https://api.heygen.com/v2/videos',
       api: 'v2-audio',
       payload: { title: 'MV-project-a-V1-run-a' },
@@ -2113,9 +2113,9 @@ test('三支 legacy paid-provider scripts 在讀 key、upload、MiniMax/create �
       encoding: 'utf8',
       env: {
         ...process.env,
-        HEYGEN_API_KEY: 'fixture-must-not-be-read',
-        MINIMAX_API_KEY: 'fixture-must-not-be-read',
-        MINIMAX_GROUP_ID: 'fixture-must-not-be-read',
+        HEYGEN_API_KEY: 'test-fixture-must-not-be-read',
+        MINIMAX_API_KEY: 'test-fixture-must-not-be-read',
+        MINIMAX_GROUP_ID: 'test-fixture-must-not-be-read',
       },
     });
     assert.equal(result.status, 2, `${scriptName}: ${result.stderr}`);
