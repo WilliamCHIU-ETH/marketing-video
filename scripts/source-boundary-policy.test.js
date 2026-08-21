@@ -135,7 +135,7 @@ test('sanitized fixtures reject real credentials, identities and non-example end
       },
     }),
     'fixtures/sanitized/spaced-fields.json': JSON.stringify({
-      'api key': unsafeFixtureValue,
+      [['api', ' key'].join('')]: unsafeFixtureValue,
       [personaField]: 'Alice Chen',
     }),
     'fixtures/sanitized/deceptive.json': JSON.stringify({
@@ -261,6 +261,7 @@ test('credential scan allows source references and explicit test sentinels but r
     'src/leaked.js': `const ${heygenKey} = '${unsafeFixtureValue}';\n`,
     'src/leaked.test.js': `const ${minimaxKey} = '${unsafeFixtureValue}';\n`,
     'src/mismatched.js': `${heygenKey} = ${providerSecrets}.${minimaxKey};\n`,
+    'src/identifier-alias.js': `const value = '${unsafeFixtureValue}';\nconst ${heygenKey} = value;\n`,
     'src/group.js': `${minimaxGroup} = '${unsafeFixtureValue}';\n`,
     'src/provider-fallback.js': `${heygenKey} = ${providerSecrets}.${heygenKey} || '${unsafeFixtureValue}';\n`,
     'src/environment-fallback.js': `${openaiToken} = process.env.${openaiToken} || '${unsafeFixtureValue}';\n`,
@@ -324,6 +325,8 @@ test('credential scan allows source references and explicit test sentinels but r
   assertFinding(result, 'src/leaked.test.js', 'credential-assignment', 'worktree');
   assertFinding(result, 'src/mismatched.js', 'credential-assignment', 'index');
   assertFinding(result, 'src/mismatched.js', 'credential-assignment', 'worktree');
+  assertFinding(result, 'src/identifier-alias.js', 'credential-assignment', 'index');
+  assertFinding(result, 'src/identifier-alias.js', 'credential-assignment', 'worktree');
   assertFinding(result, 'src/group.js', 'credential-assignment', 'index');
   assertFinding(result, 'src/group.js', 'credential-assignment', 'worktree');
   assertFinding(result, 'src/provider-fallback.js', 'credential-assignment', 'index');

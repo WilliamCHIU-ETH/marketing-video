@@ -746,11 +746,28 @@ function dottedSourceReference(node) {
   return '';
 }
 
-function sourceCredentialNodeSafe(node, variableName = '') {
-  const directReference = dottedSourceReference(node).match(/^(?:providerSecrets|process\.env)\.([A-Z][A-Z0-9_]*)$/);
-  if (directReference && variableName) {
-    return directReference[1] === variableName
-      || (variableName === 'API_KEY' && directReference[1].endsWith('_API_KEY'));
+function sourceCredentialNodeSafe(node, fieldName = '', resolveIdentifier = () => null, resolving = new Set()) {
+  let current = node;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  const directReference = dottedSourceReference(current).match(/^(?:providerSecrets|process\.env)\.([A-Z][A-Z0-9_]*)$/);
+  if (directReference && fieldName) {
+    const uppercaseVariable = /^[A-Z][A-Z0-9_]*$/.test(fieldName) ? fieldName : '';
+    if (!uppercaseVariable) return sourceCredentialField(fieldName);
+    return directReference[1] === uppercaseVariable
+      || (uppercaseVariable === 'API_KEY' && directReference[1].endsWith('_API_KEY'));
+  }
+  if (ts.isIdentifier(current)) {
+    if (resolving.has(current.text)) return false;
+    const resolution = resolveIdentifier(current.text);
+    if (resolution?.runtimeInput) return true;
+    if (!resolution?.values?.length) return false;
+    const nextResolving = new Set(resolving).add(current.text);
+    return resolution.values.every((value) => sourceCredentialNodeSafe(
+      value,
+      fieldName,
+      resolveIdentifier,
+      nextResolving,
+    ));
   }
 
   const literalValues = [];
@@ -766,9 +783,10 @@ function sourceCredentialNodeSafe(node, variableName = '') {
     if (ts.isNumericLiteral(current)) numericLiteral = true;
     ts.forEachChild(current, visit);
   };
-  visit(node);
+  visit(current);
   if (numericLiteral) return false;
-  return literalValues.every((value) => strictSourcePlaceholder(value));
+  return literalValues.length > 0
+    && literalValues.every((value) => strictSourcePlaceholder(value));
 }
 
 function scanCodeCredentials(relative, text, report, origin) {
@@ -788,11 +806,47 @@ function scanCodeCredentials(relative, text, report, origin) {
     return;
   }
 
+  const identifierValues = new Map();
+  const runtimeInputs = new Set();
+  const addIdentifierValue = (name, value) => {
+    if (!name || !value) return;
+    const values = identifierValues.get(name) || [];
+    values.push(value);
+    identifierValues.set(name, values);
+  };
+  const addRuntimeInput = (name) => {
+    if (ts.isIdentifier(name)) {
+      runtimeInputs.add(name.text);
+      return;
+    }
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) addRuntimeInput(element.name);
+      }
+    }
+  };
+  const collectIdentifiers = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      addIdentifierValue(node.name.text, node.initializer);
+    } else if (ts.isParameter(node)) {
+      addRuntimeInput(node.name);
+    } else if (ts.isBinaryExpression(node)
+        && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isIdentifier(node.left)) {
+      addIdentifierValue(node.left.text, node.right);
+    }
+    ts.forEachChild(node, collectIdentifiers);
+  };
+  collectIdentifiers(source);
+  const resolveIdentifier = (name) => ({
+    runtimeInput: runtimeInputs.has(name),
+    values: identifierValues.get(name) || [],
+  });
+
   const inspect = (fieldNode, initializer, locationNode) => {
     const field = sourceFieldName(fieldNode);
     if (!initializer || !sourceCredentialField(field)) return;
-    const uppercaseVariable = /^[A-Z][A-Z0-9_]*$/.test(field) ? field : '';
-    if (!sourceCredentialNodeSafe(initializer, uppercaseVariable)) {
+    if (!sourceCredentialNodeSafe(initializer, field, resolveIdentifier)) {
       const location = source.getLineAndCharacterOfPosition(locationNode.getStart(source));
       report('credential-assignment', relative, origin, location.line + 1);
     }
