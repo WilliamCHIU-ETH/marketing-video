@@ -21,6 +21,29 @@ This repository hosts a localhost UI that creates queued video jobs and a worker
 - A historical MP4 is not evidence that the current checkout is reproducible.
 - Never invoke paid provider scripts during tests unless the user explicitly authorizes that run.
 
+## Product principle and work routing
+
+The product exists to help users understand and directly see how media is added to an iterative video project: what assets a Project contains, what a Revision selected, what the pipeline actually used, where evidenced material appears, and what the Revision produced. `Project → Revision → Run` is the user model; provider calls, runtime folders, queues, and cleanup are implementation details unless they affect that experience.
+
+A Project is the asset reuse boundary. Revisions may reuse assets already owned by the same Project. Do not offer a global or cross-Project asset picker: when users want to reuse a source from another Project, they must add that source file to the target Project so the target owns its own Project Asset. Until a later product decision changes this, a new Revision may carry forward its source Revision's selected speaker asset, but the GUI must not offer a picker for other historical `speaker-video` assets.
+
+Agents must maintain this boundary when proposing, implementing, or reviewing work. Classify every Issue or PR into exactly one of these tracks:
+
+- **Product Core**: directly improves Project／Revision／asset understanding or control in the GUI. This is the default product priority.
+- **Product Support**: prevents user-visible Projects, assets, Revisions, or outputs from being lost, corrupted, or incorrectly associated. Require a concrete product-data failure mode.
+- **Engineering Maintenance**: CI, provider plumbing, clean-clone, tooling, repository hygiene, or developer-only traceability. Schedule only when it blocks Product Core delivery or addresses a demonstrated operational risk; do not present it as user value.
+- **On Hold**: plausible work without current user-value evidence or a present blocking condition. Preserve the context, but do not expand or implement it by default.
+
+For user-visible asset claims, keep these evidence levels separate:
+
+- A Project Asset proves the asset is available to the Project.
+- `revision.assetRefs` proves the Revision selected or referenced the asset; it does not prove the asset appears in the rendered film.
+- "Used" requires pipeline or render provenance tied to that asset.
+- A timeline position requires explicit placement evidence; never infer it from upload, selection, OCR, a filename, or a preview.
+- An Output proves only the recorded Revision output after its file identity and ownership have been validated.
+
+Before adding broad safeguards or abstractions, state which track the work belongs to, the Product Principle impact, the minimum evidence required, and the stopping condition. Do not grow Engineering Maintenance into a parallel product.
+
 ## HeyGen create naming
 
 - Every HeyGen create request must send a non-empty `title` so the Dashboard entry can be matched to its experiment, revision, duration, and credits.
