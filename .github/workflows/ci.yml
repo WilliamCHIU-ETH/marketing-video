@@ -62,5 +62,10 @@ jobs:
           node-version: 22
       - name: Install locked dependencies
         run: npm ci
+      - name: Install media probes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+          ffprobe -version
       - name: Run isolated localhost smoke
         run: npm run smoke
