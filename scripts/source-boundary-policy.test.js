@@ -206,6 +206,15 @@ test('runtime-shaped JSON outside sanitized fixtures fails closed', (t) => {
       [personaField]: 'synthetic-persona',
       [endpointField]: 'https://api.example.com/catalog',
     }),
+    'project-provider.json': JSON.stringify({
+      [endpointField]: 'https://builder.company.internal/catalog',
+    }),
+    'sibling-runtime.json': JSON.stringify({
+      project: { [projectField]: 'test-project-1' },
+      provider: { [endpointField]: 'https://builder.company.internal/catalog' },
+    }),
+    'duplicate-project.json': `{"${projectField}":"project-123","${projectField}":"test-project-1"}`,
+    'duplicate-endpoint.json': `{"${projectField}":"test-project-1","${endpointField}":"https://builder.company.internal","${endpointField}":"https://api.example.com"}`,
   });
   const result = scanRepository({ root });
 
@@ -214,6 +223,14 @@ test('runtime-shaped JSON outside sanitized fixtures fails closed', (t) => {
   assertFinding(result, 'project.json', 'runtime-identity-value', 'worktree');
   assertFinding(result, 'project.json', 'runtime-non-example-url', 'index');
   assertFinding(result, 'project.json', 'runtime-non-example-url', 'worktree');
+  assertFinding(result, 'project-provider.json', 'runtime-non-example-url', 'index');
+  assertFinding(result, 'project-provider.json', 'runtime-non-example-url', 'worktree');
+  assertFinding(result, 'sibling-runtime.json', 'runtime-non-example-url', 'index');
+  assertFinding(result, 'sibling-runtime.json', 'runtime-non-example-url', 'worktree');
+  assertFinding(result, 'duplicate-project.json', 'runtime-sensitive-field-duplicate', 'index');
+  assertFinding(result, 'duplicate-project.json', 'runtime-sensitive-field-duplicate', 'worktree');
+  assertFinding(result, 'duplicate-endpoint.json', 'runtime-sensitive-field-duplicate', 'index');
+  assertFinding(result, 'duplicate-endpoint.json', 'runtime-sensitive-field-duplicate', 'worktree');
 });
 
 test('credential scan allows source references and explicit test sentinels but rejects literal secrets', (t) => {

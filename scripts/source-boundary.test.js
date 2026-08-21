@@ -825,12 +825,42 @@ function scanStructuredSourceCredentials(relative, text, report, origin) {
   const extension = path.posix.extname(relative).toLowerCase();
   if (extension !== '.json' && extension !== '.jsonl') return;
   const documents = extension === '.json'
-    ? [text]
-    : text.split(/\r?\n/).filter((line) => line.trim());
+    ? [{ line: 1, text }]
+    : text.split(/\r?\n/)
+      .map((line, index) => ({ line: index + 1, text: line }))
+      .filter((document) => document.text.trim());
+  const runtimeShapedFile = /^(?:jobs?|projects?|revisions?|runs?|sessions?|workspaces?)(?:[-_.].*)?\.jsonl?$/i
+    .test(path.posix.basename(relative));
   const reportField = (rule, field) => {
     const fieldPattern = new RegExp(`["']${String(field).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`);
     const offset = text.search(fieldPattern);
     report(rule, relative, origin, lineNumber(text, Math.max(0, offset)));
+  };
+  const containsRuntimeIdentity = (value) => {
+    if (Array.isArray(value)) return value.some(containsRuntimeIdentity);
+    if (!value || typeof value !== 'object') return false;
+    return Object.entries(value).some(([field, child]) => sanitizedFieldKind(field) === 'identity'
+      || containsRuntimeIdentity(child));
+  };
+  const rejectDuplicateSensitiveFields = (document, baseLine) => {
+    const source = ts.parseJsonText(relative, document);
+    const visit = (node) => {
+      if (ts.isObjectLiteralExpression(node)) {
+        const seen = new Set();
+        for (const property of node.properties) {
+          if (!ts.isPropertyAssignment(property)) continue;
+          const field = sourceFieldName(property.name);
+          const normalized = String(field || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+          if (normalized && sanitizedFieldKind(field) && seen.has(normalized)) {
+            const location = source.getLineAndCharacterOfPosition(property.getStart(source));
+            report('runtime-sensitive-field-duplicate', relative, origin, baseLine + location.line);
+          }
+          if (normalized) seen.add(normalized);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
   };
   const inspect = (value, inheritedRuntimeContext = false) => {
     if (Array.isArray(value)) {
@@ -854,9 +884,11 @@ function scanStructuredSourceCredentials(relative, text, report, origin) {
   };
   for (const document of documents) {
     try {
-      inspect(JSON.parse(document));
+      const parsed = JSON.parse(document.text);
+      rejectDuplicateSensitiveFields(document.text, document.line);
+      inspect(parsed, runtimeShapedFile || containsRuntimeIdentity(parsed));
     } catch {
-      report('source-structure-invalid', relative, origin, 1);
+      report('source-structure-invalid', relative, origin, document.line);
       break;
     }
   }
