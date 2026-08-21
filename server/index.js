@@ -33,6 +33,8 @@ const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const { createProjectStore, extensionForMediaType, inspectMediaFile } = require('./project-store');
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
+const { normalizeMaterialAcquisitionIntent } = require('./material-acquisition');
+const { prepareJobMaterialAcquisition } = require('./material-acquisition-runtime');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -406,6 +408,9 @@ function revisionNeedsJobSync(job) {
     outputs: job.outputs || [],
     archived: job.archived || [],
     finishedAt: job.finishedAt || null,
+    ...(job.materialAcquisition ? { materialAcquisition: job.materialAcquisition } : {}),
+    ...(job.materialAcquisitionResult
+      ? { materialAcquisitionResult: job.materialAcquisitionResult } : {}),
   };
   const revisionMismatch = Object.entries(expected).some(([key, value]) =>
     JSON.stringify(revision[key] === undefined ? null : revision[key])
@@ -486,6 +491,9 @@ function saveJob(j) {
       outputs: j.outputs || [],
       archived: j.archived || [],
       finishedAt: j.finishedAt || null,
+      ...(j.materialAcquisition ? { materialAcquisition: j.materialAcquisition } : {}),
+      ...(j.materialAcquisitionResult
+        ? { materialAcquisitionResult: j.materialAcquisitionResult } : {}),
     });
   }
 }
@@ -1751,6 +1759,15 @@ async function doPrepare(job) {
   job.startedAt = nowISO();
   saveJob(job);
 
+  await prepareJobMaterialAcquisition({
+    job,
+    jobDirectory: jobDir(job.id),
+    projectStore: PROJECT_STORE,
+    requestIdFactory: () => `capture-${newId()}`,
+    nowISO,
+    saveJob,
+    appendLog,
+  });
   clearWorkspaceInputs();
   copyRecursive(path.join(jobDir(job.id), 'input'), path.join(ROOT, 'public'));
 
@@ -2121,6 +2138,11 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/jobs' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
+      let materialAcquisition = null;
+      if (body.materialAcquisition != null) {
+        try { materialAcquisition = normalizeMaterialAcquisitionIntent(body.materialAcquisition); }
+        catch (error) { return send(res, 400, { error: error.message }); }
+      }
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
       if (!body.body || !body.body.trim()) return send(res, 400, { error: '腳本是空的' });
       const brand = body.brand ? String(body.brand) : null;
@@ -2191,6 +2213,7 @@ const server = http.createServer(async (req, res) => {
             withAd: !!body.withAd,
             autoApprove: !!body.autoApprove,
           },
+          ...(materialAcquisition ? { materialAcquisition } : {}),
         });
         job = {
           id,
@@ -2210,6 +2233,7 @@ const server = http.createServer(async (req, res) => {
           autoApprove: !!body.autoApprove,
           assetRefs: [],
           createdAssetRefs: [],
+          ...(materialAcquisition ? { materialAcquisition } : {}),
         };
         ensureDir(path.join(jobDir(job.id), 'input'));
         fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
