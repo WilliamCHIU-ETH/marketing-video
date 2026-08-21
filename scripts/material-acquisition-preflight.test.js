@@ -20,7 +20,7 @@ const PNG = Buffer.from(
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '1.0.0',
+  toolVersion: '0.2.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
 };
@@ -48,7 +48,7 @@ function fixture(t) {
   const result = {
     contractVersion: 1,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '1.0.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.0' },
     status: 'completed',
     artifacts: [
       {
@@ -153,22 +153,60 @@ test('capability operation gate prevents unsupported acquisition', async (t) => 
   assert.equal(value.reason, 'provider_operation_unsupported');
 });
 
+test('capability version mismatch falls back or fails closed before acquire', async (t) => {
+  const { request, result } = fixture(t);
+  let acquireCalls = 0;
+  const mismatched = {
+    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.1' }),
+    acquire: async () => { acquireCalls += 1; return result; },
+  };
+  const preferred = await acquireOptionalMaterial({ request, provider: mismatched });
+  assert.equal(preferred.status, 'fallback');
+  assert.equal(preferred.reason, 'provider_version_incompatible');
+  await assert.rejects(
+    () => acquireOptionalMaterial({
+      policy: 'require-capture', request, provider: mismatched,
+    }),
+    (error) => error instanceof MaterialAcquisitionError
+      && error.code === 'provider_version_incompatible',
+  );
+  assert.equal(acquireCalls, 0);
+});
+
 test('completed screenshot bundle becomes fresh only after full validation', async (t) => {
   const { request, result } = fixture(t);
   const value = await acquireOptionalMaterial({ request, provider: provider(result) });
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
-  assert.equal(value.providerVersion, '1.0.0');
+  assert.equal(value.providerVersion, '0.2.0');
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
+});
+
+test('result version drift follows prefer fallback and require fail-closed policy', async (t) => {
+  const { request, result } = fixture(t);
+  const drifted = {
+    ...result,
+    provider: { ...result.provider, toolVersion: '0.2.1' },
+  };
+  const preferred = await acquireOptionalMaterial({ request, provider: provider(drifted) });
+  assert.equal(preferred.status, 'fallback');
+  assert.equal(preferred.reason, 'provider_version_incompatible');
+  await assert.rejects(
+    () => acquireOptionalMaterial({
+      policy: 'require-capture', request, provider: provider(drifted),
+    }),
+    (error) => error instanceof MaterialAcquisitionError
+      && error.code === 'provider_version_incompatible',
+  );
 });
 
 test('result envelope is closed and bound to request/provider/status/error invariants', (t) => {
   const { request, result } = fixture(t);
   const badValues = [
     { ...result, requestId: 'other' },
-    { ...result, provider: { id: 'other', toolVersion: '1.0.0' } },
+    { ...result, provider: { id: 'other', toolVersion: '0.2.0' } },
     { ...result, evidence: [] },
     { ...result, error: { code: 'x', message: 'x', retryable: false } },
     { ...result, extra: true },

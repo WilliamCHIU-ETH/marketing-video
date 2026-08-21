@@ -5,8 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { inspectMediaFile } = require('./project-store');
+const PROVIDER_LOCK = Object.freeze(require('../config/chipk-capture-provider.lock.json'));
 
-const PROVIDER_ID = 'chipk-simulator-capture';
+const PROVIDER_ID = PROVIDER_LOCK.providerId;
+const CONTRACT_VERSION = PROVIDER_LOCK.contractVersion;
 const POLICIES = new Set(['prefer-capture', 'require-capture', 'disable-capture']);
 const OPERATIONS = new Set(['screenshot', 'record']);
 const MODES = new Set(['live', 'test']);
@@ -96,7 +98,7 @@ function buildCaptureRequest(intent, { requestId, outputDirectory }) {
   if (intent.stock?.name) target.stockName = intent.stock.name;
   if (intent.recipe) target.recipeId = intent.recipe;
   return {
-    contractVersion: 1,
+    contractVersion: CONTRACT_VERSION,
     requestId,
     operation: intent.operation,
     mode: intent.mode,
@@ -229,11 +231,14 @@ function validateMediaDescriptor(artifact, file) {
 
 function validateCaptureResult(result, request) {
   if (!result || typeof result !== 'object' || Array.isArray(result)
-      || result.contractVersion !== 1 || result.requestId !== request.requestId
+      || result.contractVersion !== CONTRACT_VERSION || result.requestId !== request.requestId
       || !result.provider || result.provider.id !== PROVIDER_ID
       || typeof result.provider.toolVersion !== 'string' || !result.provider.toolVersion.trim()
       || !RESULT_STATUSES.has(result.status))
     fail('Provider result envelope is incompatible', 'provider_result_incompatible');
+  if (result.provider.toolVersion !== PROVIDER_LOCK.toolVersion)
+    fail('Provider result version does not match the consumer lock',
+      'provider_version_incompatible');
   if (Object.keys(result).some((key) => !RESULT_KEYS.has(key))
       || typeof result.requestId !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result.requestId)
@@ -322,9 +327,11 @@ async function acquireOptionalMaterial({
   }
   const providerId = capabilities?.providerId || null;
   let readinessCode = null;
-  if (capabilities?.schemaVersion !== 1 || providerId !== PROVIDER_ID
+  if (capabilities?.schemaVersion !== CONTRACT_VERSION || providerId !== PROVIDER_ID
       || typeof capabilities?.toolVersion !== 'string' || !capabilities.toolVersion.trim())
     readinessCode = 'provider_contract_incompatible';
+  else if (capabilities.toolVersion !== PROVIDER_LOCK.toolVersion)
+    readinessCode = 'provider_version_incompatible';
   else if (capabilities?.productionReady !== true)
     readinessCode = 'provider_not_production_ready';
   else if (!Array.isArray(capabilities.operations)
