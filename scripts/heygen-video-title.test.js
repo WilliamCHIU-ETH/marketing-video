@@ -7,11 +7,13 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const {
+  authorizeHeyGenPreviewPlan,
   buildAudioDrivenPayload,
   buildTextDrivenV2Payload,
   buildTextDrivenV3Payload,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  createHeyGenPreviewPlan,
   loadProviderSecrets,
   normalizeExperimentId,
   resolveHeyGenVideoTitle,
@@ -86,6 +88,17 @@ function assertProjectLedgerPath(ledgerPath, dataDir) {
   const dataRoot = fs.existsSync(dataDir) ? fs.realpathSync(dataDir) : path.resolve(dataDir);
   assert.equal(path.dirname(ledgerPath), path.join(dataRoot, 'provider-ledgers'));
   assert.match(path.basename(ledgerPath), /^project-[0-9a-f]{64}\.json$/);
+}
+
+function approvePreviewRequests(tracer, requests) {
+  const previews = requests.map((request) => tracer.preview(request));
+  const plan = createHeyGenPreviewPlan(previews);
+  return tracer.approvePreview({
+    requests: previews,
+    providedApprovalId: tracer.context.source === 'workspace-run-token'
+      ? null
+      : plan.approvalId,
+  });
 }
 
 test('trace env 在 dotenv 前快照，provider .env 只能補 secrets 且不改寫 identity', () => {
@@ -704,14 +717,29 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
   assert.equal(result.status, 0, result.stderr);
   const preview = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
   assert.equal(preview.dryRun, true);
+  assert.match(preview.approvalId, /^sha256:[0-9a-f]{64}$/);
   assert.equal(preview.requestCount, 1);
   assert.equal(preview.requests[0].api, 'v3-text');
   assert.equal(preview.requests[0].endpoint, 'https://api.heygen.com/v3/videos');
   assert.equal(preview.requests[0].title, 'MV-project-dry-V1-run-dry');
   assert.equal(preview.requests[0].payloadMetadata.mode, 'text-driven');
+  assert.match(preview.requests[0].previewDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.match(preview.requests[0].payloadMetadata.scriptSha256, /^sha256:[0-9a-f]{64}$/);
   assert.equal(Object.hasOwn(preview.requests[0].payloadMetadata, 'scriptText'), false);
   assertProjectLedgerPath(preview.ledgerPath, dataDir);
   assert.equal(fs.existsSync(preview.ledgerPath), false);
+  assert.equal(fs.existsSync(dataDir), false);
+
+  const missingApproval = spawnSync(process.execPath, [
+    'run.js',
+    '--project-id=project-dry',
+    '--revision=V1',
+    '--run-id=run-dry',
+  ], { cwd: repoRoot, encoding: 'utf8', env: childEnv });
+  assert.equal(missingApproval.status, 1);
+  assert.match(missingApproval.stderr, /缺少 matching dry-run approval/);
+  assert.doesNotMatch(missingApproval.stderr, /sha256:[0-9a-f]{64}/);
+  assert.equal(fs.existsSync(guardLog), false);
   assert.equal(fs.existsSync(dataDir), false);
 
   const audioResult = spawnSync(process.execPath, [
@@ -1199,6 +1227,131 @@ test('read-only dry-run preview 覆蓋三種 API 且不建立 DATA_DIR 或 ledge
   assert.equal(fs.existsSync(dataDir), false);
 });
 
+test('manual approval 必須精確匹配 preview，managed token 單獨不能放行 paid claim', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-preview-approval-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const argv = ['--project-id=project-approved', '--revision=V1', '--run-id=run-approved'];
+  const env = { DATA_DIR: path.join(root, 'manual-data') };
+  const planner = createHeyGenRequestPreview({ projectDir: root, argv, env });
+  const title = planner.titleFor('ignored');
+  const payloadMetadata = {
+    mode: 'text-driven',
+    scriptCharacters: 12,
+    scriptSha256: `sha256:${'a'.repeat(64)}`,
+  };
+  const preview = planner.preview({ api: 'v3-text', title, payloadMetadata });
+  const plan = createHeyGenPreviewPlan([preview]);
+  const sameLengthChangedScript = planner.preview({
+    api: 'v3-text',
+    title,
+    payloadMetadata: { ...payloadMetadata, scriptSha256: `sha256:${'b'.repeat(64)}` },
+  });
+  assert.notEqual(createHeyGenPreviewPlan([sameLengthChangedScript]).approvalId, plan.approvalId);
+  assert.throws(
+    () => authorizeHeyGenPreviewPlan({ requests: [preview], context: planner.context }),
+    /缺少 matching dry-run approval/,
+  );
+  assert.throws(
+    () => authorizeHeyGenPreviewPlan({
+      requests: [preview],
+      context: planner.context,
+      providedApprovalId: `sha256:${'0'.repeat(64)}`,
+    }),
+    /缺少 matching dry-run approval/,
+  );
+  const approval = authorizeHeyGenPreviewPlan({
+    requests: [preview],
+    context: planner.context,
+    providedApprovalId: plan.approvalId,
+  });
+  const tracer = createHeyGenRequestTracer({
+    projectDir: root,
+    argv,
+    env,
+    previewApproval: approval,
+    randomUUID: () => 'approved-request',
+  });
+  const requestId = tracer.prepare({ api: 'v3-text', title, payloadMetadata });
+  const durableRequest = tracer.snapshot().requests[0];
+  assert.equal(durableRequest.previewProof.approvalId, plan.approvalId);
+  assert.equal(durableRequest.previewProof.previewDigest, preview.previewDigest);
+  assert.deepEqual(durableRequest.previewProof.planRequestDigests, [preview.previewDigest]);
+  assert.equal(durableRequest.previewProof.approvalSource, 'explicit-dry-run-token');
+  let paidCalls = 0;
+  await runVerifiedPaidStep({
+    tracer,
+    ledgerRequestId: requestId,
+    api: 'v3-text',
+    title,
+    payloadMetadata,
+    operationKey: 'heygen-video-create',
+    paidStep: async () => { paidCalls += 1; },
+  });
+  assert.equal(paidCalls, 1);
+
+  const managedApproved = managedFixture(t, { runId: 'run-managed-preview-approved' });
+  const managedEnv = { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: managedApproved.dataDir };
+  const managedPlanner = createHeyGenRequestPreview({
+    projectDir: managedApproved.root,
+    env: managedEnv,
+  });
+  const managedApprovedTitle = managedPlanner.titleFor('ignored');
+  const managedPreview = managedPlanner.preview({
+    api: 'v2-audio',
+    title: managedApprovedTitle,
+  });
+  const managedApproval = authorizeHeyGenPreviewPlan({
+    requests: [managedPreview],
+    context: managedPlanner.context,
+  });
+  assert.equal(managedApproval.approvalSource, 'managed-workspace-submit');
+  const managedApprovedTracer = createHeyGenRequestTracer({
+    projectDir: managedApproved.root,
+    env: managedEnv,
+    previewApproval: managedApproval,
+    randomUUID: () => 'managed-with-preview-proof',
+  });
+  assert.throws(
+    () => managedApprovedTracer.prepare({
+      api: 'v2-audio',
+      title: managedApprovedTitle,
+      payloadMetadata: { mode: 'audio-driven' },
+    }),
+    /approved dry-run preview 不一致/,
+  );
+  assert.equal(managedApprovedTracer.snapshot().requests.length, 0);
+  const managedApprovedRequestId = managedApprovedTracer.prepare({
+    api: 'v2-audio',
+    title: managedApprovedTitle,
+  });
+  assert.equal(
+    managedApprovedTracer.snapshot().requests[0].previewProof.previewDigest,
+    managedPreview.previewDigest,
+  );
+
+  const managed = managedFixture(t, { runId: 'run-managed-proof-required' });
+  const managedTracer = createHeyGenRequestTracer({
+    projectDir: managed.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: managed.dataDir },
+    randomUUID: () => 'managed-without-preview-proof',
+  });
+  const managedTitle = managedTracer.titleFor('ignored');
+  const managedRequestId = managedTracer.prepare({ api: 'v2-audio', title: managedTitle });
+  let managedPaidCalls = 0;
+  await assert.rejects(
+    () => runVerifiedPaidStep({
+      tracer: managedTracer,
+      ledgerRequestId: managedRequestId,
+      api: 'v2-audio',
+      title: managedTitle,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { managedPaidCalls += 1; },
+    }),
+    /缺少 durable matching preview proof/,
+  );
+  assert.equal(managedPaidCalls, 0);
+});
+
 test('ledger 在 fetch 前 prepared，並保存 submitted/completed/failed 的最小證據', (t) => {
   const fixture = managedFixture(t);
   const ids = ['request-a', 'request-b'];
@@ -1428,6 +1581,7 @@ test('同 reservation/operation 的並行 paid callback 只有一個 claim winne
     pid: 558,
   });
   const title = primaryTracer.titleFor('ignored');
+  approvePreviewRequests(primaryTracer, [{ api: 'v2-audio', title }]);
   const ledgerRequestId = primaryTracer.prepare({ api: 'v2-audio', title });
   const competingTracer = createHeyGenRequestTracer({
     projectDir: fixture.root,
@@ -1478,6 +1632,10 @@ test('不同合法 operation 與不同 segment 各自取得一個 claim', async 
   const segmentB = { index: 1, total: 2, role: 'B' };
   const titleA = tracer.titleFor('ignored', segmentA);
   const titleB = tracer.titleFor('ignored', segmentB);
+  approvePreviewRequests(tracer, [
+    { api: 'v2-audio', title: titleA, segment: segmentA },
+    { api: 'v2-audio', title: titleB, segment: segmentB },
+  ]);
   const requestA = tracer.prepare({ api: 'v2-audio', title: titleA, segment: segmentA });
   const requestB = tracer.prepare({ api: 'v2-audio', title: titleB, segment: segmentB });
   const calls = { ttsA: 0, uploadA: 0, ttsB: 0 };
@@ -1526,6 +1684,7 @@ test('paid callback crash 後同 operation retry fail closed', async (t) => {
     pid: 560,
   });
   const title = tracer.titleFor('ignored');
+  approvePreviewRequests(tracer, [{ api: 'v2-audio', title }]);
   const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
   let paidCalls = 0;
   const invoke = () => runVerifiedPaidStep({
@@ -1557,6 +1716,7 @@ test('同一 pre-reserved create 並行 submit 只有一個 fetch winner', async
     pid: 561,
   });
   const title = primaryTracer.titleFor('ignored');
+  approvePreviewRequests(primaryTracer, [{ api: 'v3-text', title }]);
   const ledgerRequestId = primaryTracer.prepare({ api: 'v3-text', title });
   const competingTracer = createHeyGenRequestTracer({
     projectDir: fixture.root,
@@ -1801,6 +1961,7 @@ test('fake transport 觀察到 fetch 前 ledger 已是 prepared，成功後才�
     motionPrompt: 'move',
     expressiveness: 'medium',
   });
+  approvePreviewRequests(tracer, [{ api: 'v3-text', title: payload.title }]);
   let fetchCalls = 0;
   const result = await submitTracedHeyGenCreate({
     fetchImpl: async (_url, options) => {
@@ -1838,6 +1999,7 @@ test('預先保留的 audio request 可被 create 使用一次，不一致時 fe
     pid: 58,
   });
   const title = tracer.titleFor('ignored');
+  approvePreviewRequests(tracer, [{ api: 'v2-audio', title }]);
   const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
   const payload = buildAudioDrivenPayload({
     audioAssetId: 'fixture-audio',
@@ -1973,7 +2135,7 @@ test('run.js 的 audio/v2-text/v3-text create paths 都只走共同 trace gate',
   assert.match(source, /createHeyGenRequestPreview\(\{/);
   assert.match(source, /createHeyGenRequestTracer\(\{/);
   assert.match(source, /const HEYGEN_TRACE_ENV = snapshotHeyGenTraceEnvironment\(process\.env\)/);
-  assert.equal((source.match(/env: HEYGEN_TRACE_ENV/g) || []).length, 2);
+  assert.equal((source.match(/env: HEYGEN_TRACE_ENV/g) || []).length, 3);
   assert.match(source, /loadProviderSecrets\(\{ env: process\.env \}\)/);
   assert.doesNotMatch(source, /require\(["']dotenv["']\)\.config\(\)/);
   assert.match(source, /submitTracedHeyGenCreate\(\{/);
@@ -2021,6 +2183,13 @@ test('run.js 的 audio/v2-text/v3-text create paths 都只走共同 trace gate',
 
   const mainSource = source.slice(source.indexOf('async function main()'));
   assert.ok(mainSource.indexOf('if (DRY_RUN)') >= 0);
+  assert.ok(mainSource.indexOf('buildHeyGenDryRunPlan(previewPlanner)') >= 0);
+  assert.ok(mainSource.indexOf('authorizeHeyGenPreviewPlan({') >= 0);
+  assert.ok(
+    mainSource.indexOf('authorizeHeyGenPreviewPlan({')
+      < mainSource.indexOf('loadProviderEnvironment()'),
+  );
+  assert.match(mainSource, /previewApproval: paidPreviewApproval/);
   assert.ok(mainSource.indexOf('if (DRY_RUN)') < mainSource.indexOf('openSync(lockFile, "wx")'));
   assert.ok(
     mainSource.indexOf('if (DRY_RUN)') < mainSource.indexOf('loadProviderEnvironment()'),

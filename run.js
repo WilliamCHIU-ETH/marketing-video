@@ -6,16 +6,19 @@
 // ─────────────────────────────────────────
 
 const { execSync, execFileSync } = require("child_process");
+const { createHash } = require("crypto");
 const { readFileSync, writeFileSync, existsSync, openSync, closeSync } = require("fs");
 const { resolve } = require("path");
 const OpenCC = require("opencc-js");
 const { cleanStaleStaging, backupJob } = require("./scripts/public-utils");
 const {
+  authorizeHeyGenPreviewPlan,
   buildAudioDrivenPayload,
   buildTextDrivenV2Payload,
   buildTextDrivenV3Payload,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  createHeyGenPreviewPlan,
   loadProviderSecrets,
   runVerifiedPaidStep,
   snapshotHeyGenTraceEnvironment,
@@ -68,8 +71,14 @@ const SKIP_GENERATE = process.argv.includes("--skip-generate");
 //   手動執行可傳 --project-id / --revision / --run-id，或 --experiment / --revision；
 //   沒有完整 identity 一律 fail closed，不允許匿名或 timestamp/PID 充當付費 request identity。
 //   --heygen-title 只供 Project context 作人類可讀 prefix；EXP 固定使用測試用EXP-NNN-VN。
+//   手動 paid run 必須先檢查 --dry-run 輸出的 approvalId，再用 --approve-preview=<id> 明確核准；
+//   managed run 仍會 build 同一份 preview，WORKSPACE_RUN_TOKEN 只作 approval source，不能取代 proof。
 const NO_SPEED = process.argv.includes("--no-speed");
 const DRY_RUN = process.argv.includes("--dry-run");
+const APPROVE_PREVIEW_ARG = process.argv.find((arg) => arg.startsWith("--approve-preview="));
+const PROVIDED_PREVIEW_APPROVAL = APPROVE_PREVIEW_ARG
+  ? APPROVE_PREVIEW_ARG.slice("--approve-preview=".length)
+  : null;
 
 // 焦點股日報：2026-08-13 使用者定案「之後只要出客製版，不用多出投廣套框版」。
 // 所以預設不出投廣版；真的要的時候加 --with-ad。
@@ -520,6 +529,7 @@ async function submitHeyGenCreate({
   api,
   payload,
   segment = null,
+  payloadMetadata = {},
   ledgerRequestId = null,
 }) {
   const tracer = requireHeyGenRequestTracer();
@@ -534,6 +544,7 @@ async function submitHeyGenCreate({
       api,
       payload,
       segment,
+      payloadMetadata,
       ledgerRequestId,
       onPrepared: ({ title }) => log(`HeyGen Dashboard 名稱：${title}`),
     });
@@ -551,6 +562,7 @@ async function createHeyGenVideo(
   title,
   segment = null,
   ledgerRequestId = null,
+  payloadMetadata = audioDryRunMetadata(),
 ) {
   log(`呼叫 HeyGen Avatar IV（avatar: ${avatarId}、audio_asset_id: ${audioAssetId}）`);
 
@@ -569,6 +581,7 @@ async function createHeyGenVideo(
     api: "v2-audio",
     payload,
     segment,
+    payloadMetadata,
     ledgerRequestId,
   });
 }
@@ -593,6 +606,7 @@ async function createHeyGenVideoTextDrivenV2(scriptText, avatarId, voiceId, titl
     api: "v2-text",
     payload,
     segment,
+    payloadMetadata: textDryRunMetadata(scriptText, "v2-text"),
   });
 }
 
@@ -620,6 +634,7 @@ async function createHeyGenVideoTextDrivenV3(scriptText, avatarId, voiceId, titl
     api: "v3-text",
     payload,
     segment,
+    payloadMetadata: textDryRunMetadata(scriptText, "v3-text"),
   });
 }
 
@@ -802,29 +817,39 @@ async function runDualPath(segments, pair, outputMp4Path) {
     const tracedSegments = segments.map((seg, i) => {
       const traceSegment = { index: i, total: segments.length, role: seg.role };
       const heygenTitle = tracer.titleFor("marketing-auto-dual", traceSegment);
+      const providerScript = tradToSimpConverter(seg.text);
+      const payloadMetadata = audioDryRunMetadata(providerScript);
       const ledgerRequestId = tracer.prepare({
         api: "v2-audio",
         title: heygenTitle,
         segment: traceSegment,
+        payloadMetadata,
       });
-      return { ...seg, traceSegment, heygenTitle, ledgerRequestId };
+      return {
+        ...seg,
+        traceSegment,
+        heygenTitle,
+        providerScript,
+        payloadMetadata,
+        ledgerRequestId,
+      };
     });
     // Step 1: MiniMax 配音 + upload HeyGen（平行）
     log("\n--- Step 1: MiniMax 配音 + upload HeyGen（平行） ---");
     const audioAssets = await Promise.all(
       tracedSegments.map(async (seg, i) => {
-        const simpText = tradToSimpConverter(seg.text);
         const paidStep = {
           tracer,
           ledgerRequestId: seg.ledgerRequestId,
           api: "v2-audio",
           title: seg.heygenTitle,
           segment: seg.traceSegment,
+          payloadMetadata: seg.payloadMetadata,
         };
         const mp3 = await runVerifiedPaidStep({
           ...paidStep,
           operationKey: "minimax-tts",
-          paidStep: () => minimaxTTS(simpText, DUAL_VOICES[seg.role]),
+          paidStep: () => minimaxTTS(seg.providerScript, DUAL_VOICES[seg.role]),
         });
         const mp3Path = path.resolve(tmpDir, `seg-${i + 1}-${seg.role}.mp3`);
         fs.writeFileSync(mp3Path, mp3);
@@ -848,6 +873,7 @@ async function runDualPath(segments, pair, outputMp4Path) {
           seg.heygenTitle,
           seg.traceSegment,
           seg.ledgerRequestId,
+          seg.payloadMetadata,
         );
         log(`  段 ${i + 1} [${seg.role}] video_id = ${request.videoId}`);
         return { ...seg, ...request };
@@ -898,12 +924,18 @@ async function runDualPath(segments, pair, outputMp4Path) {
   log(`✅ 雙人 concat 完成 → ${outputMp4Path}`);
 }
 
-function audioDryRunMetadata() {
+function scriptSha256(scriptText) {
+  return `sha256:${createHash("sha256").update(String(scriptText || "")).digest("hex")}`;
+}
+
+function audioDryRunMetadata(scriptText) {
   return {
     mode: "audio-driven",
     aspectRatio: "9:16",
     resolution: "1080p",
     expressiveness: "medium",
+    scriptCharacters: Array.from(String(scriptText || "")).length,
+    scriptSha256: scriptSha256(scriptText),
     avatarIdPresent: true,
     audioAssetIdSource: "minimax_then_heygen_upload",
     motionPromptPresent: Boolean(HEYGEN_MOTION_PROMPT),
@@ -918,6 +950,7 @@ function textDryRunMetadata(scriptText, api) {
     expressiveness: HEYGEN_EXPRESSIVENESS,
     engine: api === "v3-text" ? "avatar_iv" : "v2-default",
     scriptCharacters: Array.from(String(scriptText || "")).length,
+    scriptSha256: scriptSha256(scriptText),
     avatarIdPresent: true,
     voiceIdPresent: true,
     motionPromptPresent: Boolean(HEYGEN_MOTION_PROMPT),
@@ -927,13 +960,13 @@ function textDryRunMetadata(scriptText, api) {
   };
 }
 
-function previewAudioRequest(planner, fallbackTitle, segment = null) {
+function previewAudioRequest(planner, fallbackTitle, segment = null, scriptText = "") {
   const title = planner.titleFor(fallbackTitle, segment);
   return planner.preview({
     api: "v2-audio",
     title,
     segment,
-    payloadMetadata: audioDryRunMetadata(),
+    payloadMetadata: audioDryRunMetadata(scriptText),
   });
 }
 
@@ -961,7 +994,12 @@ function buildHeyGenDryRunPlan(planner) {
     return segments.map((segment, index) => {
       const traceSegment = { index, total: segments.length, role: segment.role };
       return USE_MINIMAX
-        ? previewAudioRequest(planner, "marketing-auto-dual", traceSegment)
+        ? previewAudioRequest(
+          planner,
+          "marketing-auto-dual",
+          traceSegment,
+          tradToSimpConverter(segment.text),
+        )
         : previewTextRequest(planner, segment.text, "marketing-auto-dual", traceSegment);
     });
   }
@@ -982,7 +1020,7 @@ function buildHeyGenDryRunPlan(planner) {
   }
   return [
     USE_MINIMAX
-      ? previewAudioRequest(planner, "marketing-auto")
+      ? previewAudioRequest(planner, "marketing-auto", null, tradToSimpConverter(cleanedScript))
       : previewTextRequest(planner, cleanedScript, "marketing-auto"),
   ];
 }
@@ -997,11 +1035,13 @@ function runHeyGenDryRun() {
     env: HEYGEN_TRACE_ENV,
   });
   const requests = buildHeyGenDryRunPlan(planner);
+  const previewPlan = createHeyGenPreviewPlan(requests);
   console.log(JSON.stringify({
     dryRun: true,
     trace: planner.context,
     ledgerPath: planner.ledgerPath,
     requestCount: requests.length,
+    approvalId: previewPlan.approvalId,
     requests,
   }, null, 2));
 }
@@ -1017,6 +1057,20 @@ async function main() {
   if (DRY_RUN) {
     runHeyGenDryRun();
     return;
+  }
+  let paidPreviewApproval = null;
+  if (!SKIP_GENERATE && !RENDER_ONLY) {
+    const previewPlanner = createHeyGenRequestPreview({
+      projectDir: PROJECT_DIR,
+      argv: process.argv.slice(2),
+      env: HEYGEN_TRACE_ENV,
+    });
+    const previewRequests = buildHeyGenDryRunPlan(previewPlanner);
+    paidPreviewApproval = authorizeHeyGenPreviewPlan({
+      requests: previewRequests,
+      context: previewPlanner.context,
+      providedApprovalId: PROVIDED_PREVIEW_APPROVAL,
+    });
   }
   loadProviderEnvironment();
   // 0. 防止重複執行
@@ -1086,6 +1140,7 @@ async function main() {
       projectDir: PROJECT_DIR,
       argv: process.argv.slice(2),
       env: HEYGEN_TRACE_ENV,
+      previewApproval: paidPreviewApproval,
     });
     log(`HeyGen trace：${JSON.stringify(heygenRequestTracer.context)}`);
     log(`HeyGen ledger：${heygenRequestTracer.ledgerPath}`);
@@ -1344,9 +1399,14 @@ async function generateHeygenVideo(heygenPath) {
       // Reserve the exact create identity before MiniMax TTS or HeyGen upload can spend anything.
       const tracer = requireHeyGenRequestTracer();
       const heygenTitle = tracer.titleFor("marketing-auto");
-      const ledgerRequestId = tracer.prepare({ api: "v2-audio", title: heygenTitle });
-      log(`清洗後腳本（繁）：\n  ${cleanedScript}`);
       const simpScript = tradToSimpConverter(cleanedScript);
+      const payloadMetadata = audioDryRunMetadata(simpScript);
+      const ledgerRequestId = tracer.prepare({
+        api: "v2-audio",
+        title: heygenTitle,
+        payloadMetadata,
+      });
+      log(`清洗後腳本（繁）：\n  ${cleanedScript}`);
       log(`簡體版（給 MiniMax）：\n  ${simpScript}`);
       log(`抽到 avatar：${avatar.id}（${avatar.gender === "male" ? "男" : "女"}）`);
 
@@ -1355,6 +1415,7 @@ async function generateHeygenVideo(heygenPath) {
         ledgerRequestId,
         api: "v2-audio",
         title: heygenTitle,
+        payloadMetadata,
       };
       const audioBuffer = await runVerifiedPaidStep({
         ...paidStep,
@@ -1379,6 +1440,7 @@ async function generateHeygenVideo(heygenPath) {
         heygenTitle,
         null,
         ledgerRequestId,
+        payloadMetadata,
       );
       const videoUrl = await pollHeyGenStatus(request);
       await downloadVideo(videoUrl, heygenPath);

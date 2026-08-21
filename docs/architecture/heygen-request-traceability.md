@@ -17,6 +17,9 @@ prove that paid generation succeeds or that HeyGen reports the final credit char
 
 Zero matches, duplicate matches, malformed identity, or containment failure stops before the create
 request. The token is only a lookup capability; it is not written to the title or ledger.
+It is also only the managed approval source: `run.js` still builds the same deterministic request
+preview plan used by `--dry-run`, verifies every request digest, and persists that matching proof before
+any MiniMax TTS, HeyGen upload, or HeyGen create claim. The token alone cannot replace preview proof.
 
 ## Dashboard title
 
@@ -37,6 +40,12 @@ may use `--heygen-title` as a readable prefix, while Project/Run identity remain
 Manual CLI invocation must supply all of `--project-id`, `--revision`, and `--run-id`, or both
 `--experiment` and `--revision`. Missing or mixed identity fails before workspace mutation, MiniMax,
 HeyGen upload, or create. Timestamp and PID are not accepted as paid-request identity.
+
+Manual paid execution is a two-command approval flow. First run the exact command with `--dry-run`,
+inspect the request list, and copy its top-level `approvalId`. Then remove `--dry-run` and add
+`--approve-preview=<approvalId>`. A missing, stale, or mismatched ID stops before dotenv, provider-key
+reads, workspace lock, ledger creation, or paid work. Any change to trace, API, endpoint, title, segment,
+script digest, or other payload-safe metadata produces a different approval ID.
 
 CLI arguments and inherited process-environment trace settings are captured once when `run.js` starts,
 and that immutable snapshot is shared by dry-run and paid execution. For direct CLI invocation, the
@@ -92,12 +101,14 @@ The ledger stores only the minimum correlation evidence:
 - Project/Revision/Run or explicit experiment identity;
 - local request ID, API path kind, exact Dashboard title, canonical logical key, and optional segment;
 - immutable paid-operation claim ID, operation key, and claim timestamp;
+- matching preview approval ID, per-request digest, approval source, safe metadata, and verification time;
 - `prepared`, `submitted`, `completed`, or `failed` state;
 - provider video ID after submission;
 - duration and credit values only when present in the provider status response.
 
 Script text, audio asset IDs, avatar IDs, API keys, workspace tokens, and provider response bodies are
-not stored. When HeyGen does not return credits, the ledger records `credits: null` with explicit
+not stored. A SHA-256 script digest and character count bind the approved preview without persisting the
+script itself. When HeyGen does not return credits, the ledger records `credits: null` with explicit
 `creditsEvidence`; it must not estimate a charge.
 
 The canonical key hashes trace identity, API kind, and normalized segment identity; it deliberately
@@ -118,7 +129,8 @@ must inspect the ledger and provider Dashboard instead of risking a duplicate ch
 keys. It executes before dotenv loading, provider-key reads, workspace lock/owner writes, staging
 cleanup, child processes, MiniMax TTS, HeyGen upload, create, poll, or download. It prints JSON
 containing the exact create endpoint, API kind, normalized segment, Dashboard title, canonical logical
-key, trace, the planned ledger path, and allowlisted payload-safe metadata. It never prints script
+key, trace, the planned ledger path, each request's preview digest, the whole plan's approval ID, and
+allowlisted payload-safe metadata. It never prints script
 text, avatar/voice/audio IDs, keys, or provider response data.
 
 The paid path later loads `.env` into an isolated object and copies only the three provider secrets;
@@ -129,6 +141,10 @@ provider secrets.
 Dry-run resolves identity and plans requests through a read-only context. It never creates `DATA_DIR`,
 provider-ledger directories, ledger files, temporary files, or locks, and it never rewrites or renames
 an existing ledger. A later real run is therefore not blocked or otherwise mutated by its preview.
+Only the paid run writes proof: its immutable `prepared` event contains the already-verified approval ID,
+matching request digest, safe metadata, approval source, and verification time. Every paid-operation
+claim durably reloads and recomputes that proof before its callback or `fetch`; missing or changed proof
+fails closed.
 
 ## Validation boundary
 

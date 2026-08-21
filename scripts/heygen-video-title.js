@@ -23,6 +23,7 @@ const DRY_RUN_METADATA_KEYS = new Set([
   'expressiveness',
   'engine',
   'scriptCharacters',
+  'scriptSha256',
   'avatarIdPresent',
   'voiceIdPresent',
   'audioAssetIdSource',
@@ -228,7 +229,8 @@ function reservationKey(context, api, segment = null) {
 
 function safeDryRunMetadata(metadata) {
   const safe = {};
-  for (const [key, value] of Object.entries(metadata || {})) {
+  for (const key of Object.keys(metadata || {}).sort()) {
+    const value = metadata[key];
     if (!DRY_RUN_METADATA_KEYS.has(key)) {
       throw new Error(`HeyGen dry-run metadata 欄位不允許：${key}`);
     }
@@ -238,6 +240,92 @@ function safeDryRunMetadata(metadata) {
     safe[key] = value;
   }
   return safe;
+}
+
+function sha256Json(value) {
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+}
+
+function canonicalPreviewRequest(request) {
+  const api = request?.api;
+  const title = cleanTitle(request?.title);
+  const trace = canonicalTrace(request?.trace);
+  const segment = normalizeSegment(request?.segment || null);
+  const logicalKey = reservationKey(trace, api, segment);
+  if (!title || title !== request.title) throw new Error('HeyGen preview title 不合法');
+  if (request?.operation !== 'video.create'
+      || request?.endpoint !== endpointForApi(api)
+      || request?.logicalKey !== logicalKey) {
+    throw new Error('HeyGen preview request contract 不一致');
+  }
+  return {
+    operation: 'video.create',
+    api,
+    endpoint: endpointForApi(api),
+    logicalKey,
+    trace,
+    title,
+    ...(segment ? { segment } : {}),
+    payloadMetadata: safeDryRunMetadata(request.payloadMetadata),
+  };
+}
+
+function previewRequestDigest(request) {
+  return sha256Json({ schemaVersion: 1, provider: 'heygen', ...canonicalPreviewRequest(request) });
+}
+
+function createHeyGenPreviewPlan(requests) {
+  if (!Array.isArray(requests) || requests.length === 0) {
+    throw new Error('HeyGen preview plan 不可為空');
+  }
+  const logicalKeys = new Set();
+  const normalizedRequests = requests.map((request) => {
+    const canonical = canonicalPreviewRequest(request);
+    if (logicalKeys.has(canonical.logicalKey)) throw new Error('HeyGen preview plan logical request 重複');
+    logicalKeys.add(canonical.logicalKey);
+    return { ...canonical, previewDigest: previewRequestDigest(canonical) };
+  });
+  const approvalId = sha256Json({
+    schemaVersion: 1,
+    provider: 'heygen',
+    requestDigests: normalizedRequests.map((request) => request.previewDigest),
+  });
+  return Object.freeze({
+    schemaVersion: 1,
+    provider: 'heygen',
+    approvalId,
+    requests: Object.freeze(normalizedRequests.map((request) => Object.freeze(request))),
+  });
+}
+
+function authorizeHeyGenPreviewPlan({ requests, context, providedApprovalId = null }) {
+  const plan = createHeyGenPreviewPlan(requests);
+  const expectedTrace = canonicalTrace(context);
+  if (plan.requests.some((request) => JSON.stringify(request.trace) !== JSON.stringify(expectedTrace))) {
+    throw new Error('HeyGen preview plan 與 paid request trace 不一致');
+  }
+  const managed = context?.source === 'workspace-run-token';
+  if (!managed && providedApprovalId !== plan.approvalId) {
+    throw new Error(
+      'HeyGen paid request 缺少 matching dry-run approval；請先執行 exact --dry-run 並檢查輸出的 approvalId',
+    );
+  }
+  return Object.freeze({
+    ...plan,
+    approvalSource: managed ? 'managed-workspace-submit' : 'explicit-dry-run-token',
+  });
+}
+
+function validateAuthorizedPreviewPlan(approval, trace) {
+  if (!approval) return null;
+  const plan = createHeyGenPreviewPlan(approval.requests);
+  if (approval.schemaVersion !== 1 || approval.provider !== 'heygen'
+      || approval.approvalId !== plan.approvalId
+      || !['managed-workspace-submit', 'explicit-dry-run-token'].includes(approval.approvalSource)
+      || plan.requests.some((request) => JSON.stringify(request.trace) !== JSON.stringify(trace))) {
+    throw new Error('HeyGen preview approval contract 不一致');
+  }
+  return { ...plan, approvalSource: approval.approvalSource };
 }
 
 function isWithin(parent, child) {
@@ -643,7 +731,7 @@ function requestPlanner(resolved, argv, env) {
       const safeTitle = cleanTitle(title);
       if (!safeTitle || safeTitle !== title) throw new Error('HeyGen payload title 未通過 dry-run 正規化');
       const normalizedSegment = normalizeSegment(segment);
-      return {
+      const preview = {
         dryRun: true,
         operation: 'video.create',
         api,
@@ -654,6 +742,7 @@ function requestPlanner(resolved, argv, env) {
         ...(normalizedSegment ? { segment: normalizedSegment } : {}),
         payloadMetadata: safeDryRunMetadata(payloadMetadata),
       };
+      return { ...preview, previewDigest: previewRequestDigest(preview) };
     },
   };
 }
@@ -684,6 +773,7 @@ function createHeyGenRequestTracer(options) {
   const pid = options.pid || process.pid;
   const managed = resolveHeyGenRequestContext(options);
   const trace = canonicalTrace(managed.context);
+  let previewApproval = validateAuthorizedPreviewPlan(options.previewApproval, trace);
   let dataRootIdentity = managed.dataRootIdentity || null;
   if (managed.configuredDataDir) {
     const dataPlan = validateDirectoryCreationPath({
@@ -998,6 +1088,7 @@ function createHeyGenRequestTracer(options) {
         throw new Error('provider ledger prepared event contract 不相容');
       }
       endpointForApi(request.api);
+      validateDurablePreviewProof(request, false);
       if (requests.some((item) => item.requestId === request.requestId
           || item.logicalKey === request.logicalKey)) {
         throw new Error('provider ledger immutable event 與既有 reservation 衝突');
@@ -1010,6 +1101,7 @@ function createHeyGenRequestTracer(options) {
           || event.logicalKey !== request.logicalKey || !cleanTitle(event.claimId)) {
         throw new Error('provider ledger immutable operation claim 不相容');
       }
+      validateDurablePreviewProof(request, true);
       if (snapshot.operationClaims.some((claim) => claim.requestId === event.requestId
           && claim.operationKey === operationKey)) {
         throw new Error('provider ledger paid operation claim 重複');
@@ -1067,6 +1159,8 @@ function createHeyGenRequestTracer(options) {
           || requestIds.has(request.requestId) || logicalKeys.has(request.logicalKey)) {
         throw new Error('既有 provider ledger reservation identity 不相容');
       }
+      safeDryRunMetadata(request.payloadMetadata || {});
+      validateDurablePreviewProof(request, false);
       requestIds.add(request.requestId);
       logicalKeys.add(request.logicalKey);
     }
@@ -1080,6 +1174,7 @@ function createHeyGenRequestTracer(options) {
           || baseClaims.has(key) || claimIds.has(claim.claimId)) {
         throw new Error('既有 provider ledger operation claim 不相容');
       }
+      validateDurablePreviewProof(request, true);
       baseClaims.add(key);
       claimIds.add(claim.claimId);
     }
@@ -1213,16 +1308,55 @@ function createHeyGenRequestTracer(options) {
     return request;
   }
 
-  function requireExactPreparedRequest(requestId, { api, title, segment = null }) {
+  function validateDurablePreviewProof(request, required) {
+    const proof = request?.previewProof;
+    if (!proof) {
+      if (required) throw new Error('paid operation 缺少 durable matching preview proof');
+      return null;
+    }
+    const reconstructed = {
+      operation: request.operation,
+      api: request.api,
+      endpoint: endpointForApi(request.api),
+      logicalKey: request.logicalKey,
+      trace,
+      title: request.title,
+      ...(request.segment ? { segment: request.segment } : {}),
+      payloadMetadata: request.payloadMetadata || {},
+    };
+    const digest = previewRequestDigest(reconstructed);
+    const planRequestDigests = proof?.planRequestDigests;
+    const recomputedApprovalId = Array.isArray(planRequestDigests)
+      ? sha256Json({ schemaVersion: 1, provider: 'heygen', requestDigests: planRequestDigests })
+      : null;
+    if (proof.schemaVersion !== 1
+        || !/^sha256:[0-9a-f]{64}$/.test(proof.approvalId || '')
+        || proof.previewDigest !== digest
+        || recomputedApprovalId !== proof.approvalId
+        || !planRequestDigests.includes(digest)
+        || new Set(planRequestDigests).size !== planRequestDigests.length
+        || !['managed-workspace-submit', 'explicit-dry-run-token'].includes(proof.approvalSource)
+        || !cleanTitle(proof.verifiedAt)) {
+      throw new Error('paid operation durable preview proof 與 prepared request 不一致');
+    }
+    return proof;
+  }
+
+  function requireExactPreparedRequest(
+    requestId,
+    { api, title, segment = null, payloadMetadata = {} },
+  ) {
     const request = requestById(requestId);
     const safeTitle = cleanTitle(title);
     const normalizedSegment = normalizeSegment(segment);
     const logicalKey = reservationKey(managed.context, api, normalizedSegment);
+    const safeMetadata = safeDryRunMetadata(payloadMetadata);
     if (request.status !== 'prepared'
         || request.api !== api
         || request.logicalKey !== logicalKey
         || request.title !== safeTitle
         || safeTitle !== title
+        || !sameTrace(request.payloadMetadata || {}, safeMetadata)
         || !sameTrace(request.segment || null, normalizedSegment)) {
       throw new Error('HeyGen 已保留 request 與 create payload 不一致');
     }
@@ -1232,18 +1366,40 @@ function createHeyGenRequestTracer(options) {
   const planner = requestPlanner({ ...managed, ledgerPath }, argv, env);
   return {
     ...planner,
-    prepare({ api, title, segment = null }) {
+    approvePreview({ requests, providedApprovalId = null }) {
+      previewApproval = authorizeHeyGenPreviewPlan({
+        requests,
+        context: managed.context,
+        providedApprovalId,
+      });
+      return JSON.parse(JSON.stringify(previewApproval));
+    },
+    prepare({ api, title, segment = null, payloadMetadata = {} }) {
       return withLedgerLock(() => {
         endpointForApi(api);
         const safeTitle = cleanTitle(title);
         if (!safeTitle || safeTitle !== title) throw new Error('HeyGen payload title 未通過 dry-run 正規化');
         const normalizedSegment = normalizeSegment(segment);
         const logicalKey = reservationKey(managed.context, api, normalizedSegment);
+        const safeMetadata = safeDryRunMetadata(payloadMetadata);
         const previous = ledger.requests.find((item) => item.logicalKey === logicalKey);
         if (previous) {
           throw new Error(
             `HeyGen logical request 已有 ledger 紀錄（${previous.status}），拒絕自動重送：${logicalKey}`,
           );
+        }
+        const preview = planner.preview({
+          api,
+          title: safeTitle,
+          segment: normalizedSegment,
+          payloadMetadata: safeMetadata,
+        });
+        const approvedRequest = previewApproval?.requests.find((request) => (
+          request.previewDigest === preview.previewDigest
+          && request.logicalKey === logicalKey
+        ));
+        if (previewApproval && !approvedRequest) {
+          throw new Error('HeyGen paid request 與 approved dry-run preview 不一致');
         }
         const requestId = randomUUID();
         if (!requestId || ledger.requests.some((item) => item.requestId === requestId)) {
@@ -1257,6 +1413,17 @@ function createHeyGenRequestTracer(options) {
           logicalKey,
           title: safeTitle,
           ...(normalizedSegment ? { segment: normalizedSegment } : {}),
+          payloadMetadata: safeMetadata,
+          ...(approvedRequest ? {
+            previewProof: {
+              schemaVersion: 1,
+              approvalId: previewApproval.approvalId,
+              previewDigest: approvedRequest.previewDigest,
+              planRequestDigests: previewApproval.requests.map((request) => request.previewDigest),
+              approvalSource: previewApproval.approvalSource,
+              verifiedAt: preparedAt,
+            },
+          } : {}),
           status: 'prepared',
           preparedAt,
           providerVideoId: null,
@@ -1275,15 +1442,22 @@ function createHeyGenRequestTracer(options) {
         return requestId;
       });
     },
-    verifyPrepared(requestId, { api, title, segment = null }) {
+    verifyPrepared(requestId, { api, title, segment = null, payloadMetadata = {} }) {
       return withLedgerLock(() => {
-        requireExactPreparedRequest(requestId, { api, title, segment });
+        requireExactPreparedRequest(requestId, { api, title, segment, payloadMetadata });
         return requestId;
       });
     },
-    claimPreparedOperation(requestId, { api, title, segment = null, operationKey }) {
+    claimPreparedOperation(
+      requestId,
+      { api, title, segment = null, payloadMetadata = {}, operationKey },
+    ) {
       return withLedgerLock(() => {
-        const request = requireExactPreparedRequest(requestId, { api, title, segment });
+        const request = requireExactPreparedRequest(
+          requestId,
+          { api, title, segment, payloadMetadata },
+        );
+        validateDurablePreviewProof(request, true);
         const normalizedOperationKey = paidOperationKey(operationKey);
         const previous = ledger.operationClaims.find((claim) => (
           claim.requestId === requestId && claim.operationKey === normalizedOperationKey
@@ -1449,6 +1623,7 @@ async function runVerifiedPaidStep({
   api,
   title,
   segment = null,
+  payloadMetadata = {},
   operationKey,
   paidStep,
 }) {
@@ -1460,6 +1635,7 @@ async function runVerifiedPaidStep({
     api,
     title,
     segment,
+    payloadMetadata,
     operationKey,
   });
   return paidStep();
@@ -1473,6 +1649,7 @@ async function submitTracedHeyGenCreate({
   api,
   payload,
   segment = null,
+  payloadMetadata = {},
   ledgerRequestId: reservedLedgerRequestId = null,
   onPrepared = null,
 }) {
@@ -1490,8 +1667,11 @@ async function submitTracedHeyGenCreate({
     throw new Error('HeyGen 預先保留 request ID 不合法');
   }
   const ledgerRequestId = hasReservation
-    ? tracer.verifyPrepared(reservedLedgerRequestId, { api, title: payload.title, segment })
-    : tracer.prepare({ api, title: payload.title, segment });
+    ? tracer.verifyPrepared(
+      reservedLedgerRequestId,
+      { api, title: payload.title, segment, payloadMetadata },
+    )
+    : tracer.prepare({ api, title: payload.title, segment, payloadMetadata });
   if (typeof tracer.verifyPrepared !== 'function'
       || typeof tracer.claimPreparedOperation !== 'function') {
     throw new Error('HeyGen tracer 缺少 durable reservation/operation gate');
@@ -1503,6 +1683,7 @@ async function submitTracedHeyGenCreate({
     api,
     title: payload.title,
     segment,
+    payloadMetadata,
     operationKey: 'heygen-video-create',
   });
   let response;
@@ -1537,12 +1718,14 @@ async function submitTracedHeyGenCreate({
 }
 
 module.exports = {
+  authorizeHeyGenPreviewPlan,
   buildAudioDrivenPayload,
   buildTextDrivenV2Payload,
   buildTextDrivenV3Payload,
   cleanTitle,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  createHeyGenPreviewPlan,
   endpointForApi,
   findManagedProjectContext,
   loadProviderSecrets,
