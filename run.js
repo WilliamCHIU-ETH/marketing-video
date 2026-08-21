@@ -16,6 +16,7 @@ const {
   buildTextDrivenV3Payload,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  runVerifiedPaidStep,
   submitTracedHeyGenCreate,
 } = require("./scripts/heygen-video-title");
 
@@ -810,10 +811,25 @@ async function runDualPath(segments, pair, outputMp4Path) {
     const audioAssets = await Promise.all(
       tracedSegments.map(async (seg, i) => {
         const simpText = tradToSimpConverter(seg.text);
-        const mp3 = await minimaxTTS(simpText, DUAL_VOICES[seg.role]);
+        const paidStep = {
+          tracer,
+          ledgerRequestId: seg.ledgerRequestId,
+          api: "v2-audio",
+          title: seg.heygenTitle,
+          segment: seg.traceSegment,
+        };
+        const mp3 = await runVerifiedPaidStep({
+          ...paidStep,
+          operationKey: "minimax-tts",
+          paidStep: () => minimaxTTS(simpText, DUAL_VOICES[seg.role]),
+        });
         const mp3Path = path.resolve(tmpDir, `seg-${i + 1}-${seg.role}.mp3`);
         fs.writeFileSync(mp3Path, mp3);
-        const assetId = await heygenUploadAudio(mp3);
+        const assetId = await runVerifiedPaidStep({
+          ...paidStep,
+          operationKey: "heygen-audio-upload",
+          paidStep: () => heygenUploadAudio(mp3),
+        });
         log(`  段 ${i + 1} [${seg.role}] mp3 + upload OK → ${assetId}`);
         return { ...seg, assetId };
       })
@@ -1329,12 +1345,26 @@ async function generateHeygenVideo(heygenPath) {
       log(`簡體版（給 MiniMax）：\n  ${simpScript}`);
       log(`抽到 avatar：${avatar.id}（${avatar.gender === "male" ? "男" : "女"}）`);
 
-      const audioBuffer = await minimaxTTS(simpScript, SOLO_VOICES[avatar.gender]);
+      const paidStep = {
+        tracer,
+        ledgerRequestId,
+        api: "v2-audio",
+        title: heygenTitle,
+      };
+      const audioBuffer = await runVerifiedPaidStep({
+        ...paidStep,
+        operationKey: "minimax-tts",
+        paidStep: () => minimaxTTS(simpScript, SOLO_VOICES[avatar.gender]),
+      });
       const minimaxAudioPath = resolve(PROJECT_DIR, "public/minimax.mp3");
       writeFileSync(minimaxAudioPath, audioBuffer);
       log(`音檔備份 → ${minimaxAudioPath}`);
 
-      const audioAssetId = await heygenUploadAudio(audioBuffer);
+      const audioAssetId = await runVerifiedPaidStep({
+        ...paidStep,
+        operationKey: "heygen-audio-upload",
+        paidStep: () => heygenUploadAudio(audioBuffer),
+      });
 
       log("⏳ 正在呼叫 HeyGen，請勿重複執行此腳本...");
       log("   預計等待 3-5 分鐘，請耐心等候 ☕");

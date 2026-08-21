@@ -40,20 +40,50 @@ HeyGen upload, or create. Timestamp and PID are not accepted as paid-request ide
 ## Provider ledger
 
 The complete payload is built and its non-empty title plus canonical logical key are durably recorded
-before `fetch`. Managed runs write `provider-ledger.json` beside `job.json`; explicit CLI runs write under
-`DATA_DIR/provider-ledgers/`. Both locations are runtime data and remain outside Git. `DATA_DIR`, the
-ledger directory, identity files, and the ledger file must be ordinary non-symlink filesystem nodes.
-Ledger mutation uses an atomic lock and reloads the on-disk state, so a second process fails closed
-instead of trusting a stale in-memory copy.
+before `fetch`. Managed and explicit Project invocations derive the same ledger filename from the full
+canonical Project/Revision/Run trace and write under `DATA_DIR/provider-ledgers/`. The entry method and
+mutable title are not part of that namespace, so either managed/manual entry order encounters the same
+reservation before provider work. Experiment ledgers remain deterministic for their EXP/Revision pair.
+These files are runtime data and remain outside Git. `DATA_DIR`, the ledger directory, identity files,
+and the ledger file must be ordinary non-symlink filesystem nodes. The trace JSON is an immutable header;
+reservations and state transitions are immutable event files in its adjacent event directory. Each event
+is fsynced and published by a no-clobber hard link, then the destination is proved to be the same inode and
+bytes as the verified temporary file. A concurrent destination therefore wins without being overwritten,
+while the current request reloads or fails closed. No mutable JSON snapshot is replaced with POSIX rename.
+
+Ledger access also uses an atomic cooperative lock and reloads the on-disk header plus all events instead
+of trusting stale in-memory state. The tracer pins the real path plus device/inode identity of `DATA_DIR`,
+`provider-ledgers`, the header, and the event directory, then revalidates directory, lock, temporary file,
+event, and ledger containment throughout every read/write cycle. Renaming either root, replacing it with a
+symlink, or replacing a validated temp/header/event stops before paid transport. After any local
+`onPrepared` callback, the exact `prepared` reservation and pinned identities are re-read immediately
+before `fetch`, for both newly created and pre-reserved requests.
 
 For the MiniMax/audio-driven fallback, every exact HeyGen create request is reserved in the ledger
-before MiniMax TTS or HeyGen audio upload starts. The later video-create call must consume that same
-reservation; an identity mismatch fails before `fetch`.
+before MiniMax TTS or HeyGen audio upload starts. The same exact reservation and pinned filesystem
+identities are freshly verified immediately before each MiniMax TTS and HeyGen upload callback. The
+later video-create call must consume and reverify that reservation; an identity mismatch fails before
+the corresponding paid callback or `fetch`.
+
+A `prepared` reservation is not permission to execute a paid operation. Immediately before MiniMax
+TTS, HeyGen audio upload, or HeyGen create transport, the process must durably publish an immutable
+operation claim for the canonical reservation and one allowlisted operation key: `minimax-tts`,
+`heygen-audio-upload`, or `heygen-video-create`. Publishing is no-clobber, so concurrent attempts at
+the same reservation/operation have exactly one winner before provider code starts. Different
+operations on one reservation remain valid, and each multi-speaker segment has its own canonical
+reservation, so legitimate operations and segments do not block one another.
+
+An operation claim is intentionally fail-closed. If the process crashes or loses the provider
+response after the claim, a retry must not execute that same paid operation automatically. The
+operator must reconcile the immutable ledger with the provider Dashboard before deciding whether a
+new Revision is required. This prevents a retry from turning uncertain provider state into a duplicate
+charge; it does not prove the provider received or completed the claimed operation.
 
 The ledger stores only the minimum correlation evidence:
 
 - Project/Revision/Run or explicit experiment identity;
 - local request ID, API path kind, exact Dashboard title, canonical logical key, and optional segment;
+- immutable paid-operation claim ID, operation key, and claim timestamp;
 - `prepared`, `submitted`, `completed`, or `failed` state;
 - provider video ID after submission;
 - duration and credit values only when present in the provider status response.
@@ -67,10 +97,12 @@ does not include the mutable Dashboard title. Changing `--heygen-title` therefor
 duplicate-create guard for the same Project/Revision/Run or EXP/Revision logical request.
 
 `prepared` proves a paid pipeline reservation and the exact future HeyGen payload title, not that
-HeyGen received the request. In the MiniMax fallback it can be written before TTS; in every path it is
-present before the HeyGen create `fetch`. If a process exits before the provider response, the entry
-can remain `prepared`. A later run therefore refuses the same logical request even if its title changes;
-an operator must inspect the ledger and provider Dashboard instead of risking a duplicate charge.
+HeyGen received the request. An operation claim proves only that this system granted one local attempt,
+not that provider transport succeeded. In the MiniMax fallback the reservation can be written before
+TTS; in every path it is present before the HeyGen create `fetch`. If a process exits before the
+provider response, the entry can remain `prepared` with one or more operation claims. A later run
+therefore refuses the same logical request or claimed operation even if its title changes; an operator
+must inspect the ledger and provider Dashboard instead of risking a duplicate charge.
 
 ## Dry-run
 

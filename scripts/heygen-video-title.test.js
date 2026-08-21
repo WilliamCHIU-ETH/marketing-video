@@ -14,6 +14,7 @@ const {
   createHeyGenRequestTracer,
   normalizeExperimentId,
   resolveHeyGenVideoTitle,
+  runVerifiedPaidStep,
   submitTracedHeyGenCreate,
 } = require('./heygen-video-title');
 
@@ -69,7 +70,23 @@ function fixedClock() {
   return () => new Date(values[Math.min(index++, values.length - 1)]);
 }
 
-test('managed WORKSPACE_RUN_TOKEN 唯一解析 Project/Revision/Run 並建立 job-local ledger', (t) => {
+function hookedFs(overrides = {}) {
+  return new Proxy(fs, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function assertProjectLedgerPath(ledgerPath, dataDir) {
+  const dataRoot = fs.existsSync(dataDir) ? fs.realpathSync(dataDir) : path.resolve(dataDir);
+  assert.equal(path.dirname(ledgerPath), path.join(dataRoot, 'provider-ledgers'));
+  assert.match(path.basename(ledgerPath), /^project-[0-9a-f]{64}\.json$/);
+}
+
+test('managed WORKSPACE_RUN_TOKEN 唯一解析 Project/Revision/Run 並使用 canonical ledger', (t) => {
   const fixture = managedFixture(t);
   const tracer = createHeyGenRequestTracer({
     projectDir: fixture.root,
@@ -87,21 +104,37 @@ test('managed WORKSPACE_RUN_TOKEN 唯一解析 Project/Revision/Run 並建立 jo
     revisionNumber: 2,
     runId: fixture.runId,
   });
-  assert.equal(
-    tracer.ledgerPath,
-    path.join(fs.realpathSync(fixture.jobDir), 'provider-ledger.json'),
-  );
+  const manualPreview = createHeyGenRequestPreview({
+    projectDir: fixture.root,
+    argv: [
+      `--project-id=${fixture.projectId}`,
+      '--revision=V2',
+      `--run-id=${fixture.runId}`,
+    ],
+    env: { DATA_DIR: fixture.dataDir },
+  });
+  assert.equal(tracer.ledgerPath, manualPreview.ledgerPath);
+  assertProjectLedgerPath(tracer.ledgerPath, fixture.dataDir);
   assert.equal(
     tracer.titleFor('ignored'),
     `MV-${fixture.projectId}-V2-${fixture.runId}`,
   );
-  assert.equal(fs.statSync(tracer.ledgerPath).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(tracer.ledgerPath).mode & 0o777, 0o400);
 });
 
 test('managed dry-run 只讀取 identity，既有 ledger bytes/mtime 不變且不建立 lock', (t) => {
   const fixture = managedFixture(t);
-  const ledgerPath = path.join(fixture.jobDir, 'provider-ledger.json');
+  const ledgerPath = createHeyGenRequestPreview({
+    projectDir: fixture.root,
+    argv: [
+      `--project-id=${fixture.projectId}`,
+      '--revision=V2',
+      `--run-id=${fixture.runId}`,
+    ],
+    env: { DATA_DIR: fixture.dataDir },
+  }).ledgerPath;
   const ledgerBytes = Buffer.from('{"existing":"operator evidence"}\n');
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
   fs.writeFileSync(ledgerPath, ledgerBytes);
   const fixedMtime = new Date('2026-08-20T02:03:04.000Z');
   fs.utimesSync(ledgerPath, fixedMtime, fixedMtime);
@@ -122,7 +155,10 @@ test('managed dry-run 只讀取 identity，既有 ledger bytes/mtime 不變且�
   assert.equal(planner.ledgerPath, fs.realpathSync(ledgerPath));
   assert.deepEqual(fs.readFileSync(ledgerPath), ledgerBytes);
   assert.equal(fs.statSync(ledgerPath, { bigint: true }).mtimeNs, mtimeBefore);
-  assert.equal(fs.existsSync(path.join(fixture.jobDir, '.provider-ledger.json.lock')), false);
+  assert.equal(
+    fs.existsSync(path.join(path.dirname(ledgerPath), `.${path.basename(ledgerPath)}.lock`)),
+    false,
+  );
 });
 
 test('managed trace 對 directory/job/revision identity mismatch 全部 fail closed', (t) => {
@@ -262,9 +298,16 @@ test('jobs/project directory 或 ledger symlink 都不作為 trace root', (t) =>
   const ledgerFixture = managedFixture(t, {
     token: '423e4567-e89b-42d3-a456-426614174000',
   });
-  const ledgerTarget = path.join(ledgerFixture.jobDir, 'ledger-target.json');
+  const ledgerPreview = createHeyGenRequestPreview({
+    projectDir: ledgerFixture.root,
+    env: {
+      WORKSPACE_RUN_TOKEN: '423e4567-e89b-42d3-a456-426614174000',
+      DATA_DIR: ledgerFixture.dataDir,
+    },
+  });
+  const ledgerTarget = path.join(path.dirname(ledgerPreview.ledgerPath), 'ledger-target.json');
   writeJson(ledgerTarget, {});
-  fs.symlinkSync(ledgerTarget, path.join(ledgerFixture.jobDir, 'provider-ledger.json'));
+  fs.symlinkSync(ledgerTarget, ledgerPreview.ledgerPath);
   assert.throws(
     () => createHeyGenRequestTracer({
       projectDir: ledgerFixture.root,
@@ -320,6 +363,150 @@ test('managed/manual DATA_DIR 與 manual provider-ledgers symlink 全部 fail cl
   );
 });
 
+test('manual 缺失 DATA_DIR 的任一既存上層為 symlink 時在 mkdir 前 fail closed', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-manual-ancestor-symlink-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-manual-ancestor-outside-'));
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-manual-external-symlink-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(external, { recursive: true, force: true }));
+  const linkedParent = path.join(root, 'linked-parent');
+  fs.symlinkSync(outside, linkedParent);
+  const dataDir = path.join(linkedParent, 'missing-data');
+  const options = {
+    projectDir: root,
+    argv: ['--project-id=project-a', '--revision=V1', '--run-id=run-a'],
+    env: { DATA_DIR: dataDir },
+  };
+
+  assert.throws(
+    () => createHeyGenRequestPreview(options),
+    /DATA_DIR 不是安全的一般目錄（路徑包含 symlink）/,
+  );
+  assert.throws(
+    () => createHeyGenRequestTracer(options),
+    /DATA_DIR 不是安全的一般目錄（路徑包含 symlink）/,
+  );
+  assert.equal(fs.existsSync(path.join(outside, 'missing-data')), false);
+
+  const existingOutside = path.join(outside, 'existing');
+  fs.mkdirSync(existingOutside);
+  fs.symlinkSync(outside, path.join(external, 'linked-parent'));
+  const externalDataDir = path.join(external, 'linked-parent', 'existing', 'missing-data');
+  assert.throws(
+    () => createHeyGenRequestTracer({
+      ...options,
+      env: { DATA_DIR: externalDataDir },
+    }),
+    /DATA_DIR 不是安全的一般目錄（路徑包含 symlink）/,
+  );
+  assert.equal(fs.existsSync(path.join(existingOutside, 'missing-data')), false);
+});
+
+test('DATA_DIR 在驗證後、provider-ledgers mkdir 前被置換時不在外部建立 ledger', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-data-dir-race-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-data-dir-race-outside-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const dataDir = path.join(root, 'data');
+  const movedDataDir = path.join(root, 'data-canonical-moved');
+  fs.mkdirSync(dataDir);
+  const options = {
+    projectDir: root,
+    argv: ['--project-id=project-race', '--revision=V1', '--run-id=run-race'],
+    env: { DATA_DIR: dataDir },
+  };
+  const preview = createHeyGenRequestPreview(options);
+  const providerRoot = path.join(fs.realpathSync(dataDir), 'provider-ledgers');
+  let swapped = false;
+  const fsImpl = hookedFs({
+    mkdirSync(target, mkdirOptions) {
+      if (!swapped && path.resolve(target) === providerRoot) {
+        fs.renameSync(dataDir, movedDataDir);
+        fs.symlinkSync(outside, dataDir);
+        swapped = true;
+      }
+      return fs.mkdirSync(target, mkdirOptions);
+    },
+  });
+
+  assert.throws(
+    () => createHeyGenRequestTracer({ ...options, fsImpl }),
+    /DATA_DIR (?:不是安全的一般目錄|filesystem identity 已改變)/,
+  );
+  assert.equal(swapped, true);
+  const outsideProviderRoot = path.join(outside, 'provider-ledgers');
+  assert.equal(fs.statSync(outsideProviderRoot).isDirectory(), true);
+  assert.equal(
+    fs.existsSync(path.join(outsideProviderRoot, path.basename(preview.ledgerPath))),
+    false,
+  );
+  assert.deepEqual(fs.readdirSync(outsideProviderRoot), []);
+});
+
+test('tracer 初始化後 provider-ledgers 被置換時在 callback/fetch 前 fail closed', async (t) => {
+  const fixture = managedFixture(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-ledger-root-race-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  let armed = false;
+  let swapped = false;
+  let providerRoot = null;
+  let movedProviderRoot = null;
+  const fsImpl = hookedFs({
+    lstatSync(target, ...args) {
+      const stat = fs.lstatSync(target, ...args);
+      if (armed && !swapped && path.resolve(target) === path.resolve(fixture.dataDir)) {
+        fs.renameSync(providerRoot, movedProviderRoot);
+        fs.symlinkSync(outside, providerRoot);
+        swapped = true;
+      }
+      return stat;
+    },
+  });
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    fsImpl,
+    randomUUID: () => 'must-not-be-reserved',
+    pid: 205,
+  });
+  providerRoot = path.dirname(tracer.ledgerPath);
+  movedProviderRoot = path.join(fixture.dataDir, 'provider-ledgers-canonical-moved');
+  const canonicalLedgerName = path.basename(tracer.ledgerPath);
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: tracer.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  armed = true;
+  let fetchCalls = 0;
+  let onPreparedCalls = 0;
+
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+      onPrepared: () => { onPreparedCalls += 1; },
+    }),
+    /provider ledger root 不是安全的一般目錄/,
+  );
+  assert.equal(swapped, true);
+  assert.equal(fetchCalls, 0);
+  assert.equal(onPreparedCalls, 0);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  const canonicalLedger = JSON.parse(
+    fs.readFileSync(path.join(movedProviderRoot, canonicalLedgerName), 'utf8'),
+  );
+  assert.deepEqual(canonicalLedger.requests, []);
+});
+
 test('explicit Project identity 必須完整，無 identity 或混用 identity 都 fail closed', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-manual-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -340,6 +527,10 @@ test('explicit Project identity 必須完整，無 identity 或混用 identity �
     pid: 50,
   });
   assert.equal(explicit.titleFor('ignored'), 'MV-project-a-V3-run-b');
+  assert.equal(fs.statSync(path.join(root, 'data-explicit')).isDirectory(), true);
+  assert.equal(fs.statSync(explicit.ledgerPath).isFile(), true);
+  const requestId = explicit.prepare({ api: 'v3-text', title: explicit.titleFor('ignored') });
+  assert.equal(explicit.snapshot().requests[0].requestId, requestId);
 
   assert.throws(
     () => createHeyGenRequestTracer({
@@ -454,7 +645,7 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
   assert.equal(preview.requests[0].title, 'MV-project-dry-V1-run-dry');
   assert.equal(preview.requests[0].payloadMetadata.mode, 'text-driven');
   assert.equal(Object.hasOwn(preview.requests[0].payloadMetadata, 'scriptText'), false);
-  assert.equal(preview.ledgerPath, path.join(dataDir, 'provider-ledgers', 'run-dry.json'));
+  assertProjectLedgerPath(preview.ledgerPath, dataDir);
   assert.equal(fs.existsSync(preview.ledgerPath), false);
   assert.equal(fs.existsSync(dataDir), false);
 
@@ -564,7 +755,11 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
   assert.equal(fs.existsSync(fixedV2Preview.ledgerPath), false);
   assert.equal(fs.existsSync(dataDir), false);
 
-  const existingLedger = path.join(dataDir, 'provider-ledgers', 'run-existing.json');
+  const existingLedger = createHeyGenRequestPreview({
+    projectDir: repoRoot,
+    argv: ['--project-id=project-dry', '--revision=V1', '--run-id=run-existing'],
+    env: { DATA_DIR: dataDir },
+  }).ledgerPath;
   const existingBytes = Buffer.from('{"historical":"must remain byte-identical"}\n');
   fs.mkdirSync(path.dirname(existingLedger), { recursive: true });
   fs.writeFileSync(existingLedger, existingBytes);
@@ -687,6 +882,132 @@ test('Project/Revision/Run logical key 不受 --heygen-title prefix 影響', (t)
   assert.equal(second.snapshot().requests.length, 1);
 });
 
+test('相同 Revision/Run 在不同 Project 下使用不同 canonical namespace', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-project-namespace-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, 'data');
+  const previewFor = (projectId) => createHeyGenRequestPreview({
+    projectDir: root,
+    argv: [`--project-id=${projectId}`, '--revision=V2', '--run-id=run-shared'],
+    env: { DATA_DIR: dataDir },
+  });
+  const first = previewFor('project-a');
+  const second = previewFor('project-b');
+  const firstRequest = first.preview({ api: 'v3-text', title: first.titleFor('ignored') });
+  const secondRequest = second.preview({ api: 'v3-text', title: second.titleFor('ignored') });
+
+  assert.notEqual(first.ledgerPath, second.ledgerPath);
+  assert.notEqual(firstRequest.logicalKey, secondRequest.logicalKey);
+  assert.equal(fs.existsSync(dataDir), false);
+});
+
+test('managed-first/manual-second 共用 canonical reservation，第二次在 fetch 前拒絕', async (t) => {
+  const fixture = managedFixture(t);
+  const managed = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'managed-first-reservation',
+    pid: 201,
+  });
+  const managedTitle = managed.titleFor('ignored');
+  managed.prepare({ api: 'v3-text', title: managedTitle });
+
+  const manual = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    argv: [
+      `--project-id=${fixture.projectId}`,
+      '--revision=V2',
+      `--run-id=${fixture.runId}`,
+    ],
+    env: { DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'manual-second-must-not-reserve',
+    pid: 202,
+  });
+  assert.equal(manual.ledgerPath, managed.ledgerPath);
+  assert.deepEqual(manual.snapshot().trace, {
+    kind: 'project',
+    projectId: fixture.projectId,
+    revision: 'V2',
+    runId: fixture.runId,
+  });
+
+  let fetchCalls = 0;
+  let onPreparedCalls = 0;
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: manual.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer: manual,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+      onPrepared: () => { onPreparedCalls += 1; },
+    }),
+    /logical request 已有 ledger 紀錄（prepared），拒絕自動重送/,
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal(onPreparedCalls, 0);
+  assert.equal(manual.snapshot().requests.length, 1);
+});
+
+test('manual-first/managed-second 共用 canonical reservation，第二次在 fetch 前拒絕', async (t) => {
+  const fixture = managedFixture(t);
+  const manual = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    argv: [
+      `--project-id=${fixture.projectId}`,
+      '--revision=V2',
+      `--run-id=${fixture.runId}`,
+    ],
+    env: { DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'manual-first-reservation',
+    pid: 203,
+  });
+  manual.prepare({ api: 'v3-text', title: manual.titleFor('ignored') });
+
+  const managed = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'managed-second-must-not-reserve',
+    pid: 204,
+  });
+  assert.equal(managed.ledgerPath, manual.ledgerPath);
+
+  let fetchCalls = 0;
+  let onPreparedCalls = 0;
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: managed.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer: managed,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+      onPrepared: () => { onPreparedCalls += 1; },
+    }),
+    /logical request 已有 ledger 紀錄（prepared），拒絕自動重送/,
+  );
+  assert.equal(fetchCalls, 0);
+  assert.equal(onPreparedCalls, 0);
+  assert.equal(managed.snapshot().requests.length, 1);
+});
+
 test('三種 HeyGen create payload 都由同一個 non-empty title gate 建立', () => {
   const common = { title: 'MV-project-a-V1-run-a', motionPrompt: 'move' };
   const audio = buildAudioDrivenPayload({
@@ -785,7 +1106,7 @@ test('read-only dry-run preview 覆蓋三種 API 且不建立 DATA_DIR 或 ledge
   assert.equal(audio.title, title);
   assert.notEqual(audio.logicalKey, v2.logicalKey);
   assert.notEqual(v2.logicalKey, v3.logicalKey);
-  assert.equal(planner.ledgerPath, path.join(dataDir, 'provider-ledgers', 'run-dry.json'));
+  assertProjectLedgerPath(planner.ledgerPath, dataDir);
   assert.equal(fs.existsSync(dataDir), false);
   assert.throws(
     () => planner.preview({
@@ -816,7 +1137,7 @@ test('ledger 在 fetch 前 prepared，並保存 submitted/completed/failed 的�
     title: tracer.titleFor('ignored', segmentA),
     segment: segmentA,
   });
-  let ledger = JSON.parse(fs.readFileSync(tracer.ledgerPath, 'utf8'));
+  let ledger = tracer.snapshot();
   assert.equal(ledger.requests[0].status, 'prepared');
   assert.equal(ledger.requests[0].providerVideoId, null);
 
@@ -828,18 +1149,29 @@ test('ledger 在 fetch 前 prepared，並保存 submitted/completed/failed 的�
     segment: segmentB,
   });
   tracer.failed(requestB, { phase: 'create', code: 'http_400' });
-  ledger = JSON.parse(fs.readFileSync(tracer.ledgerPath, 'utf8'));
+  ledger = tracer.snapshot();
 
   assert.deepEqual(ledger.requests.map((item) => item.status), ['completed', 'failed']);
+  assert.deepEqual(ledger.trace, {
+    kind: 'project',
+    projectId: fixture.projectId,
+    revision: 'V2',
+    runId: fixture.runId,
+  });
   assert.notEqual(ledger.requests[0].title, ledger.requests[1].title);
   assert.equal(ledger.requests[0].durationSec, 12.5);
   assert.equal(ledger.requests[0].credits, null);
   assert.equal(ledger.requests[0].creditsEvidence, 'not_available_in_provider_status');
   assert.deepEqual(ledger.requests[1].failure, { phase: 'create', code: 'http_400' });
   assert.equal(
-    fs.readdirSync(fixture.jobDir).filter((name) => name.endsWith('.tmp')).length,
+    fs.readdirSync(path.dirname(tracer.ledgerPath)).filter((name) => name.endsWith('.tmp')).length,
     0,
   );
+  const eventRoot = path.join(
+    path.dirname(tracer.ledgerPath),
+    `.${path.basename(tracer.ledgerPath)}.events`,
+  );
+  assert.equal(fs.readdirSync(eventRoot).filter((name) => name.endsWith('.tmp')).length, 0);
   assert.equal(JSON.stringify(ledger).includes('audio-id'), false);
   assert.equal(JSON.stringify(ledger).includes('scriptText'), false);
   assert.equal(JSON.stringify(ledger).includes(TOKEN), false);
@@ -886,6 +1218,491 @@ test('custom title 會清除控制字元，未正規化 payload 不能進 ledger
     /未通過 dry-run 正規化/,
   );
   assert.equal(tracer.snapshot().requests.length, 0);
+});
+
+test('onPrepared 置換 provider-ledgers 後會重驗 reservation，fetch 絕不執行', async (t) => {
+  const fixture = managedFixture(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-on-prepared-race-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'on-prepared-reservation',
+    pid: 551,
+  });
+  const providerRoot = path.dirname(tracer.ledgerPath);
+  const movedProviderRoot = path.join(fixture.dataDir, 'provider-ledgers-on-prepared-moved');
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: tracer.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  let fetchCalls = 0;
+  let onPreparedCalls = 0;
+
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+      onPrepared: () => {
+        onPreparedCalls += 1;
+        fs.renameSync(providerRoot, movedProviderRoot);
+        fs.symlinkSync(outside, providerRoot);
+      },
+    }),
+    /provider ledger root 不是安全的一般目錄/,
+  );
+  assert.equal(onPreparedCalls, 1);
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  const eventRoot = path.join(
+    movedProviderRoot,
+    `.${path.basename(tracer.ledgerPath)}.events`,
+  );
+  assert.equal(fs.readdirSync(eventRoot).filter((name) => name.startsWith('prepared-')).length, 1);
+});
+
+test('預先保留 request 在 callback 後同樣重驗，ledger root 置換時 fetch 為零', async (t) => {
+  const fixture = managedFixture(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-reserved-callback-race-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'pre-reserved-callback-reservation',
+    pid: 552,
+  });
+  const title = tracer.titleFor('ignored');
+  const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
+  const payload = buildAudioDrivenPayload({
+    audioAssetId: 'fixture-audio',
+    avatarId: 'fixture-avatar',
+    title,
+    motionPrompt: 'move',
+  });
+  const providerRoot = path.dirname(tracer.ledgerPath);
+  const movedProviderRoot = path.join(fixture.dataDir, 'provider-ledgers-reserved-moved');
+  let fetchCalls = 0;
+
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v2/videos',
+      api: 'v2-audio',
+      payload,
+      ledgerRequestId,
+      onPrepared: () => {
+        fs.renameSync(providerRoot, movedProviderRoot);
+        fs.symlinkSync(outside, providerRoot);
+      },
+    }),
+    /provider ledger root 不是安全的一般目錄/,
+  );
+  assert.equal(fetchCalls, 0);
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test('MiniMax/upload paid step 前 ledger inode 被替換時 callback 為零', async (t) => {
+  const fixture = managedFixture(t);
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'audio-paid-step-reservation',
+    pid: 555,
+  });
+  const title = tracer.titleFor('ignored');
+  const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
+  const canonicalLedger = `${tracer.ledgerPath}.canonical-moved`;
+  fs.renameSync(tracer.ledgerPath, canonicalLedger);
+  fs.writeFileSync(tracer.ledgerPath, fs.readFileSync(canonicalLedger), { mode: 0o600 });
+  let paidCalls = 0;
+
+  await assert.rejects(
+    () => runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId,
+      api: 'v2-audio',
+      title,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { paidCalls += 1; },
+    }),
+    /provider ledger filesystem identity 已改變/,
+  );
+  assert.equal(paidCalls, 0);
+});
+
+test('同 reservation/operation 的並行 paid callback 只有一個 claim winner', async (t) => {
+  const fixture = managedFixture(t);
+  const primaryTracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'parallel-paid-operation',
+    pid: 558,
+  });
+  const title = primaryTracer.titleFor('ignored');
+  const ledgerRequestId = primaryTracer.prepare({ api: 'v2-audio', title });
+  const competingTracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'unused-competing-operation-id',
+    pid: 1558,
+  });
+  let releasePaidStep;
+  const paidStepGate = new Promise((resolve) => { releasePaidStep = resolve; });
+  let paidCalls = 0;
+  const invoke = (tracer) => runVerifiedPaidStep({
+    tracer,
+    ledgerRequestId,
+    api: 'v2-audio',
+    title,
+    operationKey: 'minimax-tts',
+    paidStep: async () => {
+      paidCalls += 1;
+      await paidStepGate;
+      return 'paid-step-ok';
+    },
+  });
+
+  const first = invoke(primaryTracer);
+  const second = invoke(competingTracer);
+  releasePaidStep();
+  const settled = await Promise.allSettled([first, second]);
+  assert.equal(settled.filter((item) => item.status === 'fulfilled').length, 1);
+  assert.equal(settled.filter((item) => item.status === 'rejected').length, 1);
+  assert.match(settled.find((item) => item.status === 'rejected').reason.message, /已被 claim/);
+  assert.equal(paidCalls, 1);
+  assert.deepEqual(
+    primaryTracer.snapshot().operationClaims.map((claim) => claim.operationKey),
+    ['minimax-tts'],
+  );
+});
+
+test('不同合法 operation 與不同 segment 各自取得一個 claim', async (t) => {
+  const fixture = managedFixture(t);
+  const requestIds = ['segment-a-request', 'segment-b-request'];
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => requestIds.shift(),
+    pid: 559,
+  });
+  const segmentA = { index: 0, total: 2, role: 'A' };
+  const segmentB = { index: 1, total: 2, role: 'B' };
+  const titleA = tracer.titleFor('ignored', segmentA);
+  const titleB = tracer.titleFor('ignored', segmentB);
+  const requestA = tracer.prepare({ api: 'v2-audio', title: titleA, segment: segmentA });
+  const requestB = tracer.prepare({ api: 'v2-audio', title: titleB, segment: segmentB });
+  const calls = { ttsA: 0, uploadA: 0, ttsB: 0 };
+
+  await Promise.all([
+    runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId: requestA,
+      api: 'v2-audio',
+      title: titleA,
+      segment: segmentA,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { calls.ttsA += 1; },
+    }),
+    runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId: requestA,
+      api: 'v2-audio',
+      title: titleA,
+      segment: segmentA,
+      operationKey: 'heygen-audio-upload',
+      paidStep: async () => { calls.uploadA += 1; },
+    }),
+    runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId: requestB,
+      api: 'v2-audio',
+      title: titleB,
+      segment: segmentB,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { calls.ttsB += 1; },
+    }),
+  ]);
+  assert.deepEqual(calls, { ttsA: 1, uploadA: 1, ttsB: 1 });
+  const claims = tracer.snapshot().operationClaims;
+  assert.equal(claims.length, 3);
+  assert.equal(new Set(claims.map((claim) => claim.claimId)).size, 3);
+});
+
+test('paid callback crash 後同 operation retry fail closed', async (t) => {
+  const fixture = managedFixture(t);
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'crash-retry-paid-operation',
+    pid: 560,
+  });
+  const title = tracer.titleFor('ignored');
+  const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
+  let paidCalls = 0;
+  const invoke = () => runVerifiedPaidStep({
+    tracer,
+    ledgerRequestId,
+    api: 'v2-audio',
+    title,
+    operationKey: 'minimax-tts',
+    paidStep: async () => {
+      paidCalls += 1;
+      throw new Error('simulated paid callback crash');
+    },
+  });
+
+  await assert.rejects(invoke, /simulated paid callback crash/);
+  await assert.rejects(invoke, /已被 claim/);
+  assert.equal(paidCalls, 1);
+  const snapshot = tracer.snapshot();
+  assert.equal(snapshot.requests[0].status, 'prepared');
+  assert.equal(snapshot.operationClaims[0].operationKey, 'minimax-tts');
+});
+
+test('同一 pre-reserved create 並行 submit 只有一個 fetch winner', async (t) => {
+  const fixture = managedFixture(t);
+  const primaryTracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'parallel-create-reservation',
+    pid: 561,
+  });
+  const title = primaryTracer.titleFor('ignored');
+  const ledgerRequestId = primaryTracer.prepare({ api: 'v3-text', title });
+  const competingTracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'unused-competing-create-id',
+    pid: 1561,
+  });
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title,
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  let releaseFetch;
+  const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    await fetchGate;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { video_id: 'parallel-provider-video' } }),
+    };
+  };
+  const invoke = (tracer) => submitTracedHeyGenCreate({
+    fetchImpl,
+    tracer,
+    apiKey: 'fixture-key-never-sent',
+    endpoint: 'https://api.heygen.com/v3/videos',
+    api: 'v3-text',
+    payload,
+    ledgerRequestId,
+  });
+
+  const first = invoke(primaryTracer);
+  const second = invoke(competingTracer);
+  releaseFetch();
+  const settled = await Promise.allSettled([first, second]);
+  assert.equal(fetchCalls, 1);
+  assert.equal(settled.filter((item) => item.status === 'fulfilled').length, 1);
+  assert.equal(settled.filter((item) => item.status === 'rejected').length, 1);
+  assert.deepEqual(
+    primaryTracer.snapshot().operationClaims.map((claim) => claim.operationKey),
+    ['heygen-video-create'],
+  );
+});
+
+test('immutable header 同 inode 內容被改寫時 paid callback 為零', async (t) => {
+  const fixture = managedFixture(t);
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'header-content-reservation',
+    pid: 556,
+  });
+  const title = tracer.titleFor('ignored');
+  const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
+  const inodeBefore = fs.statSync(tracer.ledgerPath, { bigint: true }).ino;
+  const header = JSON.parse(fs.readFileSync(tracer.ledgerPath, 'utf8'));
+  header.updatedAt = '2026-08-21T23:59:59.999Z';
+  fs.chmodSync(tracer.ledgerPath, 0o600);
+  fs.writeFileSync(tracer.ledgerPath, `${JSON.stringify(header, null, 2)}\n`);
+  fs.chmodSync(tracer.ledgerPath, 0o400);
+  assert.equal(fs.statSync(tracer.ledgerPath, { bigint: true }).ino, inodeBefore);
+  let paidCalls = 0;
+
+  await assert.rejects(
+    () => runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId,
+      api: 'v2-audio',
+      title,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { paidCalls += 1; },
+    }),
+    /immutable header bytes 已改變/,
+  );
+  assert.equal(paidCalls, 0);
+});
+
+test('immutable reservation event 同 inode 內容被改寫時 paid callback 為零', async (t) => {
+  const fixture = managedFixture(t);
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    randomUUID: () => 'event-content-reservation',
+    pid: 557,
+  });
+  const title = tracer.titleFor('ignored');
+  const ledgerRequestId = tracer.prepare({ api: 'v2-audio', title });
+  const eventRoot = path.join(
+    path.dirname(tracer.ledgerPath),
+    `.${path.basename(tracer.ledgerPath)}.events`,
+  );
+  const preparedName = fs.readdirSync(eventRoot).find((name) => name.startsWith('prepared-'));
+  const preparedPath = path.join(eventRoot, preparedName);
+  const inodeBefore = fs.statSync(preparedPath, { bigint: true }).ino;
+  const event = JSON.parse(fs.readFileSync(preparedPath, 'utf8'));
+  event.request.title = `${title}-mutated`;
+  fs.chmodSync(preparedPath, 0o600);
+  fs.writeFileSync(preparedPath, `${JSON.stringify(event, null, 2)}\n`);
+  fs.chmodSync(preparedPath, 0o400);
+  assert.equal(fs.statSync(preparedPath, { bigint: true }).ino, inodeBefore);
+  let paidCalls = 0;
+
+  await assert.rejects(
+    () => runVerifiedPaidStep({
+      tracer,
+      ledgerRequestId,
+      api: 'v2-audio',
+      title,
+      operationKey: 'minimax-tts',
+      paidStep: async () => { paidCalls += 1; },
+    }),
+    /immutable event bytes 或 inode 已改變/,
+  );
+  assert.equal(paidCalls, 0);
+});
+
+test('immutable publish 遇到 destination 競爭者時不覆寫 reservation 且 fetch 為零', async (t) => {
+  const fixture = managedFixture(t);
+  let armed = false;
+  let injected = false;
+  const fsImpl = hookedFs({
+    linkSync(source, destination) {
+      if (armed && !injected && path.basename(destination).startsWith('prepared-')) {
+        const competing = JSON.parse(fs.readFileSync(source, 'utf8'));
+        competing.request.requestId = 'competing-destination-reservation';
+        fs.writeFileSync(destination, `${JSON.stringify(competing, null, 2)}\n`, {
+          flag: 'wx',
+          mode: 0o600,
+        });
+        injected = true;
+      }
+      return fs.linkSync(source, destination);
+    },
+  });
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    fsImpl,
+    randomUUID: () => 'must-not-overwrite-destination',
+    pid: 553,
+  });
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: tracer.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  armed = true;
+  let fetchCalls = 0;
+
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+    }),
+    /immutable event 已存在/,
+  );
+  assert.equal(injected, true);
+  assert.equal(fetchCalls, 0);
+  assert.equal(tracer.snapshot().requests[0].requestId, 'competing-destination-reservation');
+});
+
+test('immutable publish 的 temp 被替換時以 inode 證明拒絕，fetch 為零', async (t) => {
+  const fixture = managedFixture(t);
+  let armed = false;
+  let injected = false;
+  const fsImpl = hookedFs({
+    linkSync(source, destination) {
+      if (armed && !injected && path.basename(destination).startsWith('prepared-')) {
+        const replacement = JSON.parse(fs.readFileSync(source, 'utf8'));
+        replacement.request.requestId = 'competing-temp-reservation';
+        fs.renameSync(source, `${source}.reviewer-original`);
+        fs.writeFileSync(source, `${JSON.stringify(replacement, null, 2)}\n`, {
+          flag: 'wx',
+          mode: 0o600,
+        });
+        injected = true;
+      }
+      return fs.linkSync(source, destination);
+    },
+  });
+  const tracer = createHeyGenRequestTracer({
+    projectDir: fixture.root,
+    env: { WORKSPACE_RUN_TOKEN: TOKEN, DATA_DIR: fixture.dataDir },
+    fsImpl,
+    randomUUID: () => 'must-not-trust-replaced-temp',
+    pid: 554,
+  });
+  const payload = buildTextDrivenV3Payload({
+    scriptText: 'fixture only',
+    avatarId: 'avatar-fixture',
+    voiceId: 'voice-fixture',
+    title: tracer.titleFor('ignored'),
+    motionPrompt: 'move',
+    expressiveness: 'medium',
+  });
+  armed = true;
+  let fetchCalls = 0;
+
+  await assert.rejects(
+    () => submitTracedHeyGenCreate({
+      fetchImpl: async () => { fetchCalls += 1; },
+      tracer,
+      apiKey: 'fixture-key-never-sent',
+      endpoint: 'https://api.heygen.com/v3/videos',
+      api: 'v3-text',
+      payload,
+    }),
+    /provider ledger event temp filesystem identity 已改變/,
+  );
+  assert.equal(injected, true);
+  assert.equal(fetchCalls, 0);
+  assert.equal(tracer.snapshot().requests[0].requestId, 'competing-temp-reservation');
 });
 
 test('fake transport 觀察到 fetch 前 ledger 已是 prepared，成功後才轉 submitted', async (t) => {
@@ -1080,21 +1897,33 @@ test('run.js 的 audio/v2-text/v3-text create paths 都只走共同 trace gate',
 
   const dualPath = source.slice(
     source.indexOf('async function runDualPath'),
-    source.indexOf('// ── main'),
+    source.indexOf('// ── 主流程'),
   );
   assert.ok(dualPath.indexOf('const ledgerRequestId = tracer.prepare({') >= 0);
   assert.ok(
     dualPath.indexOf('const ledgerRequestId = tracer.prepare({')
-      < dualPath.indexOf('const mp3 = await minimaxTTS'),
+      < dualPath.indexOf('const mp3 = await runVerifiedPaidStep'),
   );
+  assert.equal((dualPath.match(/await runVerifiedPaidStep\(\{/g) || []).length, 2);
+  assert.match(dualPath, /operationKey: "minimax-tts"/);
+  assert.match(dualPath, /operationKey: "heygen-audio-upload"/);
+  assert.match(dualPath, /paidStep: \(\) => minimaxTTS\(/);
+  assert.match(dualPath, /paidStep: \(\) => heygenUploadAudio\(/);
+  assert.doesNotMatch(dualPath, /await minimaxTTS\(|await heygenUploadAudio\(/);
   assert.match(dualPath, /seg\.ledgerRequestId/);
 
   const singleMiniMax = source.slice(source.lastIndexOf('if (USE_MINIMAX)'));
   assert.ok(singleMiniMax.indexOf('const ledgerRequestId = tracer.prepare({') >= 0);
   assert.ok(
     singleMiniMax.indexOf('const ledgerRequestId = tracer.prepare({')
-      < singleMiniMax.indexOf('const audioBuffer = await minimaxTTS'),
+      < singleMiniMax.indexOf('const audioBuffer = await runVerifiedPaidStep'),
   );
+  assert.equal((singleMiniMax.match(/await runVerifiedPaidStep\(\{/g) || []).length, 2);
+  assert.match(singleMiniMax, /operationKey: "minimax-tts"/);
+  assert.match(singleMiniMax, /operationKey: "heygen-audio-upload"/);
+  assert.match(singleMiniMax, /paidStep: \(\) => minimaxTTS\(/);
+  assert.match(singleMiniMax, /paidStep: \(\) => heygenUploadAudio\(/);
+  assert.doesNotMatch(singleMiniMax, /await minimaxTTS\(|await heygenUploadAudio\(/);
 
   const dryRunPlanner = source.slice(
     source.indexOf('function audioDryRunMetadata'),
