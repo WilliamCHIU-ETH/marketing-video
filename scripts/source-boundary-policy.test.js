@@ -188,6 +188,34 @@ test('sanitized fixtures reject real credentials, identities and non-example end
   assertFinding(result, 'fixtures/sanitized/invalid.json', 'sanitized-structure-invalid', 'index');
 });
 
+test('runtime-shaped JSON outside sanitized fixtures fails closed', (t) => {
+  const projectField = ['project', 'Id'].join('');
+  const runField = ['run', 'Id'].join('');
+  const personaField = ['person', 'a'].join('');
+  const endpointField = ['end', 'point'].join('');
+  const root = makeRepository(t, {
+    'project.json': JSON.stringify({
+      [projectField]: 'project-123456',
+      [runField]: 'run-98765',
+      [personaField]: 'Alice Chen',
+      [endpointField]: 'https://builder.company.internal/catalog',
+    }),
+    'config.example.json': JSON.stringify({
+      [projectField]: 'test-project-1',
+      [runField]: 'fixture-run-1',
+      [personaField]: 'synthetic-persona',
+      [endpointField]: 'https://api.example.com/catalog',
+    }),
+  });
+  const result = scanRepository({ root });
+
+  assert.deepEqual(rulesFor(result, 'config.example.json'), []);
+  assertFinding(result, 'project.json', 'runtime-identity-value', 'index');
+  assertFinding(result, 'project.json', 'runtime-identity-value', 'worktree');
+  assertFinding(result, 'project.json', 'runtime-non-example-url', 'index');
+  assertFinding(result, 'project.json', 'runtime-non-example-url', 'worktree');
+});
+
 test('credential scan allows source references and explicit test sentinels but rejects literal secrets', (t) => {
   const heygenKey = ['HEYGEN', 'API', 'KEY'].join('_');
   const minimaxKey = ['MINIMAX', 'API', 'KEY'].join('_');

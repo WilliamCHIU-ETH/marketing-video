@@ -827,20 +827,29 @@ function scanStructuredSourceCredentials(relative, text, report, origin) {
   const documents = extension === '.json'
     ? [text]
     : text.split(/\r?\n/).filter((line) => line.trim());
-  const inspect = (value) => {
+  const reportField = (rule, field) => {
+    const fieldPattern = new RegExp(`["']${String(field).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`);
+    const offset = text.search(fieldPattern);
+    report(rule, relative, origin, lineNumber(text, Math.max(0, offset)));
+  };
+  const inspect = (value, inheritedRuntimeContext = false) => {
     if (Array.isArray(value)) {
-      for (const item of value) inspect(item);
+      for (const item of value) inspect(item, inheritedRuntimeContext);
       return;
     }
     if (!value || typeof value !== 'object') return;
-    for (const [field, child] of Object.entries(value)) {
-      if (sourceCredentialField(field) && child !== null && typeof child !== 'object'
-          && !strictSourcePlaceholder(String(child))) {
-        const fieldPattern = new RegExp(`["']${String(field).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`);
-        const offset = text.search(fieldPattern);
-        report('credential-assignment', relative, origin, lineNumber(text, Math.max(0, offset)));
+    const entries = Object.entries(value);
+    const runtimeContext = inheritedRuntimeContext
+      || entries.some(([field]) => sanitizedFieldKind(field) === 'identity');
+    for (const [field, child] of entries) {
+      const kind = sanitizedFieldKind(field);
+      if (child !== null && typeof child !== 'object') {
+        const issue = sanitizedScalarIssue(field, child);
+        if (kind === 'credential' && issue) reportField('credential-assignment', field);
+        if (kind === 'identity' && issue) reportField('runtime-identity-value', field);
+        if (kind === 'network' && runtimeContext && issue) reportField('runtime-non-example-url', field);
       }
-      inspect(child);
+      inspect(child, runtimeContext);
     }
   };
   for (const document of documents) {
