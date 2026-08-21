@@ -5,15 +5,28 @@
 //  使用方式：node run.js
 // ─────────────────────────────────────────
 
-require("dotenv").config();
-
 const { execSync, execFileSync } = require("child_process");
+const { createHash } = require("crypto");
 const { readFileSync, writeFileSync, existsSync, openSync, closeSync } = require("fs");
 const { resolve } = require("path");
 const OpenCC = require("opencc-js");
 const { cleanStaleStaging, backupJob } = require("./scripts/public-utils");
+const {
+  authorizeHeyGenPreviewPlan,
+  buildAudioDrivenPayload,
+  buildTextDrivenV2Payload,
+  buildTextDrivenV3Payload,
+  createHeyGenRequestPreview,
+  createHeyGenRequestTracer,
+  createHeyGenPreviewPlan,
+  loadProviderSecrets,
+  runVerifiedPaidStep,
+  snapshotHeyGenTraceEnvironment,
+  submitTracedHeyGenCreate,
+} = require("./scripts/heygen-video-title");
 
 const PROJECT_DIR = __dirname;
+const HEYGEN_TRACE_ENV = snapshotHeyGenTraceEnvironment(process.env);
 // 繁中 → 簡中：MiniMax 對簡體念法比較準（純字形轉換、不動詞彙；避免「公車→公交」這種詞義替換）
 const tradToSimpConverter = OpenCC.Converter({ from: "t", to: "s" });
 
@@ -53,7 +66,19 @@ const SKIP_GENERATE = process.argv.includes("--skip-generate");
 //   --no-ad    ：焦點股只出客製版，不出投廣套框版
 //   --minimax  ：投廣模板／雙人 path 退回 MiniMax 配音（2026-08-17 起預設用 HeyGen 內建語音）
 //   --heygen-v2：文字驅動退回舊的 /v2/videos 端點（預設走 /v3/videos）
+//   --dry-run   ：只輸出 exact endpoint/segment/title 與 payload-safe metadata；不碰任何 provider。
+//   server-managed Run 會用 WORKSPACE_RUN_TOKEN 自動綁定 Project/Revision/Run 與 provider ledger。
+//   手動執行可傳 --project-id / --revision / --run-id，或 --experiment / --revision；
+//   沒有完整 identity 一律 fail closed，不允許匿名或 timestamp/PID 充當付費 request identity。
+//   --heygen-title 只供 Project context 作人類可讀 prefix；EXP 固定使用測試用EXP-NNN-VN。
+//   手動 paid run 必須先檢查 --dry-run 輸出的 approvalId，再用 --approve-preview=<id> 明確核准；
+//   managed run 仍會 build 同一份 preview，WORKSPACE_RUN_TOKEN 只作 approval source，不能取代 proof。
 const NO_SPEED = process.argv.includes("--no-speed");
+const DRY_RUN = process.argv.includes("--dry-run");
+const APPROVE_PREVIEW_ARG = process.argv.find((arg) => arg.startsWith("--approve-preview="));
+const PROVIDED_PREVIEW_APPROVAL = APPROVE_PREVIEW_ARG
+  ? APPROVE_PREVIEW_ARG.slice("--approve-preview=".length)
+  : null;
 
 // 焦點股日報：2026-08-13 使用者定案「之後只要出客製版，不用多出投廣套框版」。
 // 所以預設不出投廣版；真的要的時候加 --with-ad。
@@ -78,9 +103,19 @@ const STOP_BEFORE_RENDER = process.argv.includes("--stop-before-render");
 const RENDER_ONLY = process.argv.includes("--render-only");
 
 // ── 設定 ──────────────────────────────────
-const HEYGEN_API_KEY = process.env.HEYGEN_API_KEY;
-const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
-const MINIMAX_GROUP_ID = process.env.MINIMAX_GROUP_ID;
+let HEYGEN_API_KEY;
+let MINIMAX_API_KEY;
+let MINIMAX_GROUP_ID;
+let providerEnvironmentLoaded = false;
+
+function loadProviderEnvironment() {
+  if (providerEnvironmentLoaded) return;
+  const providerSecrets = loadProviderSecrets({ env: process.env });
+  HEYGEN_API_KEY = providerSecrets.HEYGEN_API_KEY;
+  MINIMAX_API_KEY = providerSecrets.MINIMAX_API_KEY;
+  MINIMAX_GROUP_ID = providerSecrets.MINIMAX_GROUP_ID;
+  providerEnvironmentLoaded = true;
+}
 // MiniMax 語音設定（非 secret，hardcode 在這裡）
 const MINIMAX_VOICE_ID = "moss_audio_3a75102e-54db-11f1-981b-8a143315d498";
 const MINIMAX_MODEL = "speech-02-hd"; // HD 品質，3.5 元/萬字符。要省可改 speech-02-turbo
@@ -130,7 +165,11 @@ const SOLO_VOICES = {
 
 // 雙人 path：A/B 配對表（從 assets/avatar-pairs.json 載入）
 // 隨機抽一對對話用；單人 path 仍從 AVATAR_IDS 抽
-const PAIRS = require("./assets/avatar-pairs.json").pairs;
+let avatarPairs = null;
+function getAvatarPairs() {
+  if (!avatarPairs) avatarPairs = require("./assets/avatar-pairs.json").pairs;
+  return avatarPairs;
+}
 
 // 雙人 path 的 voice 對應（A 用現有 MINIMAX_VOICE_ID，B 是新 voice）
 const DUAL_VOICES = {
@@ -287,7 +326,8 @@ function randomAvatar() {
 }
 
 function randomPair() {
-  return PAIRS[Math.floor(Math.random() * PAIRS.length)];
+  const pairs = getAvatarPairs();
+  return pairs[Math.floor(Math.random() * pairs.length)];
 }
 
 async function sleep(ms) {
@@ -454,6 +494,15 @@ const HEYGEN_VOICE_LOCALE = null;
 // 專有名詞唸法字典（v3 專屬）。先 GET /v3/brand-glossaries 拿 id，填進來就會套用。
 const HEYGEN_BRAND_GLOSSARY_ID = null;
 
+let heygenRequestTracer = null;
+
+function requireHeyGenRequestTracer() {
+  if (!heygenRequestTracer) {
+    throw new Error("HeyGen request trace 尚未初始化，拒絕建立付費 request");
+  }
+  return heygenRequestTracer;
+}
+
 async function heygenUploadAudio(audioBuffer) {
   log(`上傳音檔到 HeyGen（${audioBuffer.length} bytes）`);
   const res = await fetch("https://upload.heygen.com/v1/asset", {
@@ -475,79 +524,90 @@ async function heygenUploadAudio(audioBuffer) {
   return assetId;
 }
 
-async function createHeyGenVideo(audioAssetId, avatarId) {
+async function submitHeyGenCreate({
+  endpoint,
+  api,
+  payload,
+  segment = null,
+  payloadMetadata = {},
+  ledgerRequestId = null,
+}) {
+  const tracer = requireHeyGenRequestTracer();
+  // This is the paid-request dry-run gate: validate/build the complete payload first, then durably
+  // record its traceable title before fetch can send anything to HeyGen.
+  try {
+    return await submitTracedHeyGenCreate({
+      fetchImpl: fetch,
+      tracer,
+      apiKey: HEYGEN_API_KEY,
+      endpoint,
+      api,
+      payload,
+      segment,
+      payloadMetadata,
+      ledgerRequestId,
+      onPrepared: ({ title }) => log(`HeyGen Dashboard 名稱：${title}`),
+    });
+  } catch (error) {
+    if (Object.prototype.hasOwnProperty.call(error, "providerResponse")) {
+      console.error("HeyGen create 回應：", JSON.stringify(error.providerResponse, null, 2));
+    }
+    throw error;
+  }
+}
+
+async function createHeyGenVideo(
+  audioAssetId,
+  avatarId,
+  title,
+  segment = null,
+  ledgerRequestId = null,
+  payloadMetadata = audioDryRunMetadata(),
+) {
   log(`呼叫 HeyGen Avatar IV（avatar: ${avatarId}、audio_asset_id: ${audioAssetId}）`);
 
   // 端點：POST /v2/videos（HeyGen 專用 Avatar IV）。
   // 跟舊的 /v2/video/generate 差別：這裡的 motion_prompt（控制身體/手部動作，僅 photo avatar）
   // 與 expressiveness（注意值要小寫 high）才真正生效 → 手會動。
   // avatar_id 直接吃 talking_photo 的 id；audio_asset_id 走 audio-driven 對嘴（與 script 互斥），沿用 MiniMax 配音。
-  const payload = {
-    avatar_id: avatarId,
-    audio_asset_id: audioAssetId,
-    motion_prompt: HEYGEN_MOTION_PROMPT,
-    expressiveness: "medium", // 必須小寫：low / medium / high
-    aspect_ratio: "9:16", // 直式 1080×1920
-    resolution: "1080p",
-    title: "marketing-auto",
-  };
-
-  const res = await fetch("https://api.heygen.com/v2/videos", {
-    method: "POST",
-    headers: {
-      "X-Api-Key": HEYGEN_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  const payload = buildAudioDrivenPayload({
+    avatarId,
+    audioAssetId,
+    motionPrompt: HEYGEN_MOTION_PROMPT,
+    title,
   });
-
-  const data = await res.json();
-  const videoId = data?.data?.video_id || data?.video_id || data?.data?.id;
-
-  if (!res.ok || !videoId) {
-    console.error("HeyGen 回應：", JSON.stringify(data, null, 2));
-    throw new Error("HeyGen 建立影片失敗");
-  }
-
-  return videoId;
+  return submitHeyGenCreate({
+    endpoint: "https://api.heygen.com/v2/videos",
+    api: "v2-audio",
+    payload,
+    segment,
+    payloadMetadata,
+    ledgerRequestId,
+  });
 }
 
 // 固定主播三條線專用：不經 MiniMax，直接把腳本文字＋HeyGen 內建語音 voice_id 送給 HeyGen，
 // 由 HeyGen 自己 TTS＋對嘴（跟現有 audio_asset_id 音訊驅動路徑互斥，用 script+voice_id 這組欄位）。
 // 2026-08-07 使用者要求「大盤小報聲音改用 HeyGen 生，不要用 MiniMax」。
 // 2026-08-17 起預設走 v3（見下方 createHeyGenVideoTextDrivenV3）；這支是 --heygen-v2 的退路。
-async function createHeyGenVideoTextDrivenV2(scriptText, avatarId, voiceId, title) {
+async function createHeyGenVideoTextDrivenV2(scriptText, avatarId, voiceId, title, segment = null) {
   log(`呼叫 HeyGen /v2/videos（avatar: ${avatarId}，voice_id: ${voiceId}，文字驅動、不經 MiniMax）`);
 
-  const payload = {
-    avatar_id: avatarId,
-    script: scriptText,
-    voice_id: voiceId,
-    motion_prompt: HEYGEN_MOTION_PROMPT,
+  const payload = buildTextDrivenV2Payload({
+    avatarId,
+    scriptText,
+    voiceId,
+    motionPrompt: HEYGEN_MOTION_PROMPT,
     expressiveness: HEYGEN_EXPRESSIVENESS,
-    aspect_ratio: "9:16",
-    resolution: "1080p",
     title,
-  };
-
-  const res = await fetch("https://api.heygen.com/v2/videos", {
-    method: "POST",
-    headers: {
-      "X-Api-Key": HEYGEN_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
   });
-
-  const data = await res.json();
-  const videoId = data?.data?.video_id || data?.video_id || data?.data?.id;
-
-  if (!res.ok || !videoId) {
-    console.error("HeyGen 回應：", JSON.stringify(data, null, 2));
-    throw new Error("HeyGen 建立影片失敗（文字驅動 v2）");
-  }
-
-  return videoId;
+  return submitHeyGenCreate({
+    endpoint: "https://api.heygen.com/v2/videos",
+    api: "v2-text",
+    payload,
+    segment,
+    payloadMetadata: textDryRunMetadata(scriptText, "v2-text"),
+  });
 }
 
 // v3 版（預設路徑）。跟 v2 的差別：
@@ -555,132 +615,164 @@ async function createHeyGenVideoTextDrivenV2(scriptText, avatarId, voiceId, titl
 //   - engine.type 明示 avatar_iv（省略也是它，寫出來是防日後預設換掉）
 //   - 多了 voice_settings（speed / pitch / locale）與 brand_glossary_id
 //   - script 欄位吃 <break time="0.3s"/> 標籤
-async function createHeyGenVideoTextDrivenV3(scriptText, avatarId, voiceId, title) {
+async function createHeyGenVideoTextDrivenV3(scriptText, avatarId, voiceId, title, segment = null) {
   log(`呼叫 HeyGen /v3/videos Avatar IV（avatar: ${avatarId}，voice_id: ${voiceId}，文字驅動、不經 MiniMax）`);
 
-  const payload = {
-    type: "avatar",
-    avatar_id: avatarId,
-    script: scriptText,
-    voice_id: voiceId,
-    motion_prompt: HEYGEN_MOTION_PROMPT,
+  const payload = buildTextDrivenV3Payload({
+    avatarId,
+    scriptText,
+    voiceId,
+    motionPrompt: HEYGEN_MOTION_PROMPT,
     expressiveness: HEYGEN_EXPRESSIVENESS,
-    aspect_ratio: "9:16",
-    resolution: "1080p",
-    engine: { type: "avatar_iv" },
     title,
-  };
-
-  const voiceSettings = {};
-  if (HEYGEN_VOICE_SPEED !== null) voiceSettings.speed = HEYGEN_VOICE_SPEED;
-  if (HEYGEN_VOICE_LOCALE) voiceSettings.locale = HEYGEN_VOICE_LOCALE;
-  if (Object.keys(voiceSettings).length) payload.voice_settings = voiceSettings;
-  if (HEYGEN_BRAND_GLOSSARY_ID) payload.brand_glossary_id = HEYGEN_BRAND_GLOSSARY_ID;
-
-  const res = await fetch("https://api.heygen.com/v3/videos", {
-    method: "POST",
-    headers: {
-      "X-Api-Key": HEYGEN_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+    voiceSpeed: HEYGEN_VOICE_SPEED,
+    voiceLocale: HEYGEN_VOICE_LOCALE,
+    brandGlossaryId: HEYGEN_BRAND_GLOSSARY_ID,
   });
-
-  const data = await res.json().catch(() => null);
-  const videoId = data?.data?.video_id || data?.data?.id;
-
-  if (!res.ok || !videoId) {
-    console.error(`HeyGen /v3/videos 回應（HTTP ${res.status}）：`, JSON.stringify(data, null, 2));
-    console.error("   → 想先退回舊路徑出片的話，指令加 --heygen-v2");
-    throw new Error("HeyGen 建立影片失敗（文字驅動 v3）");
-  }
-
-  return videoId;
+  return submitHeyGenCreate({
+    endpoint: "https://api.heygen.com/v3/videos",
+    api: "v3-text",
+    payload,
+    segment,
+    payloadMetadata: textDryRunMetadata(scriptText, "v3-text"),
+  });
 }
 
 // 輪詢 GET /v3/videos/{video_id}。回應是 VideoDetail：完成時給 video_url / duration /
 // subtitle_url，失敗時給 failure_code / failure_message（沒有保證一定有 status 欄位，
 // 所以用「有沒有 video_url」當完成判準，status 只拿來顯示）。
-async function pollHeyGenStatusV3(videoId) {
+async function pollHeyGenStatusV3({ videoId, ledgerRequestId }) {
   log(`等待 HeyGen 完成（v3，video_id: ${videoId}）`);
+  const tracer = requireHeyGenRequestTracer();
+  try {
+    for (let i = 0; i < 90; i++) {
+      await sleep(10000); // 每 10 秒查一次
 
-  for (let i = 0; i < 90; i++) {
-    await sleep(10000); // 每 10 秒查一次
+      const res = await fetch(`https://api.heygen.com/v3/videos/${videoId}`, {
+        headers: { "X-Api-Key": HEYGEN_API_KEY },
+      });
+      const data = await res.json().catch(() => null);
+      const d = data?.data || data || {};
 
-    const res = await fetch(`https://api.heygen.com/v3/videos/${videoId}`, {
-      headers: { "X-Api-Key": HEYGEN_API_KEY },
+      if (!res.ok) {
+        const error = new Error(`HeyGen 狀態查詢失敗（HTTP ${res.status}）`);
+        error.ledgerCode = `http_${res.status}`;
+        throw error;
+      }
+
+      if (d.failure_code || d.failure_message) {
+        const error = new Error(`HeyGen 生成失敗：${d.failure_code || ""} ${d.failure_message || ""}`.trim());
+        error.ledgerCode = d.failure_code || "provider_generation_failed";
+        console.error("HeyGen 回應：", JSON.stringify(data, null, 2));
+        throw error;
+      }
+
+      if (d.video_url) {
+        console.log("");
+        if (d.duration) log(`HeyGen 原始輸出時長：${d.duration} 秒（加速前）`);
+        tracer.completed(ledgerRequestId, { durationSec: d.duration, credits: d.credits });
+        return d.video_url;
+      }
+
+      const status = d.status || d.state || "processing";
+      process.stdout.write(`\r  狀態：${status}            `);
+    }
+    const error = new Error("HeyGen 等待超時（15 分鐘）");
+    error.ledgerCode = "poll_timeout";
+    throw error;
+  } catch (error) {
+    tracer.failed(ledgerRequestId, {
+      phase: "poll",
+      code: error.ledgerCode || "poll_request_failed",
     });
-    const data = await res.json().catch(() => null);
-    const d = data?.data || data || {};
-
-    if (d.failure_code || d.failure_message) {
-      console.error("HeyGen 回應：", JSON.stringify(data, null, 2));
-      throw new Error(`HeyGen 生成失敗：${d.failure_code || ""} ${d.failure_message || ""}`.trim());
-    }
-
-    if (d.video_url) {
-      console.log("");
-      if (d.duration) log(`HeyGen 原始輸出時長：${d.duration} 秒（加速前）`);
-      return d.video_url;
-    }
-
-    const status = d.status || d.state || "processing";
-    process.stdout.write(`\r  狀態：${status}            `);
+    throw error;
   }
-
-  throw new Error("HeyGen 等待超時（15 分鐘）");
 }
 
 // 文字驅動的統一入口：預設 v3，加 --heygen-v2 退回 v2。
 // 三個固定主播分支都呼叫這支，避免各自複製一份 create + poll。
-async function generateTextDrivenVideo(scriptText, avatarId, voiceId, title) {
+async function generateTextDrivenVideo(scriptText, avatarId, voiceId, fallbackTitle, segment = null) {
+  const title = requireHeyGenRequestTracer().titleFor(fallbackTitle, segment);
   if (HEYGEN_V2_FALLBACK) {
     log("⚠️ 已指定 --heygen-v2，改走舊的 /v2/videos 路徑");
-    const videoId = await createHeyGenVideoTextDrivenV2(scriptText, avatarId, voiceId, title);
-    return pollHeyGenStatus(videoId);
+    const request = await createHeyGenVideoTextDrivenV2(
+      scriptText,
+      avatarId,
+      voiceId,
+      title,
+      segment,
+    );
+    return pollHeyGenStatus(request);
   }
-  const videoId = await createHeyGenVideoTextDrivenV3(scriptText, avatarId, voiceId, title);
-  return pollHeyGenStatusV3(videoId);
+  const request = await createHeyGenVideoTextDrivenV3(
+    scriptText,
+    avatarId,
+    voiceId,
+    title,
+    segment,
+  );
+  return pollHeyGenStatusV3(request);
 }
 
 // v2 的輪詢（音訊驅動 path 與 --heygen-v2 共用，維持原樣不動）
-async function pollHeyGenStatus(videoId) {
+async function pollHeyGenStatus({ videoId, ledgerRequestId }) {
   log(`等待 HeyGen 完成（video_id: ${videoId}）`);
+  const tracer = requireHeyGenRequestTracer();
 
   // 輪詢 /v2/videos 專用的狀態端點：GET /v2/videos/{video_id}（不是舊的 v1/video_status.get）。
   // 回應 schema 防禦式解析：status 與 video_url 都試多個可能位置。
-  for (let i = 0; i < 90; i++) {
-    await sleep(10000); // 每 10 秒查一次
+  try {
+    for (let i = 0; i < 90; i++) {
+      await sleep(10000); // 每 10 秒查一次
 
-    const res = await fetch(
-      `https://api.heygen.com/v2/videos/${videoId}`,
-      {
-        headers: { "X-Api-Key": HEYGEN_API_KEY },
+      const res = await fetch(
+        `https://api.heygen.com/v2/videos/${videoId}`,
+        {
+          headers: { "X-Api-Key": HEYGEN_API_KEY },
+        }
+      );
+
+      const data = await res.json();
+      const d = data?.data || data;
+      const status = d?.status || d?.state;
+      const url = d?.video_url || d?.url || d?.output?.video_url;
+
+      if (!res.ok) {
+        const error = new Error(`HeyGen 狀態查詢失敗（HTTP ${res.status}）`);
+        error.ledgerCode = `http_${res.status}`;
+        throw error;
       }
-    );
 
-    const data = await res.json();
-    const d = data?.data || data;
-    const status = d?.status || d?.state;
-    const url = d?.video_url || d?.url || d?.output?.video_url;
+      process.stdout.write(`\r  狀態：${status || "?"}            `);
 
-    process.stdout.write(`\r  狀態：${status || "?"}            `);
-
-    if (["completed", "success", "done", "ready"].includes(String(status))) {
-      console.log("");
-      if (!url) {
-        console.error("HeyGen 完成但找不到 video_url：", JSON.stringify(data, null, 2));
-        throw new Error("HeyGen 完成但解析不到下載連結");
+      if (["completed", "success", "done", "ready"].includes(String(status))) {
+        console.log("");
+        if (!url) {
+          console.error("HeyGen 完成但找不到 video_url：", JSON.stringify(data, null, 2));
+          const error = new Error("HeyGen 完成但解析不到下載連結");
+          error.ledgerCode = "completed_without_video_url";
+          throw error;
+        }
+        tracer.completed(ledgerRequestId, { durationSec: d?.duration, credits: d?.credits });
+        return url;
       }
-      return url;
-    }
 
-    if (["failed", "error"].includes(String(status))) {
-      throw new Error(`HeyGen 生成失敗：${JSON.stringify(data)}`);
+      if (["failed", "error"].includes(String(status))) {
+        const error = new Error(`HeyGen 生成失敗：${JSON.stringify(data)}`);
+        error.ledgerCode = d?.error?.code || "provider_generation_failed";
+        throw error;
+      }
     }
+    const error = new Error("HeyGen 等待超時（15 分鐘）");
+    error.ledgerCode = "poll_timeout";
+    throw error;
+  } catch (error) {
+    tracer.failed(ledgerRequestId, {
+      phase: "poll",
+      code: error.ledgerCode || "poll_request_failed",
+    });
+    throw error;
   }
-
-  throw new Error("HeyGen 等待超時（15 分鐘）");
 }
 
 async function downloadVideo(url, destPath) {
@@ -719,15 +811,53 @@ async function runDualPath(segments, pair, outputMp4Path) {
   let segMp4s;
 
   if (USE_MINIMAX) {
+    // Reserve every exact Dashboard title before MiniMax TTS or HeyGen upload can spend anything.
+    // The later create must consume this same reservation instead of creating a second ledger row.
+    const tracer = requireHeyGenRequestTracer();
+    const tracedSegments = segments.map((seg, i) => {
+      const traceSegment = { index: i, total: segments.length, role: seg.role };
+      const heygenTitle = tracer.titleFor("marketing-auto-dual", traceSegment);
+      const providerScript = tradToSimpConverter(seg.text);
+      const payloadMetadata = audioDryRunMetadata(providerScript);
+      const ledgerRequestId = tracer.prepare({
+        api: "v2-audio",
+        title: heygenTitle,
+        segment: traceSegment,
+        payloadMetadata,
+      });
+      return {
+        ...seg,
+        traceSegment,
+        heygenTitle,
+        providerScript,
+        payloadMetadata,
+        ledgerRequestId,
+      };
+    });
     // Step 1: MiniMax 配音 + upload HeyGen（平行）
     log("\n--- Step 1: MiniMax 配音 + upload HeyGen（平行） ---");
     const audioAssets = await Promise.all(
-      segments.map(async (seg, i) => {
-        const simpText = tradToSimpConverter(seg.text);
-        const mp3 = await minimaxTTS(simpText, DUAL_VOICES[seg.role]);
+      tracedSegments.map(async (seg, i) => {
+        const paidStep = {
+          tracer,
+          ledgerRequestId: seg.ledgerRequestId,
+          api: "v2-audio",
+          title: seg.heygenTitle,
+          segment: seg.traceSegment,
+          payloadMetadata: seg.payloadMetadata,
+        };
+        const mp3 = await runVerifiedPaidStep({
+          ...paidStep,
+          operationKey: "minimax-tts",
+          paidStep: () => minimaxTTS(seg.providerScript, DUAL_VOICES[seg.role]),
+        });
         const mp3Path = path.resolve(tmpDir, `seg-${i + 1}-${seg.role}.mp3`);
         fs.writeFileSync(mp3Path, mp3);
-        const assetId = await heygenUploadAudio(mp3);
+        const assetId = await runVerifiedPaidStep({
+          ...paidStep,
+          operationKey: "heygen-audio-upload",
+          paidStep: () => heygenUploadAudio(mp3),
+        });
         log(`  段 ${i + 1} [${seg.role}] mp3 + upload OK → ${assetId}`);
         return { ...seg, assetId };
       })
@@ -737,9 +867,16 @@ async function runDualPath(segments, pair, outputMp4Path) {
     log("\n--- Step 2: HeyGen generate 各段（平行） ---");
     const videoIds = await Promise.all(
       audioAssets.map(async (seg, i) => {
-        const vid = await createHeyGenVideo(seg.assetId, pair[seg.role]);
-        log(`  段 ${i + 1} [${seg.role}] video_id = ${vid}`);
-        return { ...seg, videoId: vid };
+        const request = await createHeyGenVideo(
+          seg.assetId,
+          pair[seg.role],
+          seg.heygenTitle,
+          seg.traceSegment,
+          seg.ledgerRequestId,
+          seg.payloadMetadata,
+        );
+        log(`  段 ${i + 1} [${seg.role}] video_id = ${request.videoId}`);
+        return { ...seg, ...request };
       })
     );
 
@@ -747,7 +884,7 @@ async function runDualPath(segments, pair, outputMp4Path) {
     log("\n--- Step 3: 輪詢 + 下載 各段 mp4（平行） ---");
     segMp4s = await Promise.all(
       videoIds.map(async (seg, i) => {
-        const url = await pollHeyGenStatus(seg.videoId);
+        const url = await pollHeyGenStatus(seg);
         const mp4Path = path.resolve(tmpDir, `seg-${i + 1}-${seg.role}.mp4`);
         await downloadVideo(url, mp4Path);
         log(`  段 ${i + 1} 下載 OK`);
@@ -760,11 +897,13 @@ async function runDualPath(segments, pair, outputMp4Path) {
     log(`  聲音：A=${HEYGEN_DUAL_VOICES.A} / B=${HEYGEN_DUAL_VOICES.B}`);
     segMp4s = await Promise.all(
       segments.map(async (seg, i) => {
+        const segment = { index: i, total: segments.length, role: seg.role };
         const url = await generateTextDrivenVideo(
           seg.text,
           pair[seg.role],
           HEYGEN_DUAL_VOICES[seg.role],
-          `marketing-auto-dual-${i + 1}${seg.role}`
+          "marketing-auto-dual",
+          segment,
         );
         const mp4Path = path.resolve(tmpDir, `seg-${i + 1}-${seg.role}.mp4`);
         await downloadVideo(url, mp4Path);
@@ -785,15 +924,161 @@ async function runDualPath(segments, pair, outputMp4Path) {
   log(`✅ 雙人 concat 完成 → ${outputMp4Path}`);
 }
 
+function scriptSha256(scriptText) {
+  return `sha256:${createHash("sha256").update(String(scriptText || "")).digest("hex")}`;
+}
+
+function audioDryRunMetadata(scriptText) {
+  return {
+    mode: "audio-driven",
+    aspectRatio: "9:16",
+    resolution: "1080p",
+    expressiveness: "medium",
+    scriptCharacters: Array.from(String(scriptText || "")).length,
+    scriptSha256: scriptSha256(scriptText),
+    avatarIdPresent: true,
+    audioAssetIdSource: "minimax_then_heygen_upload",
+    motionPromptPresent: Boolean(HEYGEN_MOTION_PROMPT),
+  };
+}
+
+function textDryRunMetadata(scriptText, api) {
+  return {
+    mode: "text-driven",
+    aspectRatio: "9:16",
+    resolution: "1080p",
+    expressiveness: HEYGEN_EXPRESSIVENESS,
+    engine: api === "v3-text" ? "avatar_iv" : "v2-default",
+    scriptCharacters: Array.from(String(scriptText || "")).length,
+    scriptSha256: scriptSha256(scriptText),
+    avatarIdPresent: true,
+    voiceIdPresent: true,
+    motionPromptPresent: Boolean(HEYGEN_MOTION_PROMPT),
+    voiceSpeed: api === "v3-text" ? HEYGEN_VOICE_SPEED : null,
+    voiceLocalePresent: api === "v3-text" && Boolean(HEYGEN_VOICE_LOCALE),
+    brandGlossaryPresent: api === "v3-text" && Boolean(HEYGEN_BRAND_GLOSSARY_ID),
+  };
+}
+
+function previewAudioRequest(planner, fallbackTitle, segment = null, scriptText = "") {
+  const title = planner.titleFor(fallbackTitle, segment);
+  return planner.preview({
+    api: "v2-audio",
+    title,
+    segment,
+    payloadMetadata: audioDryRunMetadata(scriptText),
+  });
+}
+
+function previewTextRequest(planner, scriptText, fallbackTitle, segment = null) {
+  const api = HEYGEN_V2_FALLBACK ? "v2-text" : "v3-text";
+  const title = planner.titleFor(fallbackTitle, segment);
+  return planner.preview({
+    api,
+    title,
+    segment,
+    payloadMetadata: textDryRunMetadata(scriptText, api),
+  });
+}
+
+function buildHeyGenDryRunPlan(planner) {
+  const scriptPath = resolve(PROJECT_DIR, "public/script.txt");
+  if (!existsSync(scriptPath)) throw new Error("找不到 public/script.txt");
+  const rawScript = readFileSync(scriptPath, "utf-8");
+  const voiceRules = parseVoiceReplacements(rawScript);
+  const mode = FIXED_ANCHOR_TEMPLATE ? "solo" : detectMode(rawScript);
+
+  if (mode === "dual") {
+    const segments = splitByRole(rawScript, voiceRules);
+    if (segments.length === 0) throw new Error("雙人模式但切不出任何段");
+    return segments.map((segment, index) => {
+      const traceSegment = { index, total: segments.length, role: segment.role };
+      return USE_MINIMAX
+        ? previewAudioRequest(
+          planner,
+          "marketing-auto-dual",
+          traceSegment,
+          tradToSimpConverter(segment.text),
+        )
+        : previewTextRequest(planner, segment.text, "marketing-auto-dual", traceSegment);
+    });
+  }
+
+  let cleanedScript = cleanScript(rawScript);
+  for (const rule of voiceRules) cleanedScript = cleanedScript.split(rule.from).join(rule.to);
+  if (TEMPLATE === "dapan") {
+    if (!DAPAN_HEYGEN_VOICE_ID) throw new Error("大盤小報缺少 DAPAN_HEYGEN_VOICE_ID");
+    return [previewTextRequest(planner, cleanedScript, "marketing-auto-dapan")];
+  }
+  if (TEMPLATE === "institution") {
+    if (!INSTITUTION_HEYGEN_VOICE_ID) throw new Error("三大法人缺少 INSTITUTION_HEYGEN_VOICE_ID");
+    return [previewTextRequest(planner, cleanedScript, "marketing-auto-institution")];
+  }
+  if (TEMPLATE === "focusstock") {
+    if (!FOCUSSTOCK_HEYGEN_VOICE_ID) throw new Error("焦點股日報缺少 FOCUSSTOCK_HEYGEN_VOICE_ID");
+    return [previewTextRequest(planner, cleanedScript, "marketing-auto-focusstock")];
+  }
+  return [
+    USE_MINIMAX
+      ? previewAudioRequest(planner, "marketing-auto", null, tradToSimpConverter(cleanedScript))
+      : previewTextRequest(planner, cleanedScript, "marketing-auto"),
+  ];
+}
+
+function runHeyGenDryRun() {
+  if (SKIP_GENERATE || RENDER_ONLY) {
+    throw new Error("--dry-run 不可與 --skip-generate 或 --render-only 混用");
+  }
+  const planner = createHeyGenRequestPreview({
+    projectDir: PROJECT_DIR,
+    argv: process.argv.slice(2),
+    env: HEYGEN_TRACE_ENV,
+  });
+  const requests = buildHeyGenDryRunPlan(planner);
+  const previewPlan = createHeyGenPreviewPlan(requests);
+  console.log(JSON.stringify({
+    dryRun: true,
+    trace: planner.context,
+    ledgerPath: planner.ledgerPath,
+    requestCount: requests.length,
+    approvalId: previewPlan.approvalId,
+    requests,
+  }, null, 2));
+}
+
 // ── 主流程 ────────────────────────────────
 
 async function main() {
+  // Dry-run 在 workspace lock、owner marker、key validation、staging mutation、child process 與任何
+  // provider env/dotenv、MiniMax/HeyGen function 之前完成。付費路徑也只使用同一份啟動時
+  // trace 快照；.env 僅能補 provider secrets，不能在 dry-run 後改寫 identity/title。
+  // Dry-run 只讀 identity/script，ledger path
+  // 僅供預覽，不建立 DATA_DIR、ledger、lock 或 reservation。
+  if (DRY_RUN) {
+    runHeyGenDryRun();
+    return;
+  }
+  let paidPreviewApproval = null;
+  if (!SKIP_GENERATE && !RENDER_ONLY) {
+    const previewPlanner = createHeyGenRequestPreview({
+      projectDir: PROJECT_DIR,
+      argv: process.argv.slice(2),
+      env: HEYGEN_TRACE_ENV,
+    });
+    const previewRequests = buildHeyGenDryRunPlan(previewPlanner);
+    paidPreviewApproval = authorizeHeyGenPreviewPlan({
+      requests: previewRequests,
+      context: previewPlanner.context,
+      providedApprovalId: PROVIDED_PREVIEW_APPROVAL,
+    });
+  }
+  loadProviderEnvironment();
   // 0. 防止重複執行
   const lockFile = resolve(PROJECT_DIR, ".run.lock");
   const ownerFile = resolve(PROJECT_DIR, ".run.owner.json");
   const startedAt = new Date().toISOString();
   const workspaceRunToken = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(process.env.WORKSPACE_RUN_TOKEN || '') ? process.env.WORKSPACE_RUN_TOKEN : null;
+    .test(HEYGEN_TRACE_ENV.WORKSPACE_RUN_TOKEN || '') ? HEYGEN_TRACE_ENV.WORKSPACE_RUN_TOKEN : null;
   const ownership = { pid: process.pid, startedAt, token: workspaceRunToken };
   let lockFd;
   try {
@@ -846,6 +1131,19 @@ async function main() {
   if (!existsSync(scriptPath)) {
     console.error("❌ 找不到 public/script.txt");
     process.exit(1);
+  }
+  if (!SKIP_GENERATE) {
+    // Managed runs resolve the exact Project/Revision/Run through the job-specific workspace token.
+    // Direct CLI runs require an explicit Project/Run or EXP/Revision identity. Any ambiguity fails
+    // before the first paid create request.
+    heygenRequestTracer = createHeyGenRequestTracer({
+      projectDir: PROJECT_DIR,
+      argv: process.argv.slice(2),
+      env: HEYGEN_TRACE_ENV,
+      previewApproval: paidPreviewApproval,
+    });
+    log(`HeyGen trace：${JSON.stringify(heygenRequestTracer.context)}`);
+    log(`HeyGen ledger：${heygenRequestTracer.ledgerPath}`);
   }
 
   const templateLabel =
@@ -1098,22 +1396,53 @@ async function generateHeygenVideo(heygenPath) {
     const avatar = randomAvatar();
 
     if (USE_MINIMAX) {
-      log(`清洗後腳本（繁）：\n  ${cleanedScript}`);
+      // Reserve the exact create identity before MiniMax TTS or HeyGen upload can spend anything.
+      const tracer = requireHeyGenRequestTracer();
+      const heygenTitle = tracer.titleFor("marketing-auto");
       const simpScript = tradToSimpConverter(cleanedScript);
+      const payloadMetadata = audioDryRunMetadata(simpScript);
+      const ledgerRequestId = tracer.prepare({
+        api: "v2-audio",
+        title: heygenTitle,
+        payloadMetadata,
+      });
+      log(`清洗後腳本（繁）：\n  ${cleanedScript}`);
       log(`簡體版（給 MiniMax）：\n  ${simpScript}`);
       log(`抽到 avatar：${avatar.id}（${avatar.gender === "male" ? "男" : "女"}）`);
 
-      const audioBuffer = await minimaxTTS(simpScript, SOLO_VOICES[avatar.gender]);
+      const paidStep = {
+        tracer,
+        ledgerRequestId,
+        api: "v2-audio",
+        title: heygenTitle,
+        payloadMetadata,
+      };
+      const audioBuffer = await runVerifiedPaidStep({
+        ...paidStep,
+        operationKey: "minimax-tts",
+        paidStep: () => minimaxTTS(simpScript, SOLO_VOICES[avatar.gender]),
+      });
       const minimaxAudioPath = resolve(PROJECT_DIR, "public/minimax.mp3");
       writeFileSync(minimaxAudioPath, audioBuffer);
       log(`音檔備份 → ${minimaxAudioPath}`);
 
-      const audioAssetId = await heygenUploadAudio(audioBuffer);
+      const audioAssetId = await runVerifiedPaidStep({
+        ...paidStep,
+        operationKey: "heygen-audio-upload",
+        paidStep: () => heygenUploadAudio(audioBuffer),
+      });
 
       log("⏳ 正在呼叫 HeyGen，請勿重複執行此腳本...");
       log("   預計等待 3-5 分鐘，請耐心等候 ☕");
-      const videoId = await createHeyGenVideo(audioAssetId, avatar.id);
-      const videoUrl = await pollHeyGenStatus(videoId);
+      const request = await createHeyGenVideo(
+        audioAssetId,
+        avatar.id,
+        heygenTitle,
+        null,
+        ledgerRequestId,
+        payloadMetadata,
+      );
+      const videoUrl = await pollHeyGenStatus(request);
       await downloadVideo(videoUrl, heygenPath);
     } else {
       log(`清洗後腳本（繁，直接送 HeyGen，不轉簡體、不經 MiniMax）：\n  ${cleanedScript}`);

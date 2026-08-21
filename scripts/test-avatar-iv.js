@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 /**
+ * RETIRED: historical payload experiment only; execution is blocked before provider access.
+ * Use run.js with explicit identity and --dry-run instead.
+ *
  * 一次性測試：用 HeyGen 專用 Avatar IV 端點 (POST /v2/videos) + motion_prompt
  * 驗證「手會不會動」。完全獨立，不碰 run.js / pipeline / public/heygen.mp4。
  *
@@ -24,13 +27,15 @@
  *   TITLE          預設 avatar-iv-test
  *   OUT            預設 ./avatar-iv-test.mp4
  *
- * 範例：
+ * 歷史範例（現已停用）：
  *   HEYGEN_API_KEY=xxx AVATAR_ID=abc123 TEXT="大家好，今天來聊台股的散熱題材" VOICE_ID=zh-CN-xxx \
  *     node scripts/test-avatar-iv.js
  *
  *   HEYGEN_API_KEY=xxx IMAGE=./woman.jpg AUDIO=./voice.mp3 \
  *     node scripts/test-avatar-iv.js
  */
+
+require('./retired-paid-provider-script').stopRetiredPaidProviderScript('test-avatar-iv.js');
 
 const fs = require("fs");
 const path = require("path");

@@ -2,8 +2,9 @@
 
 // ─────────────────────────────────────────
 //  雙人 Avatar IV 切換鏡頭模式 ── 一次性驗證腳本
+//  RETIRED：只保留歷史 source；provider access 前會固定停止。請改用 run.js --dry-run。
 //
-//  用法：node scripts/verify-dual.js
+//  歷史用法（現已停用）：node scripts/verify-dual.js
 //
 //  目的：驗證「切段 + N × MiniMax + N × HeyGen + ffmpeg concat」整條路徑
 //        不會動 run.js、不會跑後製鏈、輸出到 public/heygen-dual-verify.mp4
@@ -15,6 +16,8 @@
 //
 //  成本估算：4 段 MiniMax (~0.05 RMB) + 4 段 HeyGen（單支 ~$0.3-0.5；4 段約 $1-2）
 // ─────────────────────────────────────────
+
+require('./retired-paid-provider-script').stopRetiredPaidProviderScript('verify-dual.js');
 
 require("dotenv").config();
 
