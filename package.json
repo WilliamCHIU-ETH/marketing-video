@@ -31,7 +31,6 @@
     "correct-subtitles": "node scripts/correct-subtitles.js",
     "list": "node scripts/list-articles.js",
     "check-voices": "node scripts/check-voices.js",
-    "test:v3": "node scripts/test-v3-videos.js",
     "use-dapan-assets": "node scripts/use-dapan-assets.js",
     "parse-script:dapan": "node scripts/parse-dapan-script.js",
     "render:dapan": "remotion render DapanXiaobao out/output-dapan.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
