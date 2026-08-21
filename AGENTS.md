@@ -47,6 +47,19 @@ New user-visible video work follows `Project → Revision → Run`. Do not creat
 
 Project Assets distinguish `image`, general B-Roll `video`, and `speaker-video`. Never infer the role from the file extension alone, and never reuse a `speaker-video` as B-Roll. The current automatic OCR／shot-planning path consumes images; storing and previewing B-Roll does not by itself prove that the clip is edited into the rendered output.
 
+## Optional ChipK Capture provider
+
+ChipK Simulator acquisition is an optional sibling provider. Its source, skill, route catalog,
+Simulator/session rules, and standalone tests belong in
+`../chipk-simulator-capture/`; read that repository's `AGENTS.md` and Capture skill before changing
+provider behavior. Do not copy provider implementation back into this repository.
+
+Marketing Video owns only the `MaterialAcquisitionPort`, CLI/JSON adapter, fallback policy,
+caller-owned job acquisition directory, result verification, Project Asset ingest, and downstream
+editing. It must not import provider source or directly operate `simctl`, Deep Links, OCR, sessions,
+or gestures. With no `materialAcquisition` intent, the existing provider-free flow must remain
+unchanged; `disable-capture` must not probe the provider.
+
 ## Safe validation
 
 Run in this order:
