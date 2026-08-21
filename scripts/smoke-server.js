@@ -487,6 +487,7 @@ async function main() {
   assert.match(html, /專案素材庫/);
   assert.match(html, /網頁預覽/);
   assert.match(html, /是否實際出現在成片/);
+  assert.match(html, /Revision 仍保留素材引用/);
   assert.match(html, /成品已保存於這台 Mac/);
   assert.match(html, /技術資訊與執行記錄/);
   assert.match(html, /素材資料暫時無法載入/);

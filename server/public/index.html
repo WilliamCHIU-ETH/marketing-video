@@ -1004,11 +1004,16 @@ function projectAssetCard(projectDetail, job) {
   const assets = projectDetail.project.assets || [];
   const byId = new Map(assets.map((asset) => [String(asset.id), asset]));
   const seen = new Set();
-  const selectedAssets = refIds.map((id) => byId.get(id)).filter((asset) => {
-    if (!asset || seen.has(String(asset.id))) return false;
-    seen.add(String(asset.id));
-    return true;
-  });
+  const selectedAssets = [];
+  const unresolvedRefIds = [];
+  for (const id of refIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const asset = byId.get(id);
+    if (asset) selectedAssets.push(asset);
+    else unresolvedRefIds.push(id);
+  }
+  const selectedRefCount = selectedAssets.length + unresolvedRefIds.length;
   const availableAssets = assets.filter((asset) => !refs.has(String(asset.id)));
   const version = (projectDetail.revision && projectDetail.revision.number) || job.revisionNumber;
   const projectId = projectDetail.project.id;
@@ -1076,14 +1081,20 @@ function projectAssetCard(projectDetail, job) {
       el('span', {}, `${kindLabel(asset)}・${fileSize(asset.size)}`)));
   };
 
+  const unresolvedRefCard = (id) => el('div', { class: 'note' },
+    el('b', {}, 'Revision 仍保留素材引用'),
+    el('div', { style: 'margin-top:4px' },
+      `素材 ID：${id}。Project 素材清單中已找不到，因此目前無法預覽或下載。`));
+
   const selectedSection = el('section', { class: 'asset-selected' },
     el('div', { class: 'asset-section-head' },
-      el('h3', {}, `這一版帶入的素材（${selectedAssets.length}）`),
+      el('h3', {}, `這一版帶入的素材（${selectedRefCount}）`),
       el('span', { class: 'asset-readonly' }, `🔒 V${version || '—'} 唯讀`)),
     el('div', { class: 'asset-section-note' },
       '帶入只代表這一版引用了素材；是否實際出現在成片，仍以配圖計畫或時間軸證據為準。'),
-    selectedAssets.length
-      ? el('div', { class: 'asset-browser-grid' }, ...selectedAssets.map(assetCard))
+    selectedRefCount
+      ? el('div', { class: 'asset-browser-grid' },
+          ...selectedAssets.map(assetCard), ...unresolvedRefIds.map(unresolvedRefCard))
       : el('div', { class: 'note' }, '這一版沒有留下素材選取紀錄。'));
 
   let library = '';
