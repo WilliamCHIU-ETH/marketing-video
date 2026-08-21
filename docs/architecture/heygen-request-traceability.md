@@ -30,9 +30,9 @@ MV-<projectId>-V<revisionNumber>-<runId>
 ```
 
 An experimental manual run can use `--experiment=EXP-001 --revision=V1`; its base title remains
-`測試用EXP-001-V1`. Multi-speaker creates append `-S01A`, `-S02B`, and so on, so parallel segments
-never share one Dashboard title. The corresponding experiment ledger name is deterministic for the
-EXP/Revision pair, so a later process sees the earlier reservation. `--experiment-run-id` is rejected:
+`測試用EXP-001-V1`. Multi-speaker creates keep that canonical Dashboard title; segment index and role
+remain separate in each request trace and logical key. The corresponding experiment ledger name is
+deterministic for the EXP/Revision pair, so a later process sees the earlier reservation. `--experiment-run-id` is rejected:
 a genuinely new create requires a new Revision. EXP contexts reject `--heygen-title` and
 `HEYGEN_VIDEO_TITLE` so the canonical `測試用EXP-NNN-VN` marker cannot be replaced. Project contexts
 may use `--heygen-title` as a readable prefix, while Project/Run identity remains appended.

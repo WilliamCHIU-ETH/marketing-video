@@ -787,9 +787,10 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
     { index: 1, total: 2, role: 'B' },
   ]);
   assert.deepEqual(dualPreview.requests.map((item) => item.title), [
-    '測試用EXP-100-V1-S01A',
-    '測試用EXP-100-V1-S02B',
+    '測試用EXP-100-V1',
+    '測試用EXP-100-V1',
   ]);
+  assert.equal(new Set(dualPreview.requests.map((item) => item.logicalKey)).size, 2);
   assert.equal(fs.existsSync(dualPreview.ledgerPath), false);
   assert.equal(fs.existsSync(dataDir), false);
 
@@ -882,7 +883,7 @@ test('run.js --dry-run 輸出 exact preview、零 outbound 且不留 prepared re
   assert.deepEqual(ownerAfter, ownerBefore);
 });
 
-test('EXP title 延續既有命名並讓多人 segment 唯一', (t) => {
+test('EXP title 保持 canonical，並由 trace segment 區分多人 request', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-exp-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const tracer = createHeyGenRequestTracer({
@@ -901,12 +902,23 @@ test('EXP title 延續既有命名並讓多人 segment 唯一', (t) => {
   assert.equal(tracer.titleFor('ignored'), '測試用EXP-001-V2');
   assert.equal(
     tracer.titleFor('ignored', { index: 0, total: 2, role: 'A' }),
-    '測試用EXP-001-V2-S01A',
+    '測試用EXP-001-V2',
   );
   assert.equal(
     tracer.titleFor('ignored', { index: 1, total: 2, role: 'B' }),
-    '測試用EXP-001-V2-S02B',
+    '測試用EXP-001-V2',
   );
+  const first = tracer.preview({
+    api: 'v3-text',
+    title: tracer.titleFor('ignored', { index: 0, total: 2, role: 'A' }),
+    segment: { index: 0, total: 2, role: 'A' },
+  });
+  const second = tracer.preview({
+    api: 'v3-text',
+    title: tracer.titleFor('ignored', { index: 1, total: 2, role: 'B' }),
+    segment: { index: 1, total: 2, role: 'B' },
+  });
+  assert.notEqual(first.logicalKey, second.logicalKey);
 });
 
 test('EXP/Revision 固定 canonical title，拒絕自訂 prefix 並跨程序阻擋重送', (t) => {

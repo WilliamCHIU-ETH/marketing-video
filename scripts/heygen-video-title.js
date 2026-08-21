@@ -171,7 +171,8 @@ function resolveHeyGenVideoTitle(fallback, options = {}) {
   }
 
   if (!base) throw new Error('HeyGen video title 不可為空');
-  return `${base}${segmentSuffix(options.segment)}`;
+  const suffix = segmentSuffix(options.segment);
+  return experiment ? base : `${base}${suffix}`;
 }
 
 function normalizeSegment(segment) {
