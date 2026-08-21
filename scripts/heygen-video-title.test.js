@@ -816,7 +816,7 @@ test('EXP title 延續既有命名並讓多人 segment 唯一', (t) => {
   );
 });
 
-test('EXP/Revision 使用穩定 logical key，跨程序改 title prefix 仍阻擋重送', (t) => {
+test('EXP/Revision 固定 canonical title，拒絕自訂 prefix 並跨程序阻擋重送', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'heygen-exp-dedupe-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const options = {
@@ -832,18 +832,32 @@ test('EXP/Revision 使用穩定 logical key，跨程序改 title prefix 仍阻�
   });
   const second = createHeyGenRequestTracer({
     ...options,
-    argv: [...options.argv, '--heygen-title=renamed-dashboard-prefix'],
     now: fixedClock(),
     randomUUID: () => 'request-exp-second',
     pid: 200,
   });
   assert.equal(first.ledgerPath, second.ledgerPath);
   const title = first.titleFor('ignored');
+  assert.equal(title, '測試用EXP-009-V3');
+  assert.equal(second.titleFor('ignored'), title);
   first.prepare({ api: 'v3-text', title });
-  assert.notEqual(second.titleFor('ignored'), title);
   assert.throws(
-    () => second.prepare({ api: 'v3-text', title: second.titleFor('ignored') }),
+    () => second.prepare({ api: 'v3-text', title }),
     /logical request 已有 ledger 紀錄（prepared），拒絕自動重送/,
+  );
+  assert.throws(
+    () => createHeyGenRequestTracer({
+      ...options,
+      argv: [...options.argv, '--heygen-title=renamed-dashboard-prefix'],
+    }).titleFor('ignored'),
+    /EXP context.*不支援自訂 heygen-title prefix/,
+  );
+  assert.throws(
+    () => createHeyGenRequestTracer({
+      ...options,
+      env: { ...options.env, HEYGEN_VIDEO_TITLE: 'renamed-dashboard-prefix' },
+    }).titleFor('ignored'),
+    /EXP context.*不支援自訂 heygen-title prefix/,
   );
   assert.throws(
     () => createHeyGenRequestTracer({

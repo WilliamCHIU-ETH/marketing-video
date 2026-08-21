@@ -103,22 +103,26 @@ function resolveHeyGenVideoTitle(fallback, options = {}) {
   const env = options.env || {};
   const context = options.context || null;
   const explicit = cleanTitle(readArg(argv, 'heygen-title') || env.HEYGEN_VIDEO_TITLE);
+  const experiment = context?.kind === 'experiment'
+    ? context.experimentId
+    : (!context ? readArg(argv, 'experiment') || env.HEYGEN_EXPERIMENT_ID : null);
   let base;
 
-  if (explicit) {
+  if (experiment && explicit) {
+    throw new Error('EXP context 的 HeyGen title 固定為 測試用EXP-NNN-VN，不支援自訂 heygen-title prefix');
+  }
+
+  if (context?.kind === 'experiment') {
+    base = `測試用${context.experimentId}-${context.revision}`;
+  } else if (explicit) {
     if (context?.kind === 'project') {
       base = `${explicit}-${context.projectId}-${revisionLabel(context)}-${context.runId}`;
-    } else if (context?.kind === 'experiment') {
-      base = `${explicit}-${context.experimentId}-${context.revision}`;
     } else {
       base = explicit;
     }
-  } else if (context?.kind === 'experiment') {
-    base = `測試用${context.experimentId}-${context.revision}`;
   } else if (context?.kind === 'project') {
     base = `MV-${context.projectId}-${revisionLabel(context)}-${context.runId}`;
   } else {
-    const experiment = readArg(argv, 'experiment') || env.HEYGEN_EXPERIMENT_ID;
     if (experiment) {
       base = `測試用${normalizeExperimentId(experiment)}-${normalizeRevision(
         readArg(argv, 'revision') || env.HEYGEN_REVISION || 'V1',

@@ -64,7 +64,7 @@ const SKIP_GENERATE = process.argv.includes("--skip-generate");
 //   server-managed Run 會用 WORKSPACE_RUN_TOKEN 自動綁定 Project/Revision/Run 與 provider ledger。
 //   手動執行可傳 --project-id / --revision / --run-id，或 --experiment / --revision；
 //   沒有完整 identity 一律 fail closed，不允許匿名或 timestamp/PID 充當付費 request identity。
-//   --heygen-title 是人類可讀 prefix；trace identity 仍會附加，不會被自訂名稱蓋掉。
+//   --heygen-title 只供 Project context 作人類可讀 prefix；EXP 固定使用測試用EXP-NNN-VN。
 const NO_SPEED = process.argv.includes("--no-speed");
 const DRY_RUN = process.argv.includes("--dry-run");
 

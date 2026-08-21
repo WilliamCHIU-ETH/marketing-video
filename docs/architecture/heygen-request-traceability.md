@@ -30,8 +30,9 @@ An experimental manual run can use `--experiment=EXP-001 --revision=V1`; its bas
 `測試用EXP-001-V1`. Multi-speaker creates append `-S01A`, `-S02B`, and so on, so parallel segments
 never share one Dashboard title. The corresponding experiment ledger name is deterministic for the
 EXP/Revision pair, so a later process sees the earlier reservation. `--experiment-run-id` is rejected:
-a genuinely new create requires a new Revision. `--heygen-title` is a readable prefix rather than an
-identity override: Project/Run or EXP/Revision identity remains appended.
+a genuinely new create requires a new Revision. EXP contexts reject `--heygen-title` and
+`HEYGEN_VIDEO_TITLE` so the canonical `測試用EXP-NNN-VN` marker cannot be replaced. Project contexts
+may use `--heygen-title` as a readable prefix, while Project/Run identity remains appended.
 
 Manual CLI invocation must supply all of `--project-id`, `--revision`, and `--run-id`, or both
 `--experiment` and `--revision`. Missing or mixed identity fails before workspace mutation, MiniMax,
