@@ -483,10 +483,16 @@ async function main() {
   assert.match(html, /出片前台/);
   assert.match(html, /3・講者 Avatar/);
   assert.match(html, /4・圖片與 B-Roll 影片素材/);
-  assert.match(html, /Project 素材與本版選取/);
-  assert.match(html, /本版已選取/);
-  assert.match(html, /不等於已剪進成片/);
-  assert.match(html, /Project 其他可用素材/);
+  assert.match(html, /這一版帶入的素材/);
+  assert.match(html, /專案素材庫/);
+  assert.match(html, /網頁預覽/);
+  assert.match(html, /是否實際出現在成片/);
+  assert.match(html, /成品已保存於這台 Mac/);
+  assert.match(html, /技術資訊與執行記錄/);
+  assert.match(html, /素材資料暫時無法載入/);
+  assert.match(html, /暫存工作/);
+  assert.match(html, /跨影片專案/);
+  assert.doesNotMatch(html, /也存進成品庫了/);
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
@@ -695,7 +701,8 @@ async function main() {
     method: 'POST',
     body: MP4_FIXTURE,
   });
-  await request(base, `/api/jobs/${id}/upload?name=shot1.png&originalName=screen.png`, {
+  await request(base,
+    `/api/jobs/${id}/upload?name=shot1.png&originalName=${encodeURIComponent('產品畫面')}`, {
     method: 'POST',
     body: PNG_FIXTURE,
   });
@@ -717,6 +724,7 @@ async function main() {
   assert.ok(reusableVideo);
   assert.ok(speakerVideo);
   assert.notEqual(reusableVideo.id, speakerVideo.id);
+  assert.equal(reusableImage.originalName, '產品畫面');
   assert.equal(reusableVideo.originalName, 'B Roll.mp4');
   assert.equal(reusableVideo.mediaType, 'video/mp4');
   assert.equal(Object.hasOwn(reusableImage, 'path'), false);
@@ -751,11 +759,18 @@ async function main() {
   const imageAsset = await fetch(base + `/api/projects/${created.job.projectId}/assets/${reusableImage.id}`);
   assert.equal(imageAsset.status, 200);
   assert.equal(imageAsset.headers.get('content-type'), 'image/png');
+  assert.equal(imageAsset.headers.get('content-disposition'), null);
+  const imageDownload = await fetch(
+    base + `/api/projects/${created.job.projectId}/assets/${reusableImage.id}?dl=1`);
+  assert.equal(imageDownload.status, 200);
+  assert.equal(imageDownload.headers.get('content-disposition'),
+    `attachment; filename="download.png"; filename*=UTF-8''%E7%94%A2%E5%93%81%E7%95%AB%E9%9D%A2.png`);
 
   const videoAssetUrl = `/api/projects/${created.job.projectId}/assets/${reusableVideo.id}`;
   const videoRange = await fetch(base + videoAssetUrl, { headers: { Range: 'bytes=0-7' } });
   assert.equal(videoRange.status, 206);
   assert.equal(videoRange.headers.get('content-type'), 'video/mp4');
+  assert.equal(videoRange.headers.get('content-disposition'), null);
   assert.equal(videoRange.headers.get('content-range'), `bytes 0-7/${MP4_FIXTURE.length}`);
   assert.deepEqual(Buffer.from(await videoRange.arrayBuffer()), MP4_FIXTURE.subarray(0, 8));
   const invalidRange = await fetch(base + videoAssetUrl, {
@@ -763,6 +778,31 @@ async function main() {
   });
   assert.equal(invalidRange.status, 416);
   assert.equal(invalidRange.headers.get('content-range'), `bytes */${MP4_FIXTURE.length}`);
+  const videoDownload = await fetch(base + videoAssetUrl + '?dl=1');
+  assert.equal(videoDownload.status, 200);
+  assert.equal(videoDownload.headers.get('content-disposition'),
+    `attachment; filename="B Roll.mp4"; filename*=UTF-8''B%20Roll.mp4`);
+
+  // Historical metadata is read from disk on every request. Even if an older Project contains
+  // control characters or quotes, it must not be able to add a response header.
+  const projectFile = path.join(DATA_DIR, 'projects', created.job.projectId, 'project.json');
+  const storedProjectForHeaderTest = JSON.parse(fs.readFileSync(projectFile, 'utf8'));
+  const storedVideoForHeaderTest = storedProjectForHeaderTest.assets
+    .find((asset) => asset.id === reusableVideo.id);
+  storedVideoForHeaderTest.originalName = '測試"\r\nX-Injected: yes';
+  fs.writeFileSync(projectFile, JSON.stringify(storedProjectForHeaderTest, null, 2));
+  const injectionSafeDownload = await fetch(base + videoAssetUrl + '?dl=1');
+  assert.equal(injectionSafeDownload.status, 200);
+  assert.equal(injectionSafeDownload.headers.get('x-injected'), null);
+  assert.equal(injectionSafeDownload.headers.get('content-disposition'),
+    `attachment; filename="_X-Injected: yes.mp4"; filename*=UTF-8''%E6%B8%AC%E8%A9%A6%22X-Injected%3A%20yes.mp4`);
+  storedVideoForHeaderTest.originalName = `${'a'.repeat(219)}😀`;
+  fs.writeFileSync(projectFile, JSON.stringify(storedProjectForHeaderTest, null, 2));
+  const longUnicodeDownload = await fetch(base + videoAssetUrl + '?dl=1');
+  assert.equal(longUnicodeDownload.status, 200);
+  assert.match(longUnicodeDownload.headers.get('content-disposition'), /\.mp4"; filename\*=/);
+  storedVideoForHeaderTest.originalName = reusableVideo.originalName;
+  fs.writeFileSync(projectFile, JSON.stringify(storedProjectForHeaderTest, null, 2));
 
   const speakerReuse = await fetch(base + '/api/jobs', {
     method: 'POST',
@@ -1643,6 +1683,11 @@ async function main() {
   const compactPlayback = await fetch(base + `/api/jobs/${compactable.job.id}/file/final.mp4`);
   assert.equal(compactPlayback.status, 200);
   assert.deepEqual(Buffer.from(await compactPlayback.arrayBuffer()), MP4_FIXTURE);
+  const compactDownload = await fetch(
+    base + `/api/jobs/${compactable.job.id}/file/final.mp4?dl=1`);
+  assert.equal(compactDownload.status, 200);
+  assert.equal(compactDownload.headers.get('content-disposition'),
+    'attachment; filename="v001-final.mp4"');
   const strictGateDirs = [
     missingSizeDir,
     wrongProjectDir,

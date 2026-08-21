@@ -2007,12 +2007,42 @@ function validateUpload(file, name, spec) {
   return media;
 }
 
-function sendFile(req, res, file, download) {
+function safeDownloadName(originalName, file, mediaType) {
+  const actualExtension = extensionForMediaType(mediaType) || path.extname(file).toLowerCase();
+  const normalized = String(originalName || '').replace(/\\/g, '/');
+  let name = path.basename(normalized)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .trim();
+  if (!name) name = `download${actualExtension}`;
+  if ((!path.extname(name) || path.extname(name) === '.') && actualExtension)
+    name = `${name.replace(/\.$/, '')}${actualExtension}`;
+  const extension = path.extname(name);
+  const extensionChars = Array.from(extension);
+  const stemChars = Array.from(extension ? name.slice(0, -extension.length) : name);
+  const stemLimit = Math.max(1, 220 - extensionChars.length);
+  return stemChars.slice(0, stemLimit).join('') + extensionChars.join('');
+}
+
+function projectAssetContentDisposition(originalName, file, mediaType) {
+  const name = safeDownloadName(originalName, file, mediaType);
+  const extension = path.extname(name).replace(/[^\x20-\x7e]/g, '');
+  const ascii = name.replace(/[^\x20-\x7e]/g, '').replace(/["\\]/g, '_').trim();
+  const fallback = ascii && ascii !== extension ? ascii : `download${extension}`;
+  const encoded = encodeURIComponent(name).replace(/['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+function sendFile(req, res, file, download, downloadName) {
   if (!fs.existsSync(file)) return send(res, 404, { error: '找不到檔案' });
   const st = fs.statSync(file);
   const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
   const headers = { 'Content-Type': type, 'Cache-Control': 'no-store' };
-  if (download) headers['Content-Disposition'] = `attachment; filename="${path.basename(file)}"`;
+  if (download) {
+    headers['Content-Disposition'] = downloadName
+      ? projectAssetContentDisposition(downloadName.originalName, file, downloadName.mediaType)
+      : `attachment; filename="${path.basename(file)}"`;
+  }
 
   // 影片要支援拖時間軸 → Range。無效或超界範圍必須明確回 416，
   // 否則瀏覽器會把錯誤長度當成可播放資料，預覽會卡住。
@@ -2114,9 +2144,12 @@ const server = http.createServer(async (req, res) => {
 
     if (seg[0] === 'api' && seg[1] === 'projects' && seg[2] && seg[3] === 'assets'
         && seg[4] && req.method === 'GET') {
+      const project = PROJECT_STORE.get(seg[2]);
+      const asset = project && (project.assets || []).find((item) => item.id === seg[4]);
       const file = PROJECT_STORE.assetPath(seg[2], seg[4]);
-      if (!file || !fs.existsSync(file)) return send(res, 404, { error: '找不到素材' });
-      return sendFile(req, res, file, url.searchParams.get('dl') === '1');
+      if (!asset || !file || !fs.existsSync(file)) return send(res, 404, { error: '找不到素材' });
+      const download = url.searchParams.get('dl') === '1';
+      return sendFile(req, res, file, download, download ? asset : null);
     }
 
     if (p === '/api/jobs' && req.method === 'POST') {

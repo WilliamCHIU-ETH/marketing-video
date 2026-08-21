@@ -105,17 +105,61 @@
   .project-context{background:#eef4ff;border-color:#c8daf8;color:#214f91}
   .project-context h2{color:#173e76;margin-bottom:8px}
   .version{font-size:12px;padding:3px 8px;border-radius:999px;background:#eef4ff;color:var(--accent);white-space:nowrap}
-  .asset-summary{display:grid;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-  .asset-summary-row{display:grid;grid-template-columns:145px minmax(0,1fr);gap:18px;padding:13px 15px;background:#fff}
-  .asset-summary-row+.asset-summary-row{border-top:1px solid var(--line)}
-  .asset-summary-kind{font-size:13px;font-weight:650}
-  .asset-summary-files{display:flex;flex-direction:column;gap:5px;min-width:0}
-  .asset-summary-file{display:flex;align-items:baseline;gap:8px;min-width:0}
-  .asset-summary-file b{font-size:13.5px;overflow-wrap:anywhere}
-  .asset-summary-file span,.asset-summary-empty{font-size:12px;color:var(--dim);white-space:nowrap}
-  .asset-summary-file .asset-state{white-space:normal}
-  .asset-state.selected{color:var(--accent);font-weight:600}
-  .project-asset-library{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+  .asset-browser-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}
+  .asset-browser-head h2{margin:0}
+  .asset-readonly{font-size:11.5px;color:var(--dim);background:var(--soft);padding:3px 9px;
+    border-radius:999px;white-space:nowrap}
+  .asset-workspace{display:grid;grid-template-columns:minmax(220px,260px) minmax(0,1fr);
+    grid-template-areas:'sidebar preview';gap:18px;align-items:start;margin-top:16px}
+  .asset-sidebar{grid-area:sidebar;min-width:0;border:1px solid var(--line);border-radius:11px;
+    padding:14px;background:#fafbfc}
+  .asset-preview{grid-area:preview;display:flex;flex-direction:column;border:1px solid var(--line);
+    border-radius:11px;overflow:hidden;background:#fff;min-width:0}
+  .asset-preview-media{width:100%;aspect-ratio:16/9;min-height:0;border-radius:0;overflow:hidden;background:#12161c;
+    display:flex;align-items:center;justify-content:center}
+  .asset-preview-media img,.asset-preview-media video{width:100%;height:100%;object-fit:contain;border-radius:0}
+  .asset-preview-copy{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;
+    min-width:0;padding:8px 12px;border-bottom:1px solid var(--line);background:#fff}
+  .asset-preview-heading{min-width:0}
+  .asset-preview-title-row{display:flex;align-items:baseline;gap:7px;min-width:0}
+  .asset-preview-kicker{font-size:10.5px;color:var(--accent);font-weight:650;white-space:nowrap}
+  .asset-preview-copy h3{font-size:13.5px;line-height:1.35;margin:0;overflow-wrap:anywhere}
+  .asset-preview-meta{font-size:11px;color:var(--dim);margin-top:1px}
+  .asset-preview-copy a{font-size:12px;text-decoration:none;white-space:nowrap}
+  .asset-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}
+  .asset-section-head h3{font-size:14.5px;margin:0}
+  .asset-section-note{font-size:12.5px;color:var(--dim);margin-bottom:11px}
+  .asset-browser-grid{display:grid;grid-template-columns:1fr;gap:8px}
+  .asset-browser-card{appearance:none;width:100%;display:grid;grid-template-columns:84px minmax(0,1fr);gap:9px;
+    align-items:center;text-align:left;padding:7px;border:1px solid var(--line);border-radius:9px;background:#fff;
+    color:var(--ink);font:inherit;cursor:pointer;min-width:0}
+  .asset-browser-card:hover{border-color:#b7c9e6;background:#fbfdff}
+  .asset-browser-card:focus-visible{outline:3px solid rgba(31,111,235,.25);outline-offset:2px}
+  .asset-browser-card.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:#f7faff}
+  .asset-browser-thumb{position:relative;width:84px;aspect-ratio:16/10;border-radius:6px;overflow:hidden;
+    background:#161b22;display:flex;align-items:center;justify-content:center}
+  .asset-browser-thumb img,.asset-browser-thumb video{width:100%;height:100%;object-fit:cover;border-radius:0;pointer-events:none}
+  .asset-browser-thumb.image img{object-position:top}
+  .asset-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:30px;height:30px;
+    border-radius:50%;display:grid;place-items:center;padding-left:2px;background:rgba(15,20,27,.76);color:#fff;
+    font-size:12px;box-shadow:0 1px 5px rgba(0,0,0,.25)}
+  .asset-browser-copy{min-width:0}
+  .asset-browser-copy b{display:block;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+  .asset-browser-copy span{display:block;font-size:11.5px;color:var(--dim);margin-top:5px}
+  .asset-library{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+  .asset-library>summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;
+    gap:12px;padding:7px 0;color:var(--ink)}
+  .asset-library>summary::-webkit-details-marker{display:none}
+  .asset-library>summary::before{content:'▸';color:var(--dim);font-size:11px;margin-right:-4px}
+  .asset-library[open]>summary::before{content:'▾'}
+  .asset-library-title{font-size:13.5px;font-weight:650;flex:1}
+  .asset-library-state{font-size:11.5px;color:var(--dim);white-space:nowrap}
+  .asset-library-body{padding-top:10px}
+  .asset-library:not([open])>.asset-library-body,
+  .technical-details:not([open])>:not(summary),
+  .technical-log:not([open])>:not(summary){display:none}
+  .project-asset-library{margin-top:16px}
+  .project-reuse-library{margin-top:0}
   .project-asset-library h3{font-size:14px;margin:0 0 4px}
   .project-asset-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:10px}
   .project-asset-option{display:grid;grid-template-columns:72px minmax(0,1fr);gap:10px;align-items:center;
@@ -154,14 +198,31 @@
   .outs{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,290px));
     gap:20px;align-items:start}
   .outs figure{margin:0}
-  @media(max-width:600px){
-    .asset-summary-row{grid-template-columns:1fr;gap:4px}
+  @media(max-width:760px){
+    .asset-workspace{grid-template-columns:1fr;grid-template-areas:'preview' 'sidebar'}
+    .asset-preview-copy{grid-template-columns:1fr}
+    .asset-preview-copy a{justify-self:start}
   }
   .outs video{width:100%;border-radius:9px;background:#000;display:block}
   .outs figcaption{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .outs figcaption b{font-size:12.5px;font-weight:600;word-break:break-all;flex:1;min-width:0}
   .outs figcaption span{font-size:11.5px;color:var(--dim)}
   .outs figcaption a{font-size:12.5px;padding:5px 11px}
+  .local-output{display:flex;gap:9px;align-items:flex-start;margin-top:16px;padding:11px 13px;border-radius:9px;
+    background:#f3fbf7;color:#236746;font-size:12.5px}
+  .local-output b{display:block;font-size:13px}
+  .local-output span{display:block;color:#537161;margin-top:1px}
+  .technical-details{margin-top:11px;font-size:12px;color:var(--dim)}
+  .technical-details summary,.technical-log summary{cursor:pointer;list-style:none;color:var(--dim)}
+  .technical-details summary::-webkit-details-marker,.technical-log summary::-webkit-details-marker{display:none}
+  .technical-details summary::before,.technical-log summary::before{content:'▸ ';font-size:10px}
+  .technical-details[open] summary::before,.technical-log[open] summary::before{content:'▾ '}
+  .technical-details code{margin-top:8px;padding:9px 11px;border-radius:7px;background:var(--soft);
+    color:#53606f;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+  .technical-details[open] code{display:block}
+  .technical-log summary{font-size:13.5px;font-weight:600;color:var(--ink)}
+  .technical-log[open] summary{margin-bottom:12px}
+  .technical-log-actions{display:flex;justify-content:flex-end;margin-bottom:10px}
   video{width:100%;border-radius:10px;background:#000;display:block}
   .note{background:#fffbf0;border:1px solid #f0e2c0;border-radius:9px;padding:13px 15px;
     font-size:13.5px;color:#7a5c14;line-height:1.65}
@@ -426,6 +487,7 @@ const STATUS_TEXT = { draft:'建立中', queued:'排隊中', preparing:'準備�
 
 let TPLS = {}, BRANDS = [], ADMIN = false, brand = null, tpl = 'focusstock', view = 'new', openJob = null;
 let activeProject = null, reusedAssets = [], reusedSpeakerAsset = null;
+let projectAssetLibraryOpen = false;
 let iterationReturn = null;
 
 // ── 標題 ──────────────────────────────────
@@ -642,28 +704,48 @@ function drawProjectAssetLibrary() {
   const available = (activeProject.assets || []).filter((asset) =>
     ['image', 'video'].includes(asset.kind) && !selected.has(String(asset.id)));
   wrap.hidden = false;
-  const intro = [
-    el('h3', {}, 'Project 其他可用素材'),
-    el('div', { class: 'hint' }, '這些素材已在 Project 中，但目前尚未選入這一版。加入後送出，才會成為新 Revision 的選取素材。'),
-  ];
-  if (!available.length) {
-    wrap.replaceChildren(...intro,
-      el('div', { class: 'hint', style: 'margin-top:8px' }, '目前沒有其他可沿用的圖片或 B-Roll。'));
-    return;
-  }
-  const options = el('div', { class: 'project-asset-options' }, ...available.map((asset) => {
-    const kind = asset.kind === 'video' ? 'video' : 'image';
-    return el('div', { class: 'project-asset-option' },
-      mediaPreview(kind, `/api/projects/${activeProject.id}/assets/${asset.id}`, asset),
-      el('div', {},
-        el('b', {}, asset.originalName || '未命名素材'),
-        el('span', {}, `${kind === 'video' ? 'B-Roll 影片' : '圖片'}・${fileSize(asset.size)}`),
-        el('button', { type: 'button', class: 'ghost', onclick: () => {
-          reusedAssets.push(asset);
-          drawSlots();
-        } }, '加入本版')));
-  }));
-  wrap.replaceChildren(...intro, options);
+  let loaded = false;
+  const body = el('div', { class: 'asset-library-body' },
+    el('div', { class: 'hint' },
+      '只列目前影片專案的圖片與 B-roll；講者 Avatar 沿用來源版本。跨影片專案素材請重新加入目前影片專案。'));
+  const loadOptions = () => {
+    if (loaded) return;
+    loaded = true;
+    if (!available.length) {
+      body.append(el('div', { class: 'hint', style: 'margin-top:8px' },
+        '目前沒有其他可沿用的圖片或 B-Roll。'));
+      return;
+    }
+    body.append(el('div', { class: 'project-asset-options' }, ...available.map((asset) => {
+      const kind = asset.kind === 'video' ? 'video' : 'image';
+      return el('div', { class: 'project-asset-option' },
+        mediaPreview(kind, `/api/projects/${activeProject.id}/assets/${asset.id}`, asset),
+        el('div', {},
+          el('b', {}, asset.originalName || '未命名素材'),
+          el('span', {}, `${kind === 'video' ? 'B-Roll 影片' : '圖片'}・${fileSize(asset.size)}`),
+          el('button', { type: 'button', class: 'ghost', onclick: () => {
+            reusedAssets.push(asset);
+            drawSlots();
+          } }, '加入本版')));
+    })));
+  };
+  const detailsAttrs = {
+    class: 'asset-library project-reuse-library',
+    ontoggle: (event) => {
+      projectAssetLibraryOpen = event.currentTarget.open;
+      if (projectAssetLibraryOpen) loadOptions();
+    },
+  };
+  if (projectAssetLibraryOpen) detailsAttrs.open = 'open';
+  const details = el('details', detailsAttrs,
+    el('summary', {},
+      el('span', { class: 'asset-library-title' },
+        available.length ? `專案素材庫（另有 ${available.length} 個）` : '專案素材庫'),
+      el('span', { class: 'asset-library-state' },
+        available.length ? '需要時再展開' : '沒有其他素材')),
+    body);
+  wrap.replaceChildren(details);
+  if (projectAssetLibraryOpen) loadOptions();
 }
 
 // ── 講者 Avatar ──
@@ -766,7 +848,7 @@ async function poll() {
     // 磁碟用量只給管理者看。成品累積得很快（大盤一支就 138MB），要看得到才會有感
     if (h.admin && h.diskMB != null) {
       $('#disk').hidden = false;
-      $('#disk').textContent = `💾 ${h.diskMB} MB`;
+      $('#disk').textContent = `💾 暫存工作 ${h.diskMB} MB`;
       $('#disk').title = `Run 工作區佔用。成功 Project Run 會在成品驗證後立即清除大型 payload；`
         + `legacy、失敗與取消 Run 保留最近 ${h.keep.recent} 支或 ${h.keep.days} 天內。`
         + 'Project 素材、正式成品與未封存 fallback 不會清除。點一下檢查並清理。';
@@ -845,6 +927,7 @@ $('#submit').onclick = async () => {
     await api(`/api/jobs/${job.id}/submit`, { method: 'POST' });
     draftJob = null;
     clearLocalSlots(); clearHeygen(); activeProject = null; reusedAssets = []; iterationReturn = null;
+    projectAssetLibraryOpen = false;
     drawProjectContext();
     $('#body').value = ''; titleVals = ['', ''];
     drawSlots(); drawTitle();
@@ -913,43 +996,132 @@ async function loadJobs() {
 // ── 詳情 ──
 let edits = {};
 let jobSig = null;   // 上次畫出來的內容特徵
+const assetBrowserStates = new Map();
 function projectAssetCard(projectDetail, job) {
-  const refs = new Set(((projectDetail.revision && projectDetail.revision.assetRefs)
-    || job.assetRefs || []).map(String));
+  const refIds = ((projectDetail.revision && projectDetail.revision.assetRefs)
+    || job.assetRefs || []).map(String);
+  const refs = new Set(refIds);
   const assets = projectDetail.project.assets || [];
-  const groups = [
-    { kind: 'speaker-video', label: '講者 Avatar' },
-    { kind: 'image', label: '圖片' },
-    { kind: 'video', label: 'B-roll 影片' },
-  ];
-  const summary = el('div', { class: 'asset-summary' });
-  for (const group of groups) {
-    const files = assets.filter((asset) => asset.kind === group.kind);
-    const fileBox = el('div', { class: 'asset-summary-files' });
-    if (!files.length) {
-      fileBox.append(el('span', { class: 'asset-summary-empty' }, 'Project 尚無這類素材'));
-    } else {
-      for (const asset of files) {
-        const selected = refs.has(String(asset.id));
-        fileBox.append(el('div', { class: 'asset-summary-file' },
-          el('b', {}, asset.originalName || '未命名檔案'),
-          el('span', {}, fileSize(asset.size)),
-          el('span', { class: `asset-state${selected ? ' selected' : ''}` }, selected
-            ? '本版已選取・是否進入成片仍待確認'
-            : 'Project 可用・本版未選'),
-          el('a', { href: `/api/projects/${projectDetail.project.id}/assets/${asset.id}?dl=1`,
-            download: '' }, '下載')));
-      }
-    }
-    summary.append(el('div', { class: 'asset-summary-row' },
-      el('div', { class: 'asset-summary-kind' }, group.label), fileBox));
-  }
+  const byId = new Map(assets.map((asset) => [String(asset.id), asset]));
+  const seen = new Set();
+  const selectedAssets = refIds.map((id) => byId.get(id)).filter((asset) => {
+    if (!asset || seen.has(String(asset.id))) return false;
+    seen.add(String(asset.id));
+    return true;
+  });
+  const availableAssets = assets.filter((asset) => !refs.has(String(asset.id)));
   const version = (projectDetail.revision && projectDetail.revision.number) || job.revisionNumber;
-  return el('div', { class: 'card' },
-    el('h2', {}, 'Project 素材與本版選取'),
-    el('div', { class: 'hint', style: 'margin-top:-10px;margin-bottom:14px' },
-      `「本版已選取」只代表 V${version || '—'} 引用了素材，不等於已剪進成片；有安排位置的證據時會在下方「配圖計畫」顯示。`),
-    summary);
+  const projectId = projectDetail.project.id;
+  const browserState = assetBrowserStates.get(job.id)
+    || { previewAssetId: null, libraryOpen: false };
+  assetBrowserStates.set(job.id, browserState);
+  const kindLabel = (asset) => asset.kind === 'speaker-video' ? '講者 Avatar'
+    : asset.kind === 'video' ? 'B-roll 影片' : asset.kind === 'image' ? '圖片' : '素材';
+  const assetUrl = (asset, download = false) =>
+    `/api/projects/${projectId}/assets/${asset.id}${download ? '?dl=1' : ''}`;
+
+  const previewMedia = el('div', { class: 'asset-preview-media' });
+  const previewName = el('h3');
+  const previewMeta = el('div', { class: 'asset-preview-meta' });
+  const previewDownload = el('a', { class: 'ghost', download: '', style: 'text-decoration:none' }, '下載素材');
+  const preview = el('div', { class: 'asset-preview', hidden: 'hidden' },
+    el('div', { class: 'asset-preview-copy' },
+      el('div', { class: 'asset-preview-heading' },
+        el('div', { class: 'asset-preview-title-row' },
+          el('div', { class: 'asset-preview-kicker' }, '網頁預覽'), previewName),
+        previewMeta),
+      previewDownload),
+    previewMedia);
+  let root;
+
+  const mediaNode = (asset, thumbnail = false) => {
+    const name = asset.originalName || '未命名素材';
+    if (asset.kind === 'image') return el('img', {
+      src: assetUrl(asset), alt: `圖片預覽：${name}`, loading: thumbnail ? 'lazy' : 'eager',
+    });
+    return el('video', {
+      src: assetUrl(asset) + (thumbnail ? '#t=0.1' : ''),
+      ...(thumbnail ? { muted: 'muted', tabindex: '-1', 'aria-hidden': 'true' }
+        : { controls: 'controls', 'aria-label': `影片預覽：${name}` }),
+      preload: 'metadata', playsinline: 'playsinline',
+    });
+  };
+
+  const showPreview = (asset) => {
+    const selected = refs.has(String(asset.id));
+    browserState.previewAssetId = String(asset.id);
+    previewMedia.replaceChildren(mediaNode(asset));
+    previewName.textContent = asset.originalName || '未命名素材';
+    previewMeta.textContent = `${kindLabel(asset)}・${fileSize(asset.size)}・${selected
+      ? `V${version || '—'} 已帶入` : `V${version || '—'} 未帶入`}`;
+    previewDownload.href = assetUrl(asset, true);
+    preview.hidden = false;
+    if (root) root.querySelectorAll('.asset-browser-card').forEach((card) => {
+      const active = card.getAttribute('data-asset-id') === String(asset.id);
+      card.classList.toggle('on', active);
+      card.setAttribute('aria-pressed', String(active));
+    });
+  };
+
+  const assetCard = (asset) => {
+    const thumb = el('div', { class: `asset-browser-thumb ${asset.kind === 'image' ? 'image' : 'video'}` },
+      mediaNode(asset, true));
+    if (asset.kind !== 'image') thumb.append(el('span', { class: 'asset-play', 'aria-hidden': 'true' }, '▶'));
+    return el('button', {
+      type: 'button', class: 'asset-browser-card', 'data-asset-id': String(asset.id),
+      'aria-pressed': 'false', 'aria-label': `預覽${kindLabel(asset)}：${asset.originalName || '未命名素材'}`,
+      onclick: () => showPreview(asset),
+    }, thumb, el('span', { class: 'asset-browser-copy' },
+      el('b', {}, asset.originalName || '未命名素材'),
+      el('span', {}, `${kindLabel(asset)}・${fileSize(asset.size)}`)));
+  };
+
+  const selectedSection = el('section', { class: 'asset-selected' },
+    el('div', { class: 'asset-section-head' },
+      el('h3', {}, `這一版帶入的素材（${selectedAssets.length}）`),
+      el('span', { class: 'asset-readonly' }, `🔒 V${version || '—'} 唯讀`)),
+    el('div', { class: 'asset-section-note' },
+      '帶入只代表這一版引用了素材；是否實際出現在成片，仍以配圖計畫或時間軸證據為準。'),
+    selectedAssets.length
+      ? el('div', { class: 'asset-browser-grid' }, ...selectedAssets.map(assetCard))
+      : el('div', { class: 'note' }, '這一版沒有留下素材選取紀錄。'));
+
+  let library = '';
+  if (availableAssets.length) {
+    let libraryLoaded = false;
+    const libraryBody = el('div', { class: 'asset-library-body' },
+      el('div', { class: 'asset-section-note' },
+        '這些素材保留在 Project 中；建立下一版時可以重新選擇。'));
+    const loadLibrary = () => {
+      if (libraryLoaded) return;
+      libraryLoaded = true;
+      libraryBody.append(el('div', { class: 'asset-browser-grid' }, ...availableAssets.map(assetCard)));
+    };
+    const libraryAttrs = {
+      class: 'asset-library',
+      ontoggle: (event) => {
+        browserState.libraryOpen = event.currentTarget.open;
+        if (event.currentTarget.open) loadLibrary();
+      },
+    };
+    if (browserState.libraryOpen) libraryAttrs.open = 'open';
+    library = el('details', libraryAttrs,
+      el('summary', {},
+        el('span', { class: 'asset-library-title' }, `專案素材庫（另有 ${availableAssets.length} 個）`),
+        el('span', { class: 'asset-library-state' }, '這一版未帶入')),
+      libraryBody);
+    if (browserState.libraryOpen) loadLibrary();
+  }
+
+  root = el('div', { class: 'card' },
+    el('div', { class: 'asset-browser-head' }, el('h2', {}, '素材')),
+    el('div', { class: 'asset-workspace' },
+      el('aside', { class: 'asset-sidebar' }, selectedSection, library),
+      preview));
+  const restoredAsset = browserState.previewAssetId
+    ? byId.get(String(browserState.previewAssetId)) : null;
+  if (restoredAsset || selectedAssets.length) showPreview(restoredAsset || selectedAssets[0]);
+  return root;
 }
 
 async function loadJob() {
@@ -959,23 +1131,39 @@ async function loadJob() {
   if (openJob !== requestedJobId) return;
   const { text } = await api(`/api/jobs/${requestedJobId}/log`);
   if (openJob !== requestedJobId) return;
-  const projectDetail = job.projectId
-    ? await api(`/api/projects/${job.projectId}${job.revisionId
-      ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`).catch(() => null) : null;
+  let projectDetail = null;
+  let projectDetailError = null;
+  if (job.projectId) {
+    try {
+      projectDetail = await api(`/api/projects/${job.projectId}${job.revisionId
+        ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`);
+    } catch (error) {
+      projectDetailError = error;
+    }
+  }
   // poll 與手動切版可能同時發出請求；舊版本回得比較慢時，不得覆蓋目前詳情。
   if (openJob !== requestedJobId) return;
   const box = $('#v-job');
   // 詳情頁每 3 秒輪詢一次。以前不管有沒有變都整塊 replaceChildren，
   // <video> 被重新建立就會重新載入 → 影片一直閃（2026-08-17 使用者回報）。
-  // 內容沒變就什麼都不做；工作跑完後特徵不再變動，畫面自然就穩住。
+  // 結構沒變時只更新 log，不重建素材瀏覽器；使用者目前的預覽與展開狀態才不會被輪詢打斷。
   const revisionRefs = (projectDetail && projectDetail.revision && projectDetail.revision.assetRefs)
     || job.assetRefs || [];
   const projectAssetSig = projectDetail && projectDetail.project
     ? (projectDetail.project.assets || []).map((asset) =>
       [asset.id, asset.kind, asset.originalName, asset.size].join(':')).join('|') : '';
-  const sig = [job.id, job.status, (job.outputs || []).length, text.length, job.error || '',
-    revisionRefs.join(','), projectAssetSig].join('|');
-  if (sig === jobSig && box.childElementCount) return;
+  const logText = text || '（還沒有輸出）';
+  const sig = [job.id, job.status, job.queuePosition ?? '', (job.outputs || []).length, job.error || '',
+    projectDetailError ? projectDetailError.message : '', revisionRefs.join(','), projectAssetSig].join('|');
+  if (sig === jobSig && box.childElementCount) {
+    const liveLog = box.querySelector('pre.log');
+    if (liveLog && liveLog.textContent !== logText) {
+      const atBottom = liveLog.scrollTop + liveLog.clientHeight >= liveLog.scrollHeight - 40;
+      liveLog.textContent = logText;
+      if (atBottom) liveLog.scrollTop = liveLog.scrollHeight;
+    }
+    return;
+  }
   jobSig = sig;
   const keep = box.querySelector('pre.log');
   const scrolled = keep ? keep.scrollTop + keep.clientHeight >= keep.scrollHeight - 40 : true;
@@ -1000,7 +1188,12 @@ async function loadJob() {
 
   const parts = [head];
 
-  if (projectDetail && projectDetail.project) {
+  if (job.projectId && projectDetailError) {
+    parts.push(el('div', { class: 'card' },
+      el('h2', {}, '素材'),
+      el('div', { class: 'note' },
+        '素材資料暫時無法載入，請稍後重試或重新整理。這不代表本版沒有素材。')));
+  } else if (projectDetail && projectDetail.project) {
     const versions = (projectDetail.project.revisions || []).slice().sort((a, b) => b.number - a.number);
     parts.push(el('div', { class: 'card' },
       el('h2', {}, '版本紀錄'),
@@ -1018,7 +1211,7 @@ async function loadJob() {
   if (job.status === 'detached' || job.status === 'detached-done') {
     const detachedMessage = job.status === 'detached'
       ? '伺服器重啟後，背景流程仍可能執行。先不要重送或啟動下一支，避免重複呼叫付費服務或覆寫共用 out/；完成後再確認本版選取素材與成品。'
-      : '背景流程已結束。可驗證的 Avatar 會保存到原影片專案；但重啟後完成的 render 目前不會自動收割回專案。請先確認「Project 素材與本版選取」及共用 out/，再決定是否建立下一版。';
+      : '背景流程已結束。可驗證的 Avatar 會保存到原影片專案；但重啟後完成的 render 目前不會自動收割回專案。請先確認「素材」及共用 out/，再決定是否建立下一版。';
     parts.push(el('div', { class: 'card' },
       el('h2', {}, job.status === 'detached' ? '這支正在背景跑' : '這支已經在背景跑完'),
       el('div', { class: 'note' }, detachedMessage)));
@@ -1045,20 +1238,29 @@ async function loadJob() {
             style: 'text-decoration:none' }, '下載'))));
     }
     const card = el('div', { class: 'card' }, el('h2', {}, '成品'), grid);
-    if (job.archived && job.archived.length)
-      card.append(el('div', { style: 'margin-top:16px;font-size:12.5px;color:var(--dim)' },
-        '也存進成品庫了（不會自動清）：　' + job.archived.join('　/　')));
+    if (job.archived && job.archived.length) card.append(
+      el('div', { class: 'local-output' },
+        el('span', { 'aria-hidden': 'true' }, '✓'),
+        el('div', {},
+          el('b', {}, '成品已保存於這台 Mac'),
+          el('span', {}, '不會跟著暫存工作一起清除。'))),
+      el('details', { class: 'technical-details' },
+        el('summary', {}, '查看本機儲存位置'),
+        el('code', {}, job.archived.join('\n'))));
     parts.push(card);
   }
 
+  const canCancel = ['queued', 'review', 'failed', 'approved', 'detached-done'].includes(job.status);
+  const logDetailsAttrs = { class: 'technical-log' };
+  if (job.status !== 'done') logDetailsAttrs.open = 'open';
   const logCard = el('div', { class: 'card' },
-    el('div', { style: 'display:flex;align-items:center;margin-bottom:12px' },
-      el('h2', { style: 'margin:0;flex:1' }, '執行記錄'),
-      ['queued', 'review', 'failed', 'approved', 'detached-done'].includes(job.status)
-        ? el('button', { class: 'ghost danger', onclick: async () => {
-            if (confirm('確定取消這支工作？')) { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); loadJob(); }
-          } }, '取消工作') : ''),
-    el('pre', { class: 'log' }, text || '（還沒有輸出）'));
+    el('details', logDetailsAttrs,
+      el('summary', {}, '技術資訊與執行記錄'),
+      canCancel ? el('div', { class: 'technical-log-actions' },
+        el('button', { class: 'ghost danger', onclick: async () => {
+          if (confirm('確定取消這支工作？')) { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); loadJob(); }
+        } }, '取消工作')) : '',
+      el('pre', { class: 'log' }, logText)));
   parts.push(logCard);
 
   box.replaceChildren(...parts);
@@ -1091,6 +1293,7 @@ function returnToRevision() {
 
 function resetProjectContext() {
   activeProject = null; reusedAssets = []; iterationReturn = null;
+  projectAssetLibraryOpen = false;
   clearLocalSlots(); clearHeygen();
   drawProjectContext(); drawSlots();
 }
@@ -1105,6 +1308,7 @@ async function iterateProject(job) {
     const { project, revision } = await api(`/api/projects/${job.projectId}${job.revisionId
       ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`);
     activeProject = project;
+    projectAssetLibraryOpen = false;
     iterationReturn = { jobId: job.id, revisionNumber: job.revisionNumber || (revision && revision.number) };
     const selectedAssetRefs = (revision && revision.assetRefs) || [];
     const selectedAssetIds = new Set(selectedAssetRefs);

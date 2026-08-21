@@ -25,6 +25,8 @@ This repository hosts a localhost UI that creates queued video jobs and a worker
 
 The product exists to help users understand and directly see how media is added to an iterative video project: what assets a Project contains, what a Revision selected, what the pipeline actually used, where evidenced material appears, and what the Revision produced. `Project → Revision → Run` is the user model; provider calls, runtime folders, queues, and cleanup are implementation details unless they affect that experience.
 
+A Project is the asset reuse boundary. Revisions may reuse assets already owned by the same Project. Do not offer a global or cross-Project asset picker: when users want to reuse a source from another Project, they must add that source file to the target Project so the target owns its own Project Asset. Until a later product decision changes this, a new Revision may carry forward its source Revision's selected speaker asset, but the GUI must not offer a picker for other historical `speaker-video` assets.
+
 Agents must maintain this boundary when proposing, implementing, or reviewing work. Classify every Issue or PR into exactly one of these tracks:
 
 - **Product Core**: directly improves Project／Revision／asset understanding or control in the GUI. This is the default product priority.
