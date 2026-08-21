@@ -1515,8 +1515,6 @@ async function main() {
     return runDir;
   };
   markDoneProjectRun(compactable, compactOutputRecord);
-  fs.writeFileSync(path.join(compactJobDir, 'out',
-    '00000000-0000-4000-8000-000000000099-final.mp4'), FRAGMENTED_MP4_FIXTURE);
   fs.writeFileSync(path.join(compactJobDir, 'log.txt'), 'minimal run trace\n');
 
   const missingSizeOutput = compactStore.outputPath(

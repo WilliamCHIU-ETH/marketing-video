@@ -2503,20 +2503,9 @@ function pruneOldJobs() {
           && path.basename(output.name) === output.name)
         indexesByName.set(output.name, index);
     });
-    const isAttemptFallback = (name) => {
-      const token = name.slice(0, 36);
-      const originalName = name.slice(37);
-      return name[36] === '-' && isWorkspaceRunToken(token)
-        && originalName && path.basename(originalName) === originalName
-        && indexesByName.has(originalName);
-    };
     try {
       return fs.readdirSync(dir, { withFileTypes: true }).every((entry) => {
-        if (!entry.isFile() || entry.isSymbolicLink()) return false;
-        // A successful retry may leave immutable, token-scoped partial outputs. Once the canonical
-        // Project outputs are verified, these recognized Run-attempt files are disposable too;
-        // arbitrary unlisted files still keep out/ fail closed.
-        if (!indexesByName.has(entry.name)) return isAttemptFallback(entry.name);
+        if (!entry.isFile() || entry.isSymbolicLink() || !indexesByName.has(entry.name)) return false;
         const index = indexesByName.get(entry.name);
         const runFile = path.join(dir, entry.name);
         const durableFile = verifiedOutputs[index];
