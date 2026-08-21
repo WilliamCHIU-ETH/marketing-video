@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  source-boundary:
+    name: Source boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test canonical source boundary
+        run: npm run test:source-boundary
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          node-version: 22
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run TypeScript checks
+        run: npm run typecheck
+
+  provider-free-smoke:
+    name: Provider-free smoke
+    runs-on: ubuntu-latest
+    env:
+      HEYGEN_API_KEY: ''
+      MINIMAX_API_KEY: ''
+      MINIMAX_GROUP_ID: ''
+      OPENAI_API_KEY: ''
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          node-version: 22
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run isolated localhost smoke
+        run: npm run smoke

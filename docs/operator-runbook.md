@@ -21,12 +21,22 @@ npm run setup:whisper
 
 ```bash
 npm run doctor
+npm run test:source-boundary
 npm run smoke
 ```
 
 - `doctor` 預設只以 localhost startup blocker 決定 exit code。
+- `test:source-boundary` 先跑 adversarial policy tests，再以 canonical Git index／blob 與 worktree 雙邊掃描 tracked source；任一邊不一致、Git inventory 為空、出現 runtime／credential／machine path 或未授權 media 都 fail closed。
 - `doctor:full` 會把 `whisper-cli`、模型檔與 SHA-256、FFmpeg、Tesseract、npm packages 等完整出片條件納入 gate。
 - `smoke` 使用 repo 外的 OS 暫存目錄、`TEST_MODE=1` 與停用 worker；provider keys 會被清空，child process／outbound network 嘗試會被 guard 擋下並使測試失敗。
+
+GitHub CI 把 source-boundary、typecheck 與 provider-free smoke 拆成獨立 jobs；source-boundary 不會呼叫 provider，smoke job 明確清空 HeyGen、MiniMax 與 OpenAI keys。
+
+### 可進 Git 的非程式檔邊界
+
+- 文件圖只允許放在 `docs/images/`，限 PNG／JPEG／WebP／SVG、每檔最大 512 KiB，並驗證內容 signature；`final`、`screenshot`、`recording` 等 runtime 命名仍會被拒絕。
+- 可重建的去識別文字 fixture 只允許放在 `fixtures/sanitized/`，限 JSON／JSONL／YAML／Markdown／TXT／CSV／TSV，每檔最大 64 KiB；密鑰、個人機器路徑與真實 runtime 值仍會被內容掃描拒絕。
+- 影片、音訊、PDF、試算表、截圖、錄影與成品不是 source；放進 ignored runtime／data directory，不用放寬 scanner 來追蹤。
 
 ## 啟動 localhost
 

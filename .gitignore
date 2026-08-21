@@ -21,8 +21,12 @@ venv/
 /_frames_check/
 /成品/
 /.local/
+/audio/
 /captures/
+/exports/
 /recordings/
+/screenshots/
+/videos/
 /provider-cache/
 /sessions/
 /keychain-data/
