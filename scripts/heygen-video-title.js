@@ -31,6 +31,43 @@ const DRY_RUN_METADATA_KEYS = new Set([
   'voiceLocalePresent',
   'brandGlossaryPresent',
 ]);
+const HEYGEN_TRACE_ENV_KEYS = Object.freeze([
+  'WORKSPACE_RUN_TOKEN',
+  'DATA_DIR',
+  'HEYGEN_PROJECT_ID',
+  'HEYGEN_RUN_ID',
+  'HEYGEN_REVISION',
+  'HEYGEN_EXPERIMENT_ID',
+  'HEYGEN_EXPERIMENT_RUN_ID',
+  'HEYGEN_VIDEO_TITLE',
+]);
+const PROVIDER_SECRET_KEYS = Object.freeze([
+  'HEYGEN_API_KEY',
+  'MINIMAX_API_KEY',
+  'MINIMAX_GROUP_ID',
+]);
+
+function snapshotHeyGenTraceEnvironment(env = {}) {
+  const snapshot = {};
+  for (const key of HEYGEN_TRACE_ENV_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(env, key)) snapshot[key] = env[key];
+  }
+  return Object.freeze(snapshot);
+}
+
+function loadProviderSecrets(options = {}) {
+  const env = options.env || process.env;
+  const dotenv = options.dotenv || require('dotenv');
+  const fileEnvironment = Object.create(null);
+  dotenv.config({ processEnv: fileEnvironment, quiet: true });
+  const secrets = {};
+  for (const key of PROVIDER_SECRET_KEYS) {
+    secrets[key] = Object.prototype.hasOwnProperty.call(env, key)
+      ? env[key]
+      : fileEnvironment[key];
+  }
+  return Object.freeze(secrets);
+}
 
 function readArg(argv, name) {
   const prefix = `--${name}=`;
@@ -1508,11 +1545,13 @@ module.exports = {
   createHeyGenRequestTracer,
   endpointForApi,
   findManagedProjectContext,
+  loadProviderSecrets,
   normalizeExperimentId,
   normalizeRevision,
   resolveHeyGenVideoTitle,
   reservationKey,
   resolveHeyGenRequestContext,
   runVerifiedPaidStep,
+  snapshotHeyGenTraceEnvironment,
   submitTracedHeyGenCreate,
 };

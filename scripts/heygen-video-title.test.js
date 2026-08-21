@@ -12,9 +12,11 @@ const {
   buildTextDrivenV3Payload,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  loadProviderSecrets,
   normalizeExperimentId,
   resolveHeyGenVideoTitle,
   runVerifiedPaidStep,
+  snapshotHeyGenTraceEnvironment,
   submitTracedHeyGenCreate,
 } = require('./heygen-video-title');
 
@@ -85,6 +87,69 @@ function assertProjectLedgerPath(ledgerPath, dataDir) {
   assert.equal(path.dirname(ledgerPath), path.join(dataRoot, 'provider-ledgers'));
   assert.match(path.basename(ledgerPath), /^project-[0-9a-f]{64}\.json$/);
 }
+
+test('trace env 在 dotenv 前快照，provider .env 只能補 secrets 且不改寫 identity', () => {
+  const providerKeys = new Set(['HEYGEN_API_KEY', 'MINIMAX_API_KEY', 'MINIMAX_GROUP_ID']);
+  const inheritedEnvironment = new Proxy({
+    DATA_DIR: '/safe/runtime-data',
+    HEYGEN_EXPERIMENT_ID: 'EXP-042',
+    HEYGEN_REVISION: 'V3',
+    HEYGEN_VIDEO_TITLE: 'inherited-title',
+  }, {
+    get(target, property, receiver) {
+      if (providerKeys.has(property)) throw new Error(`trace snapshot read provider key: ${property}`);
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const traceEnvironment = snapshotHeyGenTraceEnvironment(inheritedEnvironment);
+  assert.deepEqual(traceEnvironment, {
+    DATA_DIR: '/safe/runtime-data',
+    HEYGEN_REVISION: 'V3',
+    HEYGEN_EXPERIMENT_ID: 'EXP-042',
+    HEYGEN_VIDEO_TITLE: 'inherited-title',
+  });
+  assert.equal(Object.isFrozen(traceEnvironment), true);
+
+  const paidEnvironment = {
+    HEYGEN_API_KEY: 'shell-heygen-key',
+    MINIMAX_API_KEY: '',
+    HEYGEN_EXPERIMENT_ID: 'EXP-042',
+  };
+  const originalPaidEnvironment = { ...paidEnvironment };
+  let isolatedEnvironment;
+  const providerSecrets = loadProviderSecrets({
+    env: paidEnvironment,
+    dotenv: {
+      config(options) {
+        isolatedEnvironment = options.processEnv;
+        assert.notEqual(isolatedEnvironment, paidEnvironment);
+        assert.equal(options.quiet, true);
+        Object.assign(isolatedEnvironment, {
+          HEYGEN_API_KEY: 'file-heygen-key',
+          MINIMAX_API_KEY: 'file-minimax-key',
+          MINIMAX_GROUP_ID: 'file-minimax-group',
+          HEYGEN_EXPERIMENT_ID: 'EXP-999',
+          HEYGEN_VIDEO_TITLE: 'hostile-dotenv-title',
+          DATA_DIR: '/hostile/runtime-data',
+        });
+        return { parsed: isolatedEnvironment };
+      },
+    },
+  });
+  assert.deepEqual(providerSecrets, {
+    HEYGEN_API_KEY: 'shell-heygen-key',
+    MINIMAX_API_KEY: '',
+    MINIMAX_GROUP_ID: 'file-minimax-group',
+  });
+  assert.equal(Object.isFrozen(providerSecrets), true);
+  assert.deepEqual(paidEnvironment, originalPaidEnvironment);
+  assert.deepEqual(traceEnvironment, {
+    DATA_DIR: '/safe/runtime-data',
+    HEYGEN_REVISION: 'V3',
+    HEYGEN_EXPERIMENT_ID: 'EXP-042',
+    HEYGEN_VIDEO_TITLE: 'inherited-title',
+  });
+});
 
 test('managed WORKSPACE_RUN_TOKEN 唯一解析 Project/Revision/Run 並使用 canonical ledger', (t) => {
   const fixture = managedFixture(t);
@@ -1907,6 +1972,10 @@ test('run.js 的 audio/v2-text/v3-text create paths 都只走共同 trace gate',
   assert.doesNotMatch(source, /title:\s*["']marketing-auto["']/);
   assert.match(source, /createHeyGenRequestPreview\(\{/);
   assert.match(source, /createHeyGenRequestTracer\(\{/);
+  assert.match(source, /const HEYGEN_TRACE_ENV = snapshotHeyGenTraceEnvironment\(process\.env\)/);
+  assert.equal((source.match(/env: HEYGEN_TRACE_ENV/g) || []).length, 2);
+  assert.match(source, /loadProviderSecrets\(\{ env: process\.env \}\)/);
+  assert.doesNotMatch(source, /require\(["']dotenv["']\)\.config\(\)/);
   assert.match(source, /submitTracedHeyGenCreate\(\{/);
 
   const dualPath = source.slice(

@@ -38,6 +38,13 @@ Manual CLI invocation must supply all of `--project-id`, `--revision`, and `--ru
 `--experiment` and `--revision`. Missing or mixed identity fails before workspace mutation, MiniMax,
 HeyGen upload, or create. Timestamp and PID are not accepted as paid-request identity.
 
+CLI arguments and inherited process-environment trace settings are captured once when `run.js` starts,
+and that immutable snapshot is shared by dry-run and paid execution. For direct CLI invocation, the
+repository `.env` is provider-secret-only: trace identity, `DATA_DIR`, and title settings in `.env` are
+ignored rather than appearing only in the paid path. Supply those settings through CLI arguments or the
+launching process environment. Managed server runs already inherit their trace settings before `run.js`
+starts.
+
 ## Provider ledger
 
 The complete payload is built and its non-empty title plus canonical logical key are durably recorded
@@ -113,6 +120,11 @@ cleanup, child processes, MiniMax TTS, HeyGen upload, create, poll, or download.
 containing the exact create endpoint, API kind, normalized segment, Dashboard title, canonical logical
 key, trace, the planned ledger path, and allowlisted payload-safe metadata. It never prints script
 text, avatar/voice/audio IDs, keys, or provider response data.
+
+The paid path later loads `.env` into an isolated object and copies only the three provider secrets;
+dotenv never mutates the trace snapshot or `process.env`. Shell-provided provider values, including an
+explicit empty value, take precedence over `.env`. Dry-run does not load or inspect either source of
+provider secrets.
 
 Dry-run resolves identity and plans requests through a read-only context. It never creates `DATA_DIR`,
 provider-ledger directories, ledger files, temporary files, or locks, and it never rewrites or renames

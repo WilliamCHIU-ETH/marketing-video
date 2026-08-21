@@ -16,11 +16,14 @@ const {
   buildTextDrivenV3Payload,
   createHeyGenRequestPreview,
   createHeyGenRequestTracer,
+  loadProviderSecrets,
   runVerifiedPaidStep,
+  snapshotHeyGenTraceEnvironment,
   submitTracedHeyGenCreate,
 } = require("./scripts/heygen-video-title");
 
 const PROJECT_DIR = __dirname;
+const HEYGEN_TRACE_ENV = snapshotHeyGenTraceEnvironment(process.env);
 // 繁中 → 簡中：MiniMax 對簡體念法比較準（純字形轉換、不動詞彙；避免「公車→公交」這種詞義替換）
 const tradToSimpConverter = OpenCC.Converter({ from: "t", to: "s" });
 
@@ -98,10 +101,10 @@ let providerEnvironmentLoaded = false;
 
 function loadProviderEnvironment() {
   if (providerEnvironmentLoaded) return;
-  require("dotenv").config();
-  HEYGEN_API_KEY = process.env.HEYGEN_API_KEY;
-  MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
-  MINIMAX_GROUP_ID = process.env.MINIMAX_GROUP_ID;
+  const providerSecrets = loadProviderSecrets({ env: process.env });
+  HEYGEN_API_KEY = providerSecrets.HEYGEN_API_KEY;
+  MINIMAX_API_KEY = providerSecrets.MINIMAX_API_KEY;
+  MINIMAX_GROUP_ID = providerSecrets.MINIMAX_GROUP_ID;
   providerEnvironmentLoaded = true;
 }
 // MiniMax 語音設定（非 secret，hardcode 在這裡）
@@ -991,7 +994,7 @@ function runHeyGenDryRun() {
   const planner = createHeyGenRequestPreview({
     projectDir: PROJECT_DIR,
     argv: process.argv.slice(2),
-    env: process.env,
+    env: HEYGEN_TRACE_ENV,
   });
   const requests = buildHeyGenDryRunPlan(planner);
   console.log(JSON.stringify({
@@ -1007,7 +1010,9 @@ function runHeyGenDryRun() {
 
 async function main() {
   // Dry-run 在 workspace lock、owner marker、key validation、staging mutation、child process 與任何
-  // provider env/dotenv、MiniMax/HeyGen function 之前完成。它只讀 identity/script，ledger path
+  // provider env/dotenv、MiniMax/HeyGen function 之前完成。付費路徑也只使用同一份啟動時
+  // trace 快照；.env 僅能補 provider secrets，不能在 dry-run 後改寫 identity/title。
+  // Dry-run 只讀 identity/script，ledger path
   // 僅供預覽，不建立 DATA_DIR、ledger、lock 或 reservation。
   if (DRY_RUN) {
     runHeyGenDryRun();
@@ -1019,7 +1024,7 @@ async function main() {
   const ownerFile = resolve(PROJECT_DIR, ".run.owner.json");
   const startedAt = new Date().toISOString();
   const workspaceRunToken = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    .test(process.env.WORKSPACE_RUN_TOKEN || '') ? process.env.WORKSPACE_RUN_TOKEN : null;
+    .test(HEYGEN_TRACE_ENV.WORKSPACE_RUN_TOKEN || '') ? HEYGEN_TRACE_ENV.WORKSPACE_RUN_TOKEN : null;
   const ownership = { pid: process.pid, startedAt, token: workspaceRunToken };
   let lockFd;
   try {
@@ -1080,7 +1085,7 @@ async function main() {
     heygenRequestTracer = createHeyGenRequestTracer({
       projectDir: PROJECT_DIR,
       argv: process.argv.slice(2),
-      env: process.env,
+      env: HEYGEN_TRACE_ENV,
     });
     log(`HeyGen trace：${JSON.stringify(heygenRequestTracer.context)}`);
     log(`HeyGen ledger：${heygenRequestTracer.ledgerPath}`);
