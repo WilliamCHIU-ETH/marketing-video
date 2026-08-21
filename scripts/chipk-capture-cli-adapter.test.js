@@ -14,7 +14,7 @@ const {
 const capabilities = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '1.0.0',
+  toolVersion: '0.2.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
 };
@@ -60,7 +60,7 @@ test('acquire writes a private request file and invokes the locked CLI shape', a
     return callback(null, JSON.stringify({
       contractVersion: 1,
       requestId: request.requestId,
-      provider: { id: 'chipk-simulator-capture', toolVersion: '1.0.0' },
+      provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.0' },
       status: 'completed',
       artifacts: [],
     }), '');
@@ -77,7 +77,7 @@ test('typed non-completed result on provider exit 3 is returned to the Port', as
   const runner = (_command, _args, _options, callback) => callback(error, JSON.stringify({
     contractVersion: 1,
     requestId: 'req-human',
-    provider: { id: 'chipk-simulator-capture', toolVersion: '1.0.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.0' },
     status: 'human_action_required',
     artifacts: [],
     error: { code: 'vip_session_required' },
@@ -147,5 +147,16 @@ test('capability identity mismatch is rejected', async () => {
     }),
     (error) => error instanceof CaptureCliAdapterError
       && error.code === 'provider_contract_incompatible',
+  );
+});
+
+test('capability version mismatch is rejected by the exact consumer lock', async () => {
+  await assert.rejects(
+    () => probeChipKCaptureCli({
+      runner: (_c, _a, _o, cb) => cb(null,
+        JSON.stringify({ ...capabilities, toolVersion: '0.2.1' }), ''),
+    }),
+    (error) => error instanceof CaptureCliAdapterError
+      && error.code === 'provider_version_incompatible',
   );
 });

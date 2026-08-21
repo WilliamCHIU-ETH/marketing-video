@@ -4,8 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
+const PROVIDER_LOCK = Object.freeze(require('../config/chipk-capture-provider.lock.json'));
 
-const PROVIDER_ID = 'chipk-simulator-capture';
 const RESULT_STATUSES = new Set(['completed', 'rejected', 'failed', 'human_action_required']);
 
 class CaptureCliAdapterError extends Error {
@@ -64,19 +64,30 @@ function runJson(command, args, { timeoutMs, runner, acceptResultOnNonzero = fal
   });
 }
 
+function validateProviderCapabilities(value, expected = PROVIDER_LOCK) {
+  if (!value || value.providerId !== expected.providerId
+      || value.schemaVersion !== expected.contractVersion
+      || typeof value.toolVersion !== 'string' || !value.toolVersion.trim()
+      || !Array.isArray(value.operations)) {
+    throw new CaptureCliAdapterError(
+      'ChipK Capture CLI returned an incompatible capability document',
+      'provider_contract_incompatible');
+  }
+  if (value.toolVersion !== expected.toolVersion) {
+    throw new CaptureCliAdapterError(
+      'ChipK Capture CLI version does not match the consumer lock',
+      'provider_version_incompatible');
+  }
+  return value;
+}
+
 async function probeChipKCaptureCli({
   command = process.env.CHIPK_CAPTURE_BIN || 'chipk-capture',
   timeoutMs = 5000,
   runner = execFile,
 } = {}) {
   const value = await runJson(command, ['capabilities', '--json'], { timeoutMs, runner });
-  if (!value || value.providerId !== PROVIDER_ID || value.schemaVersion !== 1
-      || !Array.isArray(value.operations)) {
-    throw new CaptureCliAdapterError(
-      'ChipK Capture CLI returned an incompatible capability document',
-      'provider_contract_incompatible');
-  }
-  return value;
+  return validateProviderCapabilities(value);
 }
 
 function writeRequestFile(request) {
@@ -118,6 +129,8 @@ function createChipKCaptureCliAdapter({
 
 module.exports = {
   CaptureCliAdapterError,
+  PROVIDER_LOCK,
   createChipKCaptureCliAdapter,
   probeChipKCaptureCli,
+  validateProviderCapabilities,
 };

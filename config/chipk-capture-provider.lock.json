@@ -1,0 +1,9 @@
+{
+  "providerId": "chipk-simulator-capture",
+  "contractVersion": 1,
+  "toolVersion": "0.2.0",
+  "release": {
+    "tag": "v0.2.0",
+    "commit": "87c033bed59fd53242b1679bc71b39fb20a11832"
+  }
+}

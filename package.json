@@ -16,6 +16,7 @@
     "migrate:legacy": "node scripts/migrate-legacy-jobs.js",
     "test:legacy-migration": "node --test scripts/migrate-legacy-jobs.test.js",
     "test:material-provider": "node --test scripts/chipk-capture-cli-adapter.test.js scripts/material-acquisition-preflight.test.js scripts/material-acquisition-runtime.test.js",
+    "test:chipk-provider-compat": "node scripts/chipk-provider-compatibility.js",
     "cleanup:plan": "node scripts/cleanup-plan.js",
     "start": "remotion studio",
     "build": "remotion render MarketingVideo out/output.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",

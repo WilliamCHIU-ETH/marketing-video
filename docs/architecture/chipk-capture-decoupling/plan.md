@@ -1,6 +1,6 @@
 # Marketing Video × ChipK Capture 解耦計畫
 
-Status: `IMPLEMENTED — PR REVIEW PENDING`
+Status: `IMPLEMENTED — PROVIDER v0.2.0 RELEASED AND PINNED`
 
 Last verified: `2026-08-21 Asia/Taipei`
 
@@ -65,7 +65,8 @@ Marketing Video
 - Port 與 fallback policy 屬於 Marketing Video；CLI protocol 屬於 Capture repo。
 - Marketing Video 只依賴相容的 contract version，不依賴 Capture 內部 controller。
 - 兩邊不共用 source import、symlink、Git submodule 或寫死的機器絕對路徑。
-- 本機以 `CHIPK_CAPTURE_BIN` 或 PATH 選擇 executable。
+- 本機以 ignored `CHIPK_CAPTURE_BIN` 指向已驗證的 versioned checkout；PATH 仍是 fallback，
+  但 Provider ID、contract 與 tool version 必須符合 App-owned lock。
 - Request 至少包含 contract version、request ID、operation、route／參數及 caller-owned output directory。
 - Result 至少包含 request ID、status、typed error、relative artifact paths、hash、媒體規格與 acquisition evidence。
 - Capture 只能寫 caller 提供的 job-scoped directory；Marketing Video 驗證後才 ingest。
@@ -96,8 +97,15 @@ Sibling repo 的 `AGENTS.md` 必須保存上述判斷準則；`.gitignore` 必�
 
 ## 5. Current State
 
-- Marketing Video 與 Capture 已分別在隔離 worktree／sibling repo 完成 copy-first 實作；兩個 PR 尚未建立。
-- 最新可操作的 Capture source 仍保留於本機 `app/` working tree，尚未刪除或 archive。
+- Marketing Video 與 Capture 的解耦實作已分別合併至兩個 repository 的 `main`；Capture 的
+  唯一 versioned source 位於 sibling repo，App 只保留 Port、Adapter、policy、ingest 與
+  consumer tests。
+- Provider release `v0.2.0` 指向 commit
+  `87c033bed59fd53242b1679bc71b39fb20a11832`；App 以 Provider ID、contract v1 與 tool
+  version `0.2.0` 作 runtime lock，並另記 immutable tag／commit provenance。
+- 非 Simulator 的 cross-repo conformance gate 已直接串接 sibling test driver 的 production
+  CLI／contract／runtime seam，驗到 App path／hash／MIME validation 與 Project Asset ingest；
+  普通 App tests／smoke 仍完全 provider-free。
 - Standalone 真實 screenshot 已通過：provider `0.2.0` 由指定 Simulator 產出 PNG／manifest，hash、完整 decode、route／content evidence 與 ignored runtime 邊界均驗證完成。
 - Connected 真實 screenshot 已通過：`require-capture` 經 production Adapter 驗 path／hash／MIME 後 ingest 為 Project Asset，Job／Revision 保存 `fresh_capture` 與 asset reference，實際 parser／timeline consumer 引用同一 `shot1.png`。
 - Provider absent／no-intent、`disable`、`prefer`、`require` regression、typecheck 與完整 provider-free smoke 已通過。
