@@ -17,6 +17,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'marketing-video-smoke-')
 const GUARD_LOG = path.join(DATA_DIR, 'blocked-side-effects.log');
 const GUARD_MODULE = path.join(DATA_DIR, 'side-effect-guard.cjs');
 let child;
+const AUXILIARY_CHILDREN = new Set();
 
 // 1x1 PNG 與一幀 H.264 MP4；MP4 是可解碼的完整容器，不用外部服務生成。
 const PNG_FIXTURE = Buffer.from(
@@ -234,6 +235,10 @@ childProcess.execFileSync = function (file, args, options) {
     localProbe = target.startsWith(dataRoot + path.sep);
   } catch (_) {}
   if (file === 'ffprobe' && Array.isArray(args) && args.includes('-count_frames') && localProbe)
+    return originalExecFileSync(file, args, options);
+  if (file === 'ps' && Array.isArray(args) && args.length === 4
+      && args[0] === '-p' && /^\\d+$/.test(String(args[1]))
+      && args[2] === '-o' && ['command=', 'lstart='].includes(args[3]))
     return originalExecFileSync(file, args, options);
   return blockedExecFileSync();
 };
@@ -482,7 +487,12 @@ async function main() {
   const html = await request(base, '/');
   assert.match(html, /出片前台/);
   assert.match(html, /3・講者 Avatar/);
-  assert.match(html, /4・圖片與 B-Roll 影片素材/);
+  assert.match(html, /4・B-Roll/);
+  assert.match(html, /自動生成圖卡/);
+  assert.match(html, /Render 前先暫停/);
+  assert.match(html, /Automation stage/);
+  assert.match(html, /停止工作/);
+  assert.match(html, /從.*階段重試/);
   assert.match(html, /這一版帶入的素材/);
   assert.match(html, /專案素材庫/);
   assert.match(html, /網頁預覽/);
@@ -497,9 +507,27 @@ async function main() {
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
+
+  const invalidWorkflow = await fetch(base + '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'default', title: 'invalid workflow', body: 'invalid workflow',
+      workflowMode: 'provider-magic',
+    }),
+  });
+  assert.equal(invalidWorkflow.status, 400);
+  const invalidAutoTemplate = await fetch(base + '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'dapan', title: 'invalid auto template', body: 'invalid auto template',
+      workflowMode: 'auto-broll', controlPolicy: 'auto',
+    }),
+  });
+  assert.equal(invalidAutoTemplate.status, 400);
+
   const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
   const renderDoneBlock = serverSource.match(
-    /transitionJobSafely\(job, \{[\s\S]{0,300}status: 'done',[\s\S]{0,160}\}\);/);
+    /transitionJobSafely\(job, \{[\s\S]{0,400}status: 'done',[\s\S]{0,700}\}\);/);
   assert.ok(renderDoneBlock, 'render 完成狀態必須以 durable transition 保存，再交給 cleanup');
   assert.doesNotMatch(renderDoneBlock[0],
     /rmrf\(path\.join\(jobDir\(job\.id\), 'state'\)\);/);
@@ -509,7 +537,7 @@ async function main() {
     /spawn\(process\.execPath, \['--require', evidenceFiles\.preload, pipelineEntry/,
     'run.js 必須在同一個 process 內載入 durable completion evidence hook');
   assert.match(serverSource,
-    /const evidence = await runPipeline\(job, args\);[\s\S]{0,1200}finalizeRenderOutputs\(job, evidence\)/,
+    /evidence = await runPipeline\(job, args\);[\s\S]{0,1800}finalizeRenderOutputs\(job, evidence\)/,
     '正常 render 必須與 detached recovery 共用 output finalizer');
   assert.match(serverSource,
     /function writeJobRecord\(j\) \{[\s\S]{0,160}atomicWriteFile\(jobFile\(j\.id\)/,
@@ -574,6 +602,41 @@ async function main() {
   assert.deepEqual(initial.jobs, []);
   const initialProjects = await request(base, '/api/projects');
   assert.deepEqual(initialProjects.projects, []);
+
+  const autoDraft = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'default', owner: 'smoke-auto-broll', title: '晨報自動圖卡',
+      body: '今天市場聚焦成交量與主要族群輪動。', workflowMode: 'auto-broll',
+      controlPolicy: 'auto',
+    }),
+  });
+  assert.equal(autoDraft.job.workflowMode, 'auto-broll');
+  assert.equal(autoDraft.job.controlPolicy, 'auto');
+  assert.equal(autoDraft.job.skipGenerate, true);
+  assert.equal(autoDraft.job.autoApprove, true);
+  const autoManualUpload = await fetch(base + `/api/jobs/${autoDraft.job.id}/upload?name=shot1.png`, {
+    method: 'POST', body: PNG_FIXTURE,
+  });
+  assert.equal(autoManualUpload.status, 409);
+  const autoSubmitWithoutAvatar = await fetch(base + `/api/jobs/${autoDraft.job.id}/submit`, {
+    method: 'POST',
+  });
+  assert.equal(autoSubmitWithoutAvatar.status, 400);
+  await request(base, `/api/jobs/${autoDraft.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+  const autoSubmitted = await request(base, `/api/jobs/${autoDraft.job.id}/submit`, { method: 'POST' });
+  assert.equal(autoSubmitted.job.status, 'queued');
+  assert.equal(autoSubmitted.job.stage, 'queued');
+  const autoProject = await request(base,
+    `/api/projects/${autoDraft.job.projectId}?revision=${autoDraft.job.revisionId}`);
+  assert.equal(autoProject.revision.options.graphicBrollMode, 'card-v1');
+  assert.equal(autoProject.project.assets.filter((asset) => asset.kind === 'speaker-video').length, 1);
+  assert.equal(autoProject.project.assets.some((asset) => ['image', 'video'].includes(asset.kind)), false);
+  const autoCancelled = await request(base, `/api/jobs/${autoDraft.job.id}/cancel`, { method: 'POST' });
+  assert.equal(autoCancelled.job.status, 'cancelled');
+  assert.ok(autoCancelled.job.cancelledAt);
 
   const invalidBrand = await fetch(base + '/api/jobs', {
     method: 'POST',
@@ -1074,7 +1137,7 @@ async function main() {
   const detachedCancel = await fetch(base + `/api/jobs/${detachedRecovery.job.id}/cancel`, {
     method: 'POST',
   });
-  assert.equal(detachedCancel.status, 400);
+  assert.equal(detachedCancel.status, 202);
   await request(base, '/api/health');
   const unownedDetachedJob = await request(base, `/api/jobs/${detachedRecovery.job.id}`);
   const unownedDetachedProject = await request(base,
@@ -1097,7 +1160,9 @@ async function main() {
   const detachedRecoveredJob = await request(base, `/api/jobs/${detachedRecovery.job.id}`);
   const detachedRecoveredProject = await request(base,
     `/api/projects/${detachedRecovery.job.projectId}?revision=${detachedRecovery.job.revisionId}`);
-  assert.equal(detachedRecoveredJob.job.status, 'detached-done');
+  assert.equal(detachedRecoveredJob.job.status, 'cancelled');
+  assert.ok(detachedRecoveredJob.job.cancelRequestedAt);
+  assert.ok(detachedRecoveredJob.job.cancelledAt);
   const detachedSpeakers = detachedRecoveredProject.project.assets
     .filter((asset) => asset.kind === 'speaker-video');
   assert.equal(detachedSpeakers.length, 1);
@@ -1108,6 +1173,60 @@ async function main() {
   assert.deepEqual(Buffer.from(await detachedSpeakerResponse.arrayBuffer()), MP4_FIXTURE);
   assert.deepEqual(timestampState(await request(base,
     `/api/projects/${created.job.projectId}?revision=${created.job.revisionId}`)), stableTimestamps);
+
+  // A token-bearing lock can survive SIGKILL. If that PID is later reused by an unrelated live
+  // process, cancellation must never turn the stale lock into kill authority.
+  const staleLockDraft = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'default', owner: 'stale-lock-smoke', title: 'PID reuse gate',
+      body: 'stale lock 不可誤殺無關 process。', skipGenerate: true,
+    }),
+  });
+  await stopTestServer(child);
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  AUXILIARY_CHILDREN.add(unrelated);
+  unrelated.unref();
+  const staleToken = '00000000-0000-4000-8000-000000000003';
+  const staleStartedAt = new Date().toISOString();
+  const staleJobFile = path.join(DATA_DIR, 'jobs', staleLockDraft.job.id, 'job.json');
+  const staleJob = JSON.parse(fs.readFileSync(staleJobFile, 'utf8'));
+  Object.assign(staleJob, {
+    status: 'detached',
+    pid: unrelated.pid,
+    workspaceRunPid: unrelated.pid,
+    workspaceRunStatus: 'preparing',
+    workspaceRunStartedAt: staleStartedAt,
+    workspaceRunToken: staleToken,
+    detachedFromStatus: 'preparing',
+  });
+  fs.writeFileSync(staleJobFile, JSON.stringify(staleJob, null, 2));
+  const staleOwner = { pid: unrelated.pid, startedAt: staleStartedAt, token: staleToken };
+  fs.writeFileSync(path.join(DATA_DIR, '.run.lock'), JSON.stringify(staleOwner));
+  fs.writeFileSync(path.join(DATA_DIR, '.run.owner.json'), JSON.stringify(staleOwner));
+
+  child = startTestServer();
+  const staleRestartReady = await waitForReady(child);
+  base = `http://127.0.0.1:${staleRestartReady.port}`;
+  const staleCancelResponse = await fetch(base + `/api/jobs/${staleLockDraft.job.id}/cancel`, {
+    method: 'POST',
+  });
+  assert.equal(staleCancelResponse.status, 202);
+  const staleCancelBody = await staleCancelResponse.json();
+  assert.equal(staleCancelBody.signalled, false);
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+
+  fs.rmSync(path.join(DATA_DIR, '.run.lock'));
+  const unrelatedExited = new Promise((resolve) => unrelated.once('exit', resolve));
+  unrelated.kill('SIGTERM');
+  await unrelatedExited;
+  AUXILIARY_CHILDREN.delete(unrelated);
+  await request(base, '/api/health');
+  const safelySettledStale = await waitForJobStatus(base, staleLockDraft.job.id, 'cancelled');
+  assert.ok(safelySettledStale.job.cancelledAt);
 
   const workspaceOut = path.join(DATA_DIR, 'workspace', 'out');
   let detachedRenderSequence = 0x10;
@@ -1829,13 +1948,20 @@ fs.writeFileSync(path.join(dataDir, '.run.owner.json'), JSON.stringify({
   token: process.env.WORKSPACE_RUN_TOKEN,
 }));
 fs.appendFileSync(process.env.SMOKE_PIPELINE_INVOCATIONS, process.argv.slice(2).join(' ') + '\\n');
+if (mode === 'wait') {
+  process.on('SIGTERM', () => {
+    fs.appendFileSync(process.env.SMOKE_PIPELINE_SIGNAL, 'SIGTERM\\n');
+    setTimeout(() => process.exit(143), 80);
+  });
+  setInterval(() => {}, 1000);
+}
 if (mode.endsWith('log-fail')) {
   const pipelineDir = path.dirname(process.env.WORKSPACE_EVIDENCE_CONFIG);
   const logFile = path.join(path.dirname(pipelineDir), 'log.txt');
   fs.rmSync(logFile, { recursive: true, force: true });
   fs.mkdirSync(logFile);
 }
-process.exitCode = mode.startsWith('success') ? 0 : 1;
+if (mode !== 'wait') process.exitCode = mode.startsWith('success') ? 0 : 1;
 `);
   child = startTestServer({ DATA_DIR: normalWorkerDir });
   const normalSetupReady = await waitForReady(child);
@@ -1987,6 +2113,93 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
     'log.txt')).isDirectory(), true);
   assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 3);
 
+  const renderRetryDraft = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'default', owner: 'render-retry-smoke', title: 'Render retry fixture',
+      body: 'Render 失敗時只重跑同一份 plan 與 manifest。',
+      workflowMode: 'auto-broll', controlPolicy: 'auto',
+    }),
+  });
+  await request(base, `/api/jobs/${renderRetryDraft.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+
+  await stopTestServer(child);
+  const renderRetryJobDir = path.join(normalWorkerDir, 'jobs', renderRetryDraft.job.id);
+  const renderRetryJobFile = path.join(renderRetryJobDir, 'job.json');
+  const renderRetryRecord = JSON.parse(fs.readFileSync(renderRetryJobFile, 'utf8'));
+  renderRetryRecord.status = 'failed';
+  renderRetryRecord.stage = 'rendering';
+  renderRetryRecord.failedStage = 'rendering';
+  renderRetryRecord.error = 'fixture render failure';
+  renderRetryRecord.renderInputManifestSha256 = 'a'.repeat(64);
+  fs.writeFileSync(renderRetryJobFile, JSON.stringify(renderRetryRecord, null, 2));
+  fs.mkdirSync(path.join(renderRetryJobDir, 'state'), { recursive: true });
+  child = startTestServer({ DATA_DIR: normalWorkerDir });
+  const retryApiReady = await waitForReady(child);
+  base = `http://127.0.0.1:${retryApiReady.port}`;
+  const retried = await request(base, `/api/jobs/${renderRetryDraft.job.id}/retry`, { method: 'POST' });
+  assert.equal(retried.job.status, 'approved');
+  assert.equal(retried.job.id, renderRetryDraft.job.id);
+  assert.equal(retried.job.revisionId, renderRetryDraft.job.revisionId);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 3);
+  const duplicateRetry = await fetch(base + `/api/jobs/${renderRetryDraft.job.id}/retry`, {
+    method: 'POST',
+  });
+  assert.equal(duplicateRetry.status, 409);
+  const retriedProject = await request(base,
+    `/api/projects/${renderRetryDraft.job.projectId}?revision=${renderRetryDraft.job.revisionId}`);
+  assert.equal(retriedProject.revision.status, 'approved');
+  await request(base, `/api/jobs/${renderRetryDraft.job.id}/cancel`, { method: 'POST' });
+  await stopTestServer(child);
+
+  const activeCancelSignal = path.join(normalWorkerDir, 'active-cancel-signal.log');
+  child = startTestServer({
+    ...workerEnv,
+    SMOKE_PIPELINE_MODE: 'wait',
+    SMOKE_PIPELINE_SIGNAL: activeCancelSignal,
+  });
+  const activeCancelReady = await waitForReady(child);
+  base = `http://127.0.0.1:${activeCancelReady.port}`;
+  const activeAuto = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'default', owner: 'active-cancel-smoke', title: '執行中停止測試',
+      body: '執行中的自動圖卡流程必須先停止 process，再標記取消。',
+      workflowMode: 'auto-broll', controlPolicy: 'auto',
+    }),
+  });
+  await request(base, `/api/jobs/${activeAuto.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+  await request(base, `/api/jobs/${activeAuto.job.id}/submit`, { method: 'POST' });
+  const activeDeadline = Date.now() + 10000;
+  while (Date.now() < activeDeadline) {
+    const invocationCount = fs.existsSync(normalWorkerInvocations)
+      ? fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+    if (invocationCount >= 4) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const activeBeforeCancel = await request(base, `/api/jobs/${activeAuto.job.id}`);
+  assert.equal(activeBeforeCancel.job.status, 'preparing');
+  const activeCancelResponse = await fetch(base + `/api/jobs/${activeAuto.job.id}/cancel`, {
+    method: 'POST',
+  });
+  assert.equal(activeCancelResponse.status, 202);
+  const stoppingJob = (await activeCancelResponse.json()).job;
+  assert.equal(stoppingJob.status, 'preparing');
+  assert.ok(stoppingJob.cancelRequestedAt);
+  const activeCancelled = await waitForJobStatus(base, activeAuto.job.id, 'cancelled');
+  assert.ok(activeCancelled.job.cancelledAt);
+  assert.equal(fs.readFileSync(activeCancelSignal, 'utf8').trim(), 'SIGTERM');
+  assert.equal(fs.existsSync(path.join(normalWorkerDir, 'jobs', activeAuto.job.id, 'state')), true);
+  assert.match(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').at(-1),
+    /--stop-before-render.*--graphic-broll=card-v1/);
+  const activeCancelledProject = await request(base,
+    `/api/projects/${activeAuto.job.projectId}?revision=${activeAuto.job.revisionId}`);
+  assert.equal(activeCancelledProject.revision.status, 'cancelled');
+
   await stopTestServer(child);
   armNormalRender(normalUnsafeFallback, '2001-01-01T00:01:00.000Z');
   armNormalRender(normalQueuedBehind, '2001-01-01T00:02:00.000Z');
@@ -2002,7 +2215,7 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
   assert.match(normalUnsafeResult.job.error, /fallback 尚未保存/);
   const queuedBehindResult = await request(base, `/api/jobs/${normalQueuedBehind.job.id}`);
   assert.equal(queuedBehindResult.job.status, 'approved');
-  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 4);
+  assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 5);
   await stopTestServer(child);
 
   for (const rel of mutableRepoPaths) {
@@ -2026,9 +2239,12 @@ process.exitCode = mode.startsWith('success') ? 0 : 1;
   console.log('✅ 上傳／重用失敗會回收草稿 Revision、新 Project 與本次新增素材');
   console.log('✅ submit 後不可重複排隊或覆寫 input');
   console.log('✅ 一般 restart 保留 Project 時間；真正 recovery 只同步一次狀態與時間');
-  console.log('✅ detached 不可取消；spawn intent 不誤收，owner token 相符才保存 Avatar 並放行');
+  console.log('✅ detached 停止請求先持久化；spawn intent 不誤殺，owner token 相符且 process 停止後才 cancelled');
+  console.log('✅ stale lock／PID reuse gate：live unrelated process 不會收到停止訊號');
   console.log('✅ detached render evidence：單／雙／選配輸出、partial fallback、archive retry、owner gate 與 idempotent restart');
   console.log('✅ 正常 render non-zero/partial：durable fallback 後回待確認；fallback 失敗維持 queue gate');
+  console.log('✅ active auto-broll cancel：先 202/停止中，owned process 收到 SIGTERM 且關閉後才 cancelled，快照保留');
+  console.log('✅ render retry endpoint：同一 Run／Revision 回 approved，duplicate 409，worker 未重跑 prepare');
   console.log('✅ success／partial／failed 的 log 寫入失敗不影響 durable Job／Revision transition');
   console.log('✅ job.json atomic、半完成 terminal transition 啟動修復、pipeline/out symlink fail closed');
   console.log('✅ 成功 Project Run 立即清 payload；Project 素材、Revision、成品與下一版仍可用');
@@ -2047,5 +2263,8 @@ main()
   })
   .finally(() => {
     if (child && child.exitCode === null) child.kill('SIGTERM');
+    for (const auxiliary of AUXILIARY_CHILDREN) {
+      try { auxiliary.kill('SIGTERM'); } catch (_) {}
+    }
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
   });

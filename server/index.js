@@ -35,6 +35,10 @@ const { createProjectStore, extensionForMediaType, inspectMediaFile } = require(
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
 const { normalizeMaterialAcquisitionIntent } = require('./material-acquisition');
 const { prepareJobMaterialAcquisition } = require('./material-acquisition-runtime');
+const {
+  buildRenderInputManifest,
+  verifyDeclaredFileFingerprints,
+} = require('./render-input-manifest');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -196,6 +200,18 @@ const TEMPLATES = {
   },
 };
 
+const WORKFLOW_MODES = new Set(['manual-assets', 'auto-broll']);
+const CONTROL_POLICIES = new Set(['auto', 'pause-before-render']);
+const GRAPHIC_BROLL_PLAN = 'src/graphic-broll.generated.json';
+
+function compositionIdFor(job) {
+  if (job.template === 'default') return 'MarketingVideo';
+  if (job.template === 'dapan') return 'DapanXiaobao';
+  if (job.template === 'institution') return 'Institution';
+  if (job.template === 'focusstock') return 'Focusstock';
+  throw new Error(`版型沒有 composition：${job.template}`);
+}
+
 /** 投廣模板可選的品牌 = assets/ 底下有 frame.png 的資料夾 */
 function listBrands() {
   const dir = path.join(ROOT, 'assets');
@@ -218,7 +234,9 @@ function snapshotTargets() {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? rel + '/' + e.name : e.name;
       if (e.isDirectory()) walk(path.join(dir, e.name), r);
-      else if (/\.generated\.json$/.test(e.name) || /^subtitles(\.original)?\.json$/.test(e.name))
+      else if (/\.generated\.json$/.test(e.name)
+          || /^subtitles(\.original)?\.json$/.test(e.name)
+          || /^video-meta\.json$/.test(e.name))
         list.push('src/' + r);
     }
   };
@@ -408,6 +426,19 @@ function revisionNeedsJobSync(job) {
     outputs: job.outputs || [],
     archived: job.archived || [],
     finishedAt: job.finishedAt || null,
+    ...(job.workflowMode ? {
+      workflowMode: job.workflowMode,
+      controlPolicy: job.controlPolicy || null,
+      stage: job.stage || null,
+      failedStage: job.failedStage || null,
+      cancelRequestedAt: job.cancelRequestedAt || null,
+      cancelledAt: job.cancelledAt || null,
+      graphicBroll: job.graphicBroll || null,
+      timelinePlacements: job.timelinePlacements || [],
+      renderInputManifest: job.renderInputManifest || null,
+      renderInputManifestSha256: job.renderInputManifestSha256 || null,
+      renderEvidence: job.renderEvidence || null,
+    } : {}),
     ...(job.materialAcquisition ? { materialAcquisition: job.materialAcquisition } : {}),
     ...(job.materialAcquisitionResult
       ? { materialAcquisitionResult: job.materialAcquisitionResult } : {}),
@@ -491,6 +522,19 @@ function saveJob(j) {
       outputs: j.outputs || [],
       archived: j.archived || [],
       finishedAt: j.finishedAt || null,
+      ...(j.workflowMode ? {
+        workflowMode: j.workflowMode,
+        controlPolicy: j.controlPolicy || null,
+        stage: j.stage || null,
+        failedStage: j.failedStage || null,
+        cancelRequestedAt: j.cancelRequestedAt || null,
+        cancelledAt: j.cancelledAt || null,
+        graphicBroll: j.graphicBroll || null,
+        timelinePlacements: j.timelinePlacements || [],
+        renderInputManifest: j.renderInputManifest || null,
+        renderInputManifestSha256: j.renderInputManifestSha256 || null,
+        renderEvidence: j.renderEvidence || null,
+      } : {}),
       ...(j.materialAcquisition ? { materialAcquisition: j.materialAcquisition } : {}),
       ...(j.materialAcquisitionResult
         ? { materialAcquisitionResult: j.materialAcquisitionResult } : {}),
@@ -695,6 +739,8 @@ function readPipelineEvidence(job) {
     && result.revisionId === (job.revisionId || null)
     && result.workspaceRunToken === job.workspaceRunToken
     && result.runStatus === job.workspaceRunStatus
+    && (!job.renderInputManifestSha256
+      || result.renderInputManifestSha256 === job.renderInputManifestSha256)
     && result.owner && result.owner.token === job.workspaceRunToken
     && isPidValue(result.owner.pid)
     && (!isPidValue(job.workspaceRunPid) || Number(result.owner.pid) === Number(job.workspaceRunPid));
@@ -761,9 +807,23 @@ function preserveEvidenceOutputs(job, evidence) {
   return preserved;
 }
 
-function retryableRenderPatch(evidence, preserved) {
+function retryableRenderPatch(job, evidence, preserved) {
+  if (job.workflowMode === 'auto-broll') {
+    return {
+      status: 'failed',
+      stage: 'rendering',
+      failedStage: 'rendering',
+      pid: null,
+      error: `render 失敗：${evidence.message}；已保留可驗證 output，可從 render 階段重試`,
+      finishedAt: null,
+      outputs: preserved,
+      archived: [],
+    };
+  }
   return {
     status: 'review',
+    stage: 'awaiting-audit',
+    failedStage: null,
     pid: null,
     error: `render 失敗：${evidence.message}；已保留可驗證 output，可人工確認後重新出片`,
     finishedAt: null,
@@ -824,6 +884,8 @@ function finalizeRenderOutputs(job, evidence) {
         size: item.after.size,
         sha256: item.after.sha256,
         archive: path.relative(ROOT, target),
+        ...(job.renderInputManifestSha256
+          ? { renderInputManifestSha256: job.renderInputManifestSha256 } : {}),
       });
     }
   } catch (error) {
@@ -877,13 +939,21 @@ function reconcileDetachedRender(job, pid) {
     let preserved;
     try {
       preserved = preserveEvidenceOutputs(job, evidence);
-      transitionJobSafely(job, retryableRenderPatch(evidence, preserved));
+      if (job.cancelRequestedAt) {
+        settleCancelledJob(job, { outputs: preserved });
+        appendLogBestEffort(job, `\n⏹ 背景 render 已停止；保留 ${preserved.length} 份可驗證 partial output。\n`);
+        return true;
+      }
+      transitionJobSafely(job, retryableRenderPatch(job, evidence, preserved));
     } catch (error) {
       deferDetachedCapture(job, `背景 render 失敗且 fallback 尚未保存：${error.message}`);
       return false;
     }
     appendLogBestEffort(job, `\n⚠️ 背景 render 失敗：${evidence.message}；`
-      + `已保留 ${preserved.length} 份可檢查 output，回到待確認狀態，可人工重新出片。\n`);
+      + `已保留 ${preserved.length} 份可檢查 output，`
+      + (job.workflowMode === 'auto-broll'
+        ? '可從 render 階段重試，不會重生圖卡。\n'
+        : '回到待確認狀態，可人工重新出片。\n'));
     return true;
   }
 
@@ -897,6 +967,18 @@ function reconcileDetachedRender(job, pid) {
       finishedAt: finalized.finishedAt,
       outputs: finalized.outputs,
       archived: finalized.archived,
+      stage: 'done',
+      failedStage: null,
+      renderEvidence: {
+        schemaVersion: 1,
+        renderInputManifestSha256: job.renderInputManifestSha256 || null,
+        verifiedAt: finalized.finishedAt,
+        outputs: finalized.outputs.map((output) => ({
+          name: output.name,
+          size: output.size,
+          sha256: output.sha256,
+        })),
+      },
     });
   } catch (error) {
     let message = error.message;
@@ -943,6 +1025,18 @@ function reconcileDetached(job) {
     if (lockExists && lockOwner && !matchingLock) {
       markDetachedContested(job, `lock owner pid ${lockOwner.pid} != detached pid ${pid}`);
     }
+    if (job.cancelRequestedAt && !job.cancelSignalSentAt && matchingLock) {
+      try {
+        writeCancellationRequest(job);
+        const result = signalOwnedRun(job);
+        if (result.signalled) {
+          job.cancelSignalSentAt = nowISO();
+          writeJobRecord(job);
+        }
+      } catch (error) {
+        appendLogBestEffort(job, `\n⚠️ 停止訊號尚未送出：${error.message}\n`);
+      }
+    }
     return false;
   }
 
@@ -986,6 +1080,14 @@ function reconcileDetached(job) {
 
   const fromStatus = job.detachedFromStatus || (job.preparedAt ? 'rendering' : 'preparing');
   if (fromStatus === 'rendering') return reconcileDetachedRender(job, pid);
+  if (job.cancelRequestedAt) {
+    try { captureProjectAssets(job); } catch (_) {}
+    try { snapshotWorkspace(job); } catch (_) {}
+    try { captureAutomationEvidence(job); } catch (_) {}
+    settleCancelledJob(job);
+    appendLogBestEffort(job, '\n⏹ 背景準備流程已停止；已保留可歸屬的完成成果。\n');
+    return true;
+  }
   // render-only and skip-generate runs cannot have bought a new speaker output. Finalize them
   // without inspecting a possibly unrelated staging copy left in the shared workspace.
   if (fromStatus !== 'preparing' || job.skipGenerate) {
@@ -1100,6 +1202,116 @@ function restoreWorkspace(job) {
   }
 }
 
+function readGraphicBrollPlan(baseDir) {
+  const file = path.join(baseDir, GRAPHIC_BROLL_PLAN);
+  if (!fs.existsSync(file)) throw new Error('找不到 graphic B-Roll plan');
+  let plan;
+  try { plan = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { throw new Error(`graphic B-Roll plan 無法解析：${error.message}`); }
+  return { file, plan };
+}
+
+function validateGraphicBrollPlanForJob(job, baseDir) {
+  const { file, plan } = readGraphicBrollPlan(baseDir);
+  const expectedMode = job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled';
+  if (!plan || plan.schemaVersion !== 1 || plan.mode !== expectedMode
+      || plan.style !== 'morning-report-v1' || !SHA256_HEX.test(plan.sourceScriptSha256 || '')
+      || !Array.isArray(plan.cards))
+    throw new Error(`graphic B-Roll plan contract 不符（預期 ${expectedMode}）`);
+  const scriptFile = path.join(baseDir, 'public', 'script.txt');
+  if (!fs.existsSync(scriptFile) || fileSha256(scriptFile) !== plan.sourceScriptSha256)
+    throw new Error('graphic B-Roll plan 的 script hash 與本版講稿不一致');
+  if (expectedMode === 'disabled' && plan.cards.length)
+    throw new Error('manual flow 的 graphic B-Roll plan 必須為空');
+  if (expectedMode === 'card-v1' && !plan.cards.length)
+    throw new Error('auto-broll 至少必須有一張 graphic card');
+  const ids = new Set();
+  for (const card of plan.cards) {
+    const placement = card && card.resolvedPlacement;
+    if (!card || typeof card.id !== 'string' || !card.id || ids.has(card.id)
+        || typeof card.headline !== 'string' || typeof card.body !== 'string'
+        || !Number.isInteger(card.startCharIdx) || !Number.isInteger(card.endCharIdx)
+        || card.startCharIdx < 0 || card.endCharIdx < card.startCharIdx
+        || !placement || !Number.isFinite(placement.startSec)
+        || !Number.isFinite(placement.endSec) || placement.startSec < 0
+        || placement.endSec <= placement.startSec)
+      throw new Error('graphic B-Roll card／placement contract 不完整');
+    ids.add(card.id);
+  }
+  return { plan, planSha256: fileSha256(file) };
+}
+
+function buildJobRenderInput(job, artifactRoot) {
+  return buildRenderInputManifest({
+    artifactRoot,
+    // Renderer code is executable repository identity, not a Run artifact. Never source it from
+    // state/ or restore it into ROOT: a retry must fail closed if the checked-out renderer drifted.
+    rendererRoot: ROOT,
+    template: job.template,
+    compositionId: compositionIdFor(job),
+    brand: job.brand || null,
+    withAd: !!job.withAd,
+    workflowMode: job.workflowMode || 'manual-assets',
+    graphicBrollMode: job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+  });
+}
+
+function captureAutomationEvidence(job) {
+  const state = path.join(jobDir(job.id), 'state');
+  const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
+  job.graphicBroll = {
+    schemaVersion: plan.schemaVersion,
+    mode: plan.mode,
+    style: plan.style,
+    sourceScriptSha256: plan.sourceScriptSha256,
+    planSha256,
+    cards: plan.cards,
+  };
+  job.timelinePlacements = plan.cards.map((card) => ({
+    cardId: card.id,
+    startCharIdx: card.startCharIdx,
+    endCharIdx: card.endCharIdx,
+    startSec: card.resolvedPlacement.startSec,
+    endSec: card.resolvedPlacement.endSec,
+  }));
+  if (job.workflowMode === 'auto-broll') {
+    const renderInput = buildJobRenderInput(job, state);
+    job.renderInputManifest = renderInput.manifest;
+    job.renderInputManifestSha256 = renderInput.sha256;
+  } else {
+    // Legacy manual review 會在準備後修改 shot plan；M02A 不替它宣稱一份 pre-edit
+    // manifest 是實際 render input。Automation-first Run 才使用 immutable manifest gate。
+    job.renderInputManifest = null;
+    job.renderInputManifestSha256 = null;
+  }
+}
+
+function verifyRestoredRenderInput(job) {
+  if (job.workflowMode !== 'auto-broll') return null;
+  if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
+    throw new Error('這個 Run 缺少可追溯的 render input manifest');
+  const state = path.join(jobDir(job.id), 'state');
+  const { planSha256: statePlanSha256 } = validateGraphicBrollPlanForJob(job, state);
+  const { planSha256: restoredPlanSha256 } = validateGraphicBrollPlanForJob(job, ROOT);
+  if (statePlanSha256 !== job.graphicBroll?.planSha256
+      || restoredPlanSha256 !== statePlanSha256)
+    throw new Error('render retry 的 graphic B-Roll plan 已改變，拒絕重新生成或靜默替換');
+  // Rebuild the same two-root identity as prepare: immutable Run artifacts + the actual checkout.
+  // This catches both state tampering and renderer/package-lock drift without ever snapshotting code.
+  const current = buildJobRenderInput(job, state);
+  if (current.sha256 !== job.renderInputManifestSha256
+      || JSON.stringify(current.manifest) !== JSON.stringify(job.renderInputManifest))
+    throw new Error('目前 render inputs 與準備階段 manifest 不一致');
+  // The renderer consumes ROOT after restore. Verify the immutable state's declared artifact set
+  // byte-for-byte, while intentionally ignoring unrelated template assets restore keeps in public/.
+  verifyDeclaredFileFingerprints({
+    baseDir: ROOT,
+    expectedFiles: current.manifest.artifactInputs,
+    label: 'restore 後的 render artifact inputs',
+  });
+  return current;
+}
+
 /**
  * 把本次 Run 產生、之後可能會重用的素材收回 Project library。
  * 固定品牌素材由 assets/ 管理，不重複收入 Project；腳本與中間 JSON 也不算素材。
@@ -1134,6 +1346,17 @@ function isRunJs(pid) {
   } catch (_) { return false; }
 }
 
+/** 防止 stale lock 的 PID 被 OS 回收後，誤把另一個同名 run.js process 當成本輪。 */
+function processStartedNear(pid, expectedStartedAt, toleranceMs = 10000) {
+  const expected = Date.parse(expectedStartedAt || '');
+  if (!Number.isFinite(expected)) return false;
+  try {
+    const out = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf-8' }).trim();
+    const actual = Date.parse(out);
+    return Number.isFinite(actual) && Math.abs(actual - expected) <= toleranceMs;
+  } catch (_) { return false; }
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
   try { process.kill(Number(pid), 0); return true; } catch (_) { return false; }
@@ -1153,6 +1376,56 @@ function readLockOwner() {
   } catch (_) {
     return null;
   }
+}
+
+function writeCancellationRequest(job) {
+  if (!isWorkspaceRunToken(job.workspaceRunToken)) return false;
+  const files = pipelineEvidenceFiles(job);
+  atomicWriteFile(files.cancel, JSON.stringify({
+    schemaVersion: 1,
+    workspaceRunToken: job.workspaceRunToken,
+    requestedAt: job.cancelRequestedAt,
+  }, null, 2));
+  return true;
+}
+
+function signalOwnedRun(job) {
+  const active = activeRuns.get(job.id);
+  let pid = null;
+  if (active && active.token === job.workspaceRunToken
+      && Number(active.pid) === Number(job.workspaceRunPid)
+      && active.child.exitCode === null && active.child.signalCode === null) {
+    pid = Number(active.pid);
+  } else {
+    // A persistent workspace owner marker can be stale after normal exit. Detached cancellation
+    // therefore requires the live lock, the expected run.js command, and the original process
+    // start time before signalling a group. A token-bearing stale lock alone is not kill authority.
+    const lockOwner = readLockOwner();
+    if (lockBelongsToJob(lockOwner, job)
+        && isRunJs(lockOwner.pid)
+        && processStartedNear(lockOwner.pid, lockOwner.startedAt)) pid = Number(lockOwner.pid);
+  }
+  if (!isPidValue(pid) || !isPidAlive(pid)) return { signalled: false, reason: 'owned process 尚未可確認' };
+  try {
+    process.kill(-pid, 'SIGTERM');
+    return { signalled: true, pid };
+  } catch (error) {
+    if (error.code === 'ESRCH') return { signalled: false, reason: 'process 已結束' };
+    throw error;
+  }
+}
+
+function settleCancelledJob(job, { outputs } = {}) {
+  transitionJobSafely(job, {
+    status: 'cancelled',
+    stage: 'cancelled',
+    pid: null,
+    error: null,
+    failedStage: null,
+    cancelledAt: job.cancelledAt || nowISO(),
+    finishedAt: job.finishedAt || nowISO(),
+    ...(outputs ? { outputs } : {}),
+  });
 }
 
 function expectedRenderOutputs(job) {
@@ -1176,6 +1449,8 @@ function pipelineEvidenceFiles(job, token = job.workspaceRunToken, { create = fa
     config: path.join(dir, `${token}.config.json`),
     preload: path.join(dir, `${token}.preload.cjs`),
     result: path.join(dir, `${token}.result.json`),
+    stage: path.join(dir, `${token}.stage.json`),
+    cancel: path.join(dir, `${token}.cancel.json`),
   };
 }
 
@@ -1245,6 +1520,7 @@ process.once('exit', (exitCode) => {
       revisionId: config.revisionId,
       workspaceRunToken: config.workspaceRunToken,
       runStatus: config.runStatus,
+      renderInputManifestSha256: config.renderInputManifestSha256 || null,
       startedAt: config.startedAt,
       finishedAt: new Date().toISOString(),
       exitCode: Number.isInteger(exitCode) ? exitCode : 1,
@@ -1282,6 +1558,8 @@ function preparePipelineEvidence(job, token) {
     startedAt: job.workspaceRunStartedAt,
     ownerFile: WORKSPACE_OWNER_FILE,
     resultFile: files.result,
+    renderInputManifestSha256: job.status === 'rendering'
+      ? (job.renderInputManifestSha256 || null) : null,
     outputs: expectedOutputs.map((relativePath) => ({
       relativePath,
       file: path.join(WORKSPACE_OUTPUT_DIR, path.basename(relativePath)),
@@ -1292,6 +1570,30 @@ function preparePipelineEvidence(job, token) {
   job.workspaceRunEvidenceVersion = 1;
   job.workspaceRunExpectedOutputs = expectedOutputs;
   return files;
+}
+
+function readPipelineStage(job) {
+  if (!['preparing', 'rendering', 'detached'].includes(job.status)) return job.stage || null;
+  if (!isWorkspaceRunToken(job.workspaceRunToken)) return job.stage || null;
+  try {
+    const file = pipelineEvidenceFiles(job).stage;
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return job.stage || null;
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return value && value.schemaVersion === 1
+      && value.workspaceRunToken === job.workspaceRunToken
+      && typeof value.stage === 'string' ? value.stage : (job.stage || null);
+  } catch (_) {
+    return job.stage || null;
+  }
+}
+
+function cancelledRunError(job, evidence) {
+  const error = new Error('使用者已要求停止這個 Run');
+  error.code = 'RUN_CANCELLED';
+  error.pipelineEvidence = evidence || null;
+  error.failedStage = job.workspaceRunStatus || job.status;
+  return error;
 }
 
 /**
@@ -1312,6 +1614,7 @@ function preparePipelineEvidence(job, token) {
  */
 function runPipeline(job, args) {
   return new Promise((resolve, reject) => {
+    if (job.cancelRequestedAt) return reject(cancelledRunError(job));
     const workspaceRunToken = crypto.randomUUID();
     job.workspaceRunToken = workspaceRunToken;
     job.workspaceRunPid = null;
@@ -1335,6 +1638,8 @@ function runPipeline(job, args) {
           FORCE_COLOR: '0',
           WORKSPACE_RUN_TOKEN: workspaceRunToken,
           WORKSPACE_EVIDENCE_CONFIG: evidenceFiles.config,
+          WORKSPACE_STAGE_FILE: evidenceFiles.stage,
+          WORKSPACE_CANCEL_FILE: evidenceFiles.cancel,
         },
         detached: true,
         stdio: ['ignore', fd, fd],
@@ -1345,12 +1650,25 @@ function runPipeline(job, args) {
     job.pid = child.pid;
     job.pidArgs = args.join(' ');
     job.workspaceRunPid = child.pid;
+    activeRuns.set(job.id, { child, pid: child.pid, token: workspaceRunToken });
     writeJobRecord(job);
     child.unref(); // 不要讓子程序撐住父程序的 event loop
-    child.on('error', reject);
+    child.on('error', (error) => {
+      const active = activeRuns.get(job.id);
+      if (active && active.token === workspaceRunToken) activeRuns.delete(job.id);
+      reject(error);
+    });
     child.on('close', (code) => {
+      const active = activeRuns.get(job.id);
+      if (active && active.token === workspaceRunToken) activeRuns.delete(job.id);
       job.pid = null;
       const evidence = readPipelineEvidence(job);
+      job.stage = readPipelineStage(job) || job.stage;
+      // 完整且可驗證的 render 已先完成時，completion wins；其他情況只有等 child close
+      // 後才把停止請求結算成 cancelled，不能在收到 API request 時提前宣稱已停止。
+      if (job.cancelRequestedAt
+          && !(job.workspaceRunStatus === 'rendering' && evidence.state === 'success'))
+        return reject(cancelledRunError(job, evidence));
       if (job.workspaceRunStatus === 'rendering') {
         // A trusted failed result can contain valuable partial output. Let doRender preserve it
         // before the queue advances. Missing/contested evidence cannot prove the workspace safe,
@@ -1660,6 +1978,7 @@ function buildScript({ voice, title, body }) {
 
 // ── 佇列 ──────────────────────────────────
 let busy = false;
+const activeRuns = new Map();
 
 function pickNext() {
   // 已確認要 render 的優先（人已經等過一輪了），其次才是新工作
@@ -1715,6 +2034,26 @@ function tick() {
   const work = job.status === 'approved' ? doRender(job) : doPrepare(job);
   work
     .catch((e) => {
+      if (e.code === 'RUN_CANCELLED') {
+        const pid = Number(job.workspaceRunPid);
+        const matchingLock = lockBelongsToJob(readLockOwner(), job);
+        if (isPidValue(pid) && (isPidAlive(pid) || matchingLock)) {
+          job.status = 'detached';
+          job.detachedFromStatus = e.failedStage || job.workspaceRunStatus || job.status;
+          job.pid = pid;
+          writeJobRecord(job);
+        } else {
+          try { settleCancelledJob(job, { outputs: job.outputs || [] }); }
+          catch (persistError) {
+            job.status = 'failed';
+            job.failedStage = e.failedStage || job.workspaceRunStatus || 'preparing';
+            job.error = `停止後狀態保存失敗：${persistError.message}`;
+            writeJobRecord(job);
+          }
+        }
+        appendLogBestEffort(job, '\n⏹ Run 已停止；已完成的成果與工作快照會保留。\n');
+        return;
+      }
       if (['OUTPUT_EVIDENCE_RETRY', 'OUTPUT_FALLBACK_RETRY', 'OUTPUT_ARCHIVE_RETRY',
         'OUTPUT_METADATA_RETRY'].includes(e.code)) {
         // The worker has ended, but the shared workspace still contains output that is not safely
@@ -1729,7 +2068,10 @@ function tick() {
         }
         return;
       }
+      const failedStage = job.status === 'rendering' ? 'rendering' : 'preparing';
       job.status = 'failed';
+      job.stage = failedStage;
+      job.failedStage = failedStage;
       job.error = e.message;
       try {
         // Machine state is the durable boundary. A diagnostic log must never prevent the Job and
@@ -1756,8 +2098,11 @@ function tick() {
 
 async function doPrepare(job) {
   job.status = 'preparing';
+  job.stage = 'preparing';
   job.startedAt = nowISO();
   saveJob(job);
+
+  if (job.cancelRequestedAt) throw cancelledRunError(job);
 
   await prepareJobMaterialAcquisition({
     job,
@@ -1768,10 +2113,12 @@ async function doPrepare(job) {
     saveJob,
     appendLog,
   });
+  if (job.cancelRequestedAt) throw cancelledRunError(job);
   clearWorkspaceInputs();
-  copyRecursive(path.join(jobDir(job.id), 'input'), path.join(ROOT, 'public'));
+  copyRecursive(path.join(jobDir(job.id), 'input'), WORKSPACE_PUBLIC_DIR);
 
   const args = [`--template=${job.template}`, '--stop-before-render'];
+  args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
   if (job.brand) args.push(`--brand=${job.brand}`);
   if (job.skipGenerate) args.push('--skip-generate');
   if (job.noSpeed) args.push('--no-speed');
@@ -1780,6 +2127,7 @@ async function doPrepare(job) {
     await runPipeline(job, args);
     captureProjectAssets(job);
     snapshotWorkspace(job);
+    captureAutomationEvidence(job);
     job.planView = buildPlanView(job);
   } catch (error) {
     capturePaidSpeakerAfterFailure({
@@ -1789,6 +2137,13 @@ async function doPrepare(job) {
       saveJob,
       appendLog,
     });
+    if (error.code === 'RUN_CANCELLED') {
+      // The owned process has stopped. Preserve whatever completed before the signal; a partial
+      // plan is never treated as valid evidence, but the snapshot remains auditable/recoverable.
+      try { captureProjectAssets(job); } catch (_) {}
+      try { snapshotWorkspace(job); } catch (_) {}
+      try { captureAutomationEvidence(job); } catch (_) {}
+    }
     throw error;
   }
   job.preparedAt = nowISO();
@@ -1796,17 +2151,20 @@ async function doPrepare(job) {
   if (job.autoApprove) {
     // 一段式：不停下來，直接接著 render
     job.status = 'approved';
+    job.stage = 'ready-to-render';
     job.approvedAt = nowISO();
     job.approvedBy = '（自動出片）';
     appendLog(job, '\n⏩ 已勾選「直接出片」，跳過人工確認\n');
   } else {
     job.status = 'review';
+    job.stage = 'awaiting-audit';
   }
   saveJob(job);
 }
 
 async function doRender(job) {
   job.status = 'rendering';
+  job.stage = 'rendering';
   saveJob(job);
 
   restoreWorkspace(job);
@@ -1814,10 +2172,26 @@ async function doRender(job) {
     applyPlanEdits(job, job.pendingEdits);
     appendLog(job, `\n✏️  已套用 ${job.corrections ? job.corrections.length : 0} 項人工修正\n`);
   }
+  verifyRestoredRenderInput(job);
+  if (job.cancelRequestedAt) throw cancelledRunError(job);
 
   const args = [`--template=${job.template}`, '--render-only'];
+  args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
   if (job.withAd) args.push('--with-ad');
-  const evidence = await runPipeline(job, args);
+  let evidence;
+  try {
+    evidence = await runPipeline(job, args);
+  } catch (error) {
+    if (error.code === 'RUN_CANCELLED' && error.pipelineEvidence) {
+      try {
+        const preserved = preserveEvidenceOutputs(job, error.pipelineEvidence);
+        if (preserved.length) job.outputs = preserved;
+      } catch (preserveError) {
+        appendLogBestEffort(job, `\n⚠️ 停止後的 partial output 無法安全保存：${preserveError.message}\n`);
+      }
+    }
+    throw error;
+  }
   if (evidence.state !== 'success') {
     let preserved;
     try {
@@ -1829,7 +2203,7 @@ async function doRender(job) {
       throw error;
     }
     try {
-      transitionJobSafely(job, retryableRenderPatch(evidence, preserved));
+      transitionJobSafely(job, retryableRenderPatch(job, evidence, preserved));
     } catch (saveError) {
       const error = new Error(`render fallback 已保存，但 retry state 尚未同步：${saveError.message}`);
       error.code = 'OUTPUT_METADATA_RETRY';
@@ -1837,7 +2211,9 @@ async function doRender(job) {
       throw error;
     }
     appendLogBestEffort(job, `\n⚠️ render 失敗：${evidence.message}；已保留 ${preserved.length} 份可檢查 output，`
-      + '回到待確認狀態，可人工重新出片。\n');
+      + (job.workflowMode === 'auto-broll'
+        ? '可從 render 階段重試，不會重生圖卡。\n'
+        : '回到待確認狀態，可人工重新出片。\n'));
     return;
   }
   const finalized = finalizeRenderOutputs(job, evidence);
@@ -1847,8 +2223,20 @@ async function doRender(job) {
       outputs: finalized.outputs,
       archived: finalized.archived,
       status: 'done',
+      stage: 'done',
       pid: null,
       error: null,
+      failedStage: null,
+      renderEvidence: {
+        schemaVersion: 1,
+        renderInputManifestSha256: job.renderInputManifestSha256 || null,
+        verifiedAt: finalized.finishedAt,
+        outputs: finalized.outputs.map((output) => ({
+          name: output.name,
+          size: output.size,
+          sha256: output.sha256,
+        })),
+      },
     });
   } catch (error) {
     // A Project metadata write can fail after the immutable output was already committed. Keep a
@@ -2103,10 +2491,10 @@ function publicJob(j) {
     workspaceRunPid, workspaceRunStatus, workspaceRunStartedAt, workspaceRunToken,
     workspaceRunEvidenceVersion, workspaceRunExpectedOutputs,
     detachedFromStatus, detachedOwnerPid, detachedWorkspaceContested,
-    detachedCaptureAttempts, detachedCaptureRetryAt,
+    detachedCaptureAttempts, detachedCaptureRetryAt, cancelSignalSentAt,
     ...rest
   } = j;
-  return { ...rest, queuePosition: queuePosition(j) };
+  return { ...rest, stage: readPipelineStage(j) || rest.stage || null, queuePosition: queuePosition(j) };
 }
 
 function publicProject(project) {
@@ -2176,7 +2564,19 @@ const server = http.createServer(async (req, res) => {
         try { materialAcquisition = normalizeMaterialAcquisitionIntent(body.materialAcquisition); }
         catch (error) { return send(res, 400, { error: error.message }); }
       }
+      const workflowMode = body.workflowMode == null ? 'manual-assets' : String(body.workflowMode);
+      const controlPolicy = body.controlPolicy == null
+        ? (body.autoApprove ? 'auto' : 'pause-before-render')
+        : String(body.controlPolicy);
+      if (!WORKFLOW_MODES.has(workflowMode))
+        return send(res, 400, { error: 'workflowMode 不合法' });
+      if (!CONTROL_POLICIES.has(controlPolicy))
+        return send(res, 400, { error: 'controlPolicy 不合法' });
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
+      if (workflowMode === 'auto-broll' && body.template !== 'default')
+        return send(res, 400, { error: '自動圖卡 V1 目前只支援投廣模板（MarketingVideo）' });
+      if (workflowMode === 'auto-broll' && materialAcquisition)
+        return send(res, 400, { error: '自動圖卡流程只接受講稿與 Avatar MP4，不接受額外素材擷取' });
       if (!body.body || !body.body.trim()) return send(res, 400, { error: '腳本是空的' });
       const brand = body.brand ? String(body.brand) : null;
       if (brand && !listBrands().includes(brand))
@@ -2191,6 +2591,8 @@ const server = http.createServer(async (req, res) => {
         ? [...new Set(body.reuseAssetIds.map(String))] : [];
       const reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
         ? null : String(body.reuseSpeakerAssetId);
+      if (workflowMode === 'auto-broll' && reuseAssetIds.length)
+        return send(res, 400, { error: '自動圖卡流程不能同時帶入人工圖片或 B-Roll' });
       if (reuseAssetIds.length > MAX_REUSED_ASSETS)
         return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片與 B-Roll 素材` });
       if (!body.projectId && (reuseAssetIds.length || reuseSpeakerAssetId))
@@ -2241,10 +2643,13 @@ const server = http.createServer(async (req, res) => {
             voice: String(body.voice || ''),
           },
           options: {
-            skipGenerate: !!body.skipGenerate || !!speakerAsset,
+            skipGenerate: workflowMode === 'auto-broll' || !!body.skipGenerate || !!speakerAsset,
             noSpeed: !!body.noSpeed,
             withAd: !!body.withAd,
-            autoApprove: !!body.autoApprove,
+            autoApprove: controlPolicy === 'auto',
+            workflowMode,
+            controlPolicy,
+            graphicBrollMode: workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
           },
           ...(materialAcquisition ? { materialAcquisition } : {}),
         });
@@ -2259,11 +2664,15 @@ const server = http.createServer(async (req, res) => {
           title,
           status: 'draft', // 上傳完檔案才轉 queued
           createdAt: nowISO(),
-          skipGenerate: !!body.skipGenerate || !!speakerAsset,
+          skipGenerate: workflowMode === 'auto-broll' || !!body.skipGenerate || !!speakerAsset,
           noSpeed: !!body.noSpeed,
           withAd: !!body.withAd,
           brand,
-          autoApprove: !!body.autoApprove,
+          autoApprove: controlPolicy === 'auto',
+          workflowMode,
+          controlPolicy,
+          graphicBrollMode: workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+          stage: 'draft',
           assetRefs: [],
           createdAssetRefs: [],
           ...(materialAcquisition ? { materialAcquisition } : {}),
@@ -2315,6 +2724,8 @@ const server = http.createServer(async (req, res) => {
       if (!name) return send(res, 400, { error: '缺少檔名' });
       const spec = uploadSpec(name);
       if (!spec) return send(res, 400, { error: '不允許的上傳檔名' });
+      if (job.workflowMode === 'auto-broll' && name !== 'heygen.mp4')
+        return send(res, 409, { error: '自動圖卡流程只接受 Avatar MP4，不接受人工 B-Roll 素材' });
       const limit = spec.limit;
       const declared = Number(req.headers['content-length'] || 0);
       if (declared > limit) return send(res, 413, { error: `上傳檔案超過 ${Math.round(limit / 1048576)} MB 上限` });
@@ -2369,6 +2780,7 @@ const server = http.createServer(async (req, res) => {
       if (job.skipGenerate && (!fs.existsSync(heygen) || fs.statSync(heygen).size === 0))
         return send(res, 400, { error: '選了「用現成講者影片」，但 heygen.mp4 不存在或為空' });
       job.status = 'queued';
+      job.stage = 'queued';
       job.files = inputs;
       saveJob(job);
       tick();
@@ -2450,6 +2862,7 @@ const server = http.createServer(async (req, res) => {
       recordCorrections(job, job.planView, edits);
       job.pendingEdits = edits;
       job.status = 'approved';
+      job.stage = 'ready-to-render';
       job.approvedAt = nowISO();
       job.approvedBy = (body.by || '').trim() || job.owner;
       saveJob(job);
@@ -2460,11 +2873,62 @@ const server = http.createServer(async (req, res) => {
     if (seg[0] === 'api' && seg[1] === 'jobs' && seg[3] === 'cancel' && req.method === 'POST') {
       const job = getJob(seg[2]);
       if (!job) return send(res, 404, { error: '找不到工作' });
-      if (['preparing', 'rendering', 'detached'].includes(job.status))
-        return send(res, 400, { error: '正在執行或等待背景復原的工作不能取消，請等它結束' });
-      job.status = 'cancelled';
-      rmrf(path.join(jobDir(job.id), 'state'));
+      if (job.status === 'done')
+        return send(res, 409, { error: '已完成的 Run 不可改寫為取消' });
+      if (job.status === 'cancelled')
+        return send(res, 200, { job: publicJob(job) });
+      if (['preparing', 'rendering', 'detached'].includes(job.status)) {
+        if (!job.cancelRequestedAt) {
+          job.cancelRequestedAt = nowISO();
+          saveJob(job);
+        }
+        let stop = { signalled: false, reason: '流程會在下一個安全 checkpoint 停止' };
+        try {
+          writeCancellationRequest(job);
+          stop = signalOwnedRun(job);
+          if (stop.signalled && !job.cancelSignalSentAt) {
+            job.cancelSignalSentAt = nowISO();
+            writeJobRecord(job);
+          }
+        } catch (error) {
+          stop = { signalled: false, reason: error.message };
+          appendLogBestEffort(job, `\n⚠️ 停止請求已保存，但訊號尚未送出：${error.message}\n`);
+        }
+        return send(res, 202, { job: publicJob(job), stopping: true, ...stop });
+      }
+      settleCancelledJob(job);
+      appendLogBestEffort(job, '\n⏹ Run 在下一個 stage 開始前取消；既有成果保留。\n');
+      return send(res, 200, { job: publicJob(job) });
+    }
+
+    if (seg[0] === 'api' && seg[1] === 'jobs' && seg[3] === 'retry' && req.method === 'POST') {
+      const job = getJob(seg[2]);
+      if (!job) return send(res, 404, { error: '找不到工作' });
+      if (job.workflowMode !== 'auto-broll')
+        return send(res, 409, { error: 'failed-stage retry 目前只開放 automation-first Run' });
+      if (job.status !== 'failed' || !['preparing', 'rendering'].includes(job.failedStage))
+        return send(res, 409, { error: '這個 Run 沒有可重試的失敗 stage' });
+      if (job.cancelRequestedAt)
+        return send(res, 409, { error: '已要求停止的 Run 不可重試' });
+      if (job.failedStage === 'rendering') {
+        if (!fs.existsSync(path.join(jobDir(job.id), 'state'))
+            || !SHA256_HEX.test(job.renderInputManifestSha256 || ''))
+          return send(res, 409, { error: 'render 快照或 manifest 已遺失，不能安全只重跑 render' });
+        job.status = 'approved';
+        job.stage = 'ready-to-render';
+        job.approvedAt = nowISO();
+        job.approvedBy = '（失敗階段重試）';
+      } else {
+        job.status = 'queued';
+        job.stage = 'queued';
+      }
+      job.error = null;
+      job.failedStage = null;
+      job.finishedAt = null;
       saveJob(job);
+      appendLogBestEffort(job, `\n↻ 從 ${job.status === 'approved' ? 'render' : 'prepare'} 階段重試；`
+        + '既有 Revision 與已完成成果保持不變。\n');
+      tick();
       return send(res, 200, { job: publicJob(job) });
     }
 

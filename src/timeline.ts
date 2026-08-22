@@ -8,7 +8,9 @@
 import subtitleData from './subtitles.json';
 import generatedOverlays from './overlays.generated.json';
 import generatedTextCards from './textcards.generated.json';
+import generatedGraphicBroll from './graphic-broll.generated.json';
 import videoMeta from './video-meta.json';
+import type { GraphicBrollCardItem } from './GraphicBrollCard';
 
 // IG Reels / Stories 直式：1080x1920 (9:16)
 export const VIDEO_FPS = 30;
@@ -189,6 +191,94 @@ export const TEXT_CARDS: TextCardItem[] = (generatedTextCards as GeneratedTextCa
     ];
   }
 );
+
+// ---------------- Composition-native Graphic B-roll ----------------
+
+type GeneratedGraphicBrollCard = {
+  id: string;
+  headline: string;
+  body: string;
+  startCharIdx: number;
+  endCharIdx: number;
+  resolvedPlacement: { startSec: number; endSec: number };
+};
+
+type GeneratedGraphicBrollPlan = {
+  schemaVersion: number;
+  mode: 'card-v1' | 'disabled';
+  style: 'morning-report-v1';
+  sourceScriptSha256: string;
+  cards: GeneratedGraphicBrollCard[];
+};
+
+function readGraphicBrollCards(value: unknown): GraphicBrollCardItem[] {
+  const plan = value as GeneratedGraphicBrollPlan;
+  if (
+    !plan ||
+    plan.schemaVersion !== 1 ||
+    (plan.mode !== 'card-v1' && plan.mode !== 'disabled') ||
+    plan.style !== 'morning-report-v1' ||
+    !/^[a-f0-9]{64}$/.test(plan.sourceScriptSha256) ||
+    !Array.isArray(plan.cards)
+  ) {
+    throw new Error('[graphic-broll] generated plan schema 不相容');
+  }
+  if (plan.mode === 'disabled') {
+    if (plan.cards.length !== 0) {
+      throw new Error('[graphic-broll] disabled plan 不可包含圖卡');
+    }
+    return [];
+  }
+  if (plan.cards.length === 0) {
+    throw new Error('[graphic-broll] card-v1 plan 不可為空');
+  }
+
+  const ids = new Set<string>();
+  let previousEndCharIdx = -1;
+  let previousEndSec = -1;
+  return plan.cards.map((card) => {
+    const placement = card?.resolvedPlacement;
+    if (
+      !card ||
+      typeof card.id !== 'string' ||
+      card.id.length === 0 ||
+      ids.has(card.id) ||
+      typeof card.headline !== 'string' ||
+      card.headline.length === 0 ||
+      typeof card.body !== 'string' ||
+      !Number.isInteger(card.startCharIdx) ||
+      !Number.isInteger(card.endCharIdx) ||
+      card.startCharIdx < 0 ||
+      card.endCharIdx < card.startCharIdx ||
+      card.startCharIdx <= previousEndCharIdx ||
+      !placement ||
+      !Number.isFinite(placement.startSec) ||
+      !Number.isFinite(placement.endSec) ||
+      placement.startSec < 0 ||
+      placement.endSec <= placement.startSec ||
+      placement.startSec < previousEndSec
+    ) {
+      throw new Error(`[graphic-broll] 圖卡 ${card?.id ?? '(unknown)'} 無有效 resolvedPlacement`);
+    }
+    ids.add(card.id);
+    previousEndCharIdx = card.endCharIdx;
+    previousEndSec = placement.endSec;
+    return {
+      id: card.id,
+      style: plan.style,
+      headline: card.headline,
+      body: card.body,
+      startSec: placement.startSec,
+      endSec: placement.endSec,
+    };
+  });
+}
+
+/**
+ * 只採用 planner 已保存的 resolvedPlacement；這裡不以 subtitles 重新推算，
+ * 避免 render input 與 audit evidence 出現兩份時間真相。
+ */
+export const GRAPHIC_BROLL_CARDS = readGraphicBrollCards(generatedGraphicBroll);
 
 /** 把秒轉成 frame 的小工具 */
 export const secToFrame = (sec: number): number => Math.round(sec * VIDEO_FPS);

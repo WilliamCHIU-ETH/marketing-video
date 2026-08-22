@@ -12,6 +12,7 @@ import {
 import {
   BGM,
   HEYGEN_DURATION_SEC,
+  GRAPHIC_BROLL_CARDS,
   OUTRO_DURATION_SEC,
   OVERLAYS,
   MARKETING_SHOT_RUNS,
@@ -26,6 +27,7 @@ import {
 import { TextCard } from './TextCard';
 import { Subtitles } from './Subtitles';
 import { ShotFocusImage } from './ShotFocus';
+import { GraphicBrollCard } from './GraphicBrollCard';
 
 /**
  * 安全淡入淡出進度（0→1→0）。
@@ -73,6 +75,18 @@ export const MarketingVideo: React.FC = () => {
             預設置中（translateY: 0）— 適用於直式 1080×1920 的 heygen.mp4
             如果換成 16:9 影片，可能需要 translateY('100px') 把人物往下挪避免被外框蓋到 */}
         <HeygenMain />
+
+        {/* M02A composition-native graphic B-roll：蓋在 Avatar 上；
+            manual marketing shots／overlay 若同時存在，仍由後面的 layer 優先顯示。 */}
+        {GRAPHIC_BROLL_CARDS.map((card) => (
+          <Sequence
+            key={card.id}
+            from={secToFrame(card.startSec)}
+            durationInFrames={Math.max(1, secToFrame(card.endSec - card.startSec))}
+          >
+            <GraphicBrollCard item={card} />
+          </Sequence>
+        ))}
 
         {/* 圖片疊層（只在 heygen 期顯示）
             如果這張與下一張都是 PIP 且間隔 < PIP_BRIDGE_SEC，
