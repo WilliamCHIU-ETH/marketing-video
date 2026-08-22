@@ -425,6 +425,8 @@ function revisionNeedsJobSync(job) {
     files: job.files || [],
     outputs: job.outputs || [],
     archived: job.archived || [],
+    submittedAt: job.submittedAt || null,
+    startedAt: job.startedAt || null,
     finishedAt: job.finishedAt || null,
     ...(job.workflowMode ? {
       workflowMode: job.workflowMode,
@@ -521,6 +523,8 @@ function saveJob(j) {
       files: j.files || [],
       outputs: j.outputs || [],
       archived: j.archived || [],
+      submittedAt: j.submittedAt || null,
+      startedAt: j.startedAt || null,
       finishedAt: j.finishedAt || null,
       ...(j.workflowMode ? {
         workflowMode: j.workflowMode,
@@ -2492,15 +2496,104 @@ function publicJob(j) {
     workspaceRunEvidenceVersion, workspaceRunExpectedOutputs,
     detachedFromStatus, detachedOwnerPid, detachedWorkspaceContested,
     detachedCaptureAttempts, detachedCaptureRetryAt, cancelSignalSentAt,
+    migration, sourceJobDir: _sourceJobDir, sourceRoots: _sourceRoots,
+    manifest: _manifest, archived: _archived, outputs = [],
     ...rest
   } = j;
-  return { ...rest, stage: readPipelineStage(j) || rest.stage || null, queuePosition: queuePosition(j) };
+  return {
+    ...rest,
+    ...(migration ? { migration: publicMigration(migration) } : {}),
+    outputs: outputs.map(publicOutput),
+    stage: readPipelineStage(j) || rest.stage || null,
+    queuePosition: queuePosition(j),
+  };
 }
 
 function publicProject(project) {
+  const { assets = [], revisions = [], migration, ...rest } = project;
   return {
-    ...project,
-    assets: (project.assets || []).map(({ path: _path, ...asset }) => asset),
+    ...rest,
+    ...(migration ? { migration: publicMigration(migration) } : {}),
+    assets: assets.map(publicAsset),
+    revisions: revisions.map((revision) => {
+      const { outputs = [], archived: _archived, ...summary } = revision;
+      return { ...summary, outputs: outputs.map(publicOutput) };
+    }),
+  };
+}
+
+function publicAsset(asset) {
+  const { path: _path, sourcePaths: _sourcePaths, ...safe } = asset;
+  return safe;
+}
+
+function publicOutput(output) {
+  if (!output || typeof output !== 'object') return {};
+  const safe = {};
+  for (const key of [
+    'id', 'name', 'mediaType', 'size', 'sha256', 'role', 'assetRef', 'experimentId',
+    'reusable', 'createdAt', 'updatedAt',
+  ]) {
+    if (['string', 'number', 'boolean'].includes(typeof output[key])) safe[key] = output[key];
+  }
+  return safe;
+}
+
+function publicMigration(migration) {
+  if (!migration || typeof migration !== 'object') return null;
+  const safe = {};
+  for (const key of [
+    'id', 'tool', 'version', 'legacyJobId', 'legacyStatus', 'migratedAt', 'legacyRunCount',
+  ]) {
+    if (['string', 'number', 'boolean'].includes(typeof migration[key])) safe[key] = migration[key];
+  }
+  return safe;
+}
+
+function publicRevision(revision) {
+  if (!revision) return revision;
+  const { outputs = [], archived: _archived, migration, ...rest } = revision;
+  return {
+    ...rest,
+    ...(migration ? { migration: publicMigration(migration) } : {}),
+    outputs: outputs.map(publicOutput),
+  };
+}
+
+function publicRevisionSummary(projectId, summary) {
+  let revision = null;
+  try { revision = PROJECT_STORE.getRevision(projectId, summary.id); }
+  catch (_) {}
+  const source = revision || summary;
+  const workflowMode = WORKFLOW_MODES.has(source.workflowMode)
+    ? source.workflowMode
+    : (source.options && WORKFLOW_MODES.has(source.options.workflowMode)
+      ? source.options.workflowMode : null);
+  const controlPolicy = CONTROL_POLICIES.has(source.controlPolicy)
+    ? source.controlPolicy
+    : (source.options && CONTROL_POLICIES.has(source.options.controlPolicy)
+      ? source.options.controlPolicy : null);
+  const outputs = (source.outputs || summary.outputs || []).map(publicOutput);
+  return {
+    id: summary.id,
+    number: summary.number,
+    jobId: summary.jobId || source.jobId || null,
+    status: summary.status || source.status || null,
+    title: source.title || null,
+    createdAt: source.createdAt || summary.createdAt || null,
+    updatedAt: source.updatedAt || summary.updatedAt || null,
+    submittedAt: source.submittedAt || null,
+    startedAt: source.startedAt || null,
+    finishedAt: source.finishedAt || null,
+    workflowMode,
+    controlPolicy,
+    source: {
+      kind: source.migration ? 'imported' : 'run',
+      parentRevisionId: source.parentRevisionId || null,
+      experimentId: source.experimentId || null,
+      migration: publicMigration(source.migration),
+    },
+    outputs,
   };
 }
 
@@ -2544,7 +2637,12 @@ const server = http.createServer(async (req, res) => {
     if (seg[0] === 'api' && seg[1] === 'projects' && seg[2] && seg.length === 3 && req.method === 'GET') {
       const detail = PROJECT_STORE.detail(seg[2], url.searchParams.get('revision'));
       if (!detail) return send(res, 404, { error: '找不到影片專案' });
-      return send(res, 200, { project: publicProject(detail.project), revision: detail.revision });
+      return send(res, 200, {
+        project: publicProject(detail.project),
+        revision: publicRevision(detail.revision),
+        revisionSummaries: (detail.project.revisions || [])
+          .map((summary) => publicRevisionSummary(detail.project.id, summary)),
+      });
     }
 
     if (seg[0] === 'api' && seg[1] === 'projects' && seg[2] && seg[3] === 'assets'
@@ -2578,6 +2676,10 @@ const server = http.createServer(async (req, res) => {
       if (workflowMode === 'auto-broll' && materialAcquisition)
         return send(res, 400, { error: '自動圖卡流程只接受講稿與 Avatar MP4，不接受額外素材擷取' });
       if (!body.body || !body.body.trim()) return send(res, 400, { error: '腳本是空的' });
+      const parentRevisionId = body.parentRevisionId == null || body.parentRevisionId === ''
+        ? null : String(body.parentRevisionId);
+      if (parentRevisionId && !body.projectId)
+        return send(res, 400, { error: '建立新影片時不能指定來源版本' });
       const brand = body.brand ? String(body.brand) : null;
       if (brand && !listBrands().includes(brand))
         return send(res, 400, { error: '品牌不在允許清單中' });
@@ -2613,6 +2715,13 @@ const server = http.createServer(async (req, res) => {
           brand,
           owner: (body.owner || '').trim() || '未署名',
         });
+      }
+      let parentRevision = null;
+      if (parentRevisionId) {
+        try { parentRevision = PROJECT_STORE.getRevision(project.id, parentRevisionId); }
+        catch (_) { return send(res, 400, { error: '來源版本 ID 不合法' }); }
+        if (!parentRevision)
+          return send(res, 409, { error: '來源版本不屬於這個影片專案' });
       }
       const invalidReuse = reuseAssetIds.find((assetId) => {
         const asset = (project.assets || []).find((item) => item.id === assetId);
@@ -2651,6 +2760,7 @@ const server = http.createServer(async (req, res) => {
             controlPolicy,
             graphicBrollMode: workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
           },
+          parentRevisionId,
           ...(materialAcquisition ? { materialAcquisition } : {}),
         });
         job = {
@@ -2732,7 +2842,7 @@ const server = http.createServer(async (req, res) => {
       const dest = path.join(jobDir(job.id), 'input', name);
       ensureDir(path.dirname(dest));
       const received = await receiveFile(req, dest, limit, (temp) => validateUpload(temp, name, spec));
-      let publicAsset = null;
+      let responseAsset = null;
       if (job.projectId) {
         job.createdAssetRefs ||= [];
         const requestedOriginalName = url.searchParams.get('originalName') || name;
@@ -2745,10 +2855,9 @@ const server = http.createServer(async (req, res) => {
         if (!existingAssetIds.has(asset.id) && !job.createdAssetRefs.includes(asset.id))
           job.createdAssetRefs.push(asset.id);
         saveJob(job);
-        const { path: _path, ...safeAsset } = asset;
-        publicAsset = safeAsset;
+        responseAsset = publicAsset(asset);
       }
-      return send(res, 200, { ok: true, name, size: received.size, asset: publicAsset });
+      return send(res, 200, { ok: true, name, size: received.size, asset: responseAsset });
     }
 
     // 前端在素材上傳失敗時回收剛建立的草稿，避免留下空 Project 或跳號 Revision。
@@ -2781,6 +2890,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: '選了「用現成講者影片」，但 heygen.mp4 不存在或為空' });
       job.status = 'queued';
       job.stage = 'queued';
+      job.submittedAt = nowISO();
       job.files = inputs;
       saveJob(job);
       tick();

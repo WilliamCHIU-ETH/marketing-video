@@ -105,6 +105,25 @@
   .project-context{background:#eef4ff;border-color:#c8daf8;color:#214f91}
   .project-context h2{color:#173e76;margin-bottom:8px}
   .version{font-size:12px;padding:3px 8px;border-radius:999px;background:#eef4ff;color:var(--accent);white-space:nowrap}
+  .revision-list{display:grid;gap:9px}
+  .revision-row{appearance:none;width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) auto;
+    gap:12px;align-items:start;text-align:left;padding:12px 13px;border:1px solid var(--line);border-radius:10px;
+    background:#fff;color:var(--ink);font:inherit;cursor:pointer}
+  .revision-row:hover{border-color:#b7c9e6;background:#fbfdff}
+  .revision-row.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:#f7faff}
+  .revision-row:disabled{cursor:default;opacity:1}
+  .revision-number{font-weight:700;color:var(--accent);white-space:nowrap}
+  .revision-copy{min-width:0}
+  .revision-copy b{display:block;font-size:13.5px;overflow-wrap:anywhere}
+  .revision-copy span{display:block;font-size:12px;color:var(--dim);margin-top:2px}
+  .revision-time{text-align:right;font-size:11.5px;color:var(--dim);white-space:nowrap}
+  .revision-time b{display:block;color:var(--ink);font-size:11.5px}
+  .composition-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}
+  .composition-item{border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:#fff;min-width:0}
+  .composition-item b{display:block;font-size:11.5px;color:var(--dim);font-weight:550}
+  .composition-item span{display:block;font-size:12.5px;font-weight:650;margin-top:2px;overflow-wrap:anywhere}
+  .asset-status{display:inline-block!important;width:max-content;margin-top:5px!important;padding:2px 7px;
+    border-radius:999px;background:#eef4ff;color:var(--accent)!important;font-size:10.5px!important}
   .asset-browser-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}
   .asset-browser-head h2{margin:0}
   .asset-readonly{font-size:11.5px;color:var(--dim);background:var(--soft);padding:3px 9px;
@@ -202,6 +221,9 @@
     .asset-workspace{grid-template-columns:1fr;grid-template-areas:'preview' 'sidebar'}
     .asset-preview-copy{grid-template-columns:1fr}
     .asset-preview-copy a{justify-self:start}
+    .revision-row{grid-template-columns:auto minmax(0,1fr)}
+    .revision-time{grid-column:2;text-align:left;white-space:normal}
+    .composition-summary{grid-template-columns:1fr}
   }
   .outs video{width:100%;border-radius:9px;background:#000;display:block}
   .outs figcaption{margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -616,6 +638,7 @@ function setWorkflowMode(next, explicitPolicy) {
   if (next === 'auto-broll') tpl = 'default';
   drawWorkflowMode();
   if (Object.keys(TPLS).length) boot2();
+  if (activeProject) drawProjectContext();
 }
 
 document.querySelectorAll('input[name="workflowMode"]').forEach((input) => {
@@ -623,6 +646,7 @@ document.querySelectorAll('input[name="workflowMode"]').forEach((input) => {
 });
 $('#pauseBeforeRender').onchange = () => {
   controlPolicy = $('#pauseBeforeRender').checked ? 'pause-before-render' : 'auto';
+  if (activeProject) drawProjectContext();
 };
 
 $('#picker').onchange = (e) => {
@@ -955,6 +979,7 @@ $('#submit').onclick = async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         projectId: activeProject && activeProject.id,
+        parentRevisionId: iterationReturn && iterationReturn.revisionId,
         reuseAssetIds: selectedReuseAssets.map((asset) => asset.id),
         reuseSpeakerAssetId: reusedSpeakerAsset && reusedSpeakerAsset.id,
         template: tpl, owner: $('#owner').value,
@@ -1065,6 +1090,57 @@ async function loadJobs() {
 let edits = {};
 let jobSig = null;   // 上次畫出來的內容特徵
 const assetBrowserStates = new Map();
+
+function formatDateTime(value) {
+  if (!value) return '未記錄';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '未記錄'
+    : date.toLocaleString('zh-TW', { hour12: false });
+}
+
+function revisionHistoryCard(projectDetail, job) {
+  const versions = (projectDetail.revisionSummaries || projectDetail.project.revisions || [])
+    .slice().sort((a, b) => b.number - a.number);
+  const rows = versions.map((revision) => {
+    const current = revision.jobId === job.id;
+    const source = revision.source || {};
+    const imported = source.kind === 'imported';
+    const parent = source.parentRevisionId
+      ? `V${Number(String(source.parentRevisionId).replace(/^v0*/, '')) || source.parentRevisionId} → V${revision.number}`
+      : (revision.number === 1 ? '起始版本' : '來源版本未記錄');
+    const workflow = revision.workflowMode === 'auto-broll' ? '自動圖卡'
+      : revision.workflowMode === 'manual-assets' ? '人工素材' : '歷史流程未記錄';
+    const primaryTime = imported
+      ? `歷史紀錄時間 ${formatDateTime(revision.createdAt)}`
+      : revision.submittedAt
+        ? `送出 Run ${formatDateTime(revision.submittedAt)}`
+        : `版本紀錄建立 ${formatDateTime(revision.createdAt)}`;
+    const secondaryTime = imported
+      ? '原始指派／生成／匯入時間語意未保存'
+      : revision.finishedAt ? `完成 ${formatDateTime(revision.finishedAt)}` : '尚未留下完成時間';
+    return el('button', {
+      type: 'button', class: `revision-row${current ? ' on' : ''}`,
+      disabled: !revision.jobId || current ? 'disabled' : null,
+      onclick: () => {
+        if (!revision.jobId || current) return;
+        openJob = revision.jobId; jobSig = null; loadJob();
+      },
+    },
+    el('span', { class: 'revision-number' }, `V${revision.number}`),
+    el('span', { class: 'revision-copy' },
+      el('b', {}, revision.title || '未命名版本'),
+      el('span', {}, `${parent}・${workflow}${source.experimentId ? `・${source.experimentId}` : ''}`)),
+    el('span', { class: 'revision-time' },
+      el('b', {}, STATUS_TEXT[revision.status] || revision.status || '—'),
+      el('span', {}, primaryTime), el('span', {}, secondaryTime)));
+  });
+  return el('div', { class: 'card' },
+    el('h2', {}, '版本脈絡與時間'),
+    el('div', { class: 'asset-section-note' },
+      '新版本顯示實際送出 Run 的時間；歷史匯入只顯示保留下來的紀錄時間，不冒充指派、生成或匯入時間。'),
+    el('div', { class: 'revision-list' }, ...rows));
+}
+
 function projectAssetCard(projectDetail, job) {
   const refIds = ((projectDetail.revision && projectDetail.revision.assetRefs)
     || job.assetRefs || []).map(String);
@@ -1083,13 +1159,34 @@ function projectAssetCard(projectDetail, job) {
   }
   const selectedRefCount = selectedAssets.length + unresolvedRefIds.length;
   const availableAssets = assets.filter((asset) => !refs.has(String(asset.id)));
+  const revisionSummaries = projectDetail.revisionSummaries || projectDetail.project.revisions || [];
+  const outputSources = new Map();
+  for (const revision of revisionSummaries) {
+    for (const output of revision.outputs || []) {
+      if (output.assetRef) outputSources.set(String(output.assetRef), revision);
+    }
+  }
   const version = (projectDetail.revision && projectDetail.revision.number) || job.revisionNumber;
   const projectId = projectDetail.project.id;
   const browserState = assetBrowserStates.get(job.id)
     || { previewAssetId: null, libraryOpen: false };
   assetBrowserStates.set(job.id, browserState);
-  const kindLabel = (asset) => asset.kind === 'speaker-video' ? '講者 Avatar'
-    : asset.kind === 'video' ? 'B-roll 影片' : asset.kind === 'image' ? '圖片' : '素材';
+  const assetInfo = (asset) => {
+    const outputSource = outputSources.get(String(asset.id));
+    if (outputSource) return {
+      category: 'source', role: '版本成片', origin: `來自 V${outputSource.number} 成品`,
+    };
+    if (asset.kind === 'speaker-video') return {
+      category: 'avatar', role: '講者 Avatar', origin: '來源未記錄',
+    };
+    if (asset.kind === 'image') return {
+      category: 'broll', role: 'B-roll 圖片', origin: '來源未記錄',
+    };
+    if (asset.kind === 'video') return {
+      category: 'broll', role: 'B-roll 影片', origin: '來源未記錄',
+    };
+    return { category: 'other', role: '其他素材', origin: '來源未記錄' };
+  };
   const assetUrl = (asset, download = false) =>
     `/api/projects/${projectId}/assets/${asset.id}${download ? '?dl=1' : ''}`;
 
@@ -1122,11 +1219,12 @@ function projectAssetCard(projectDetail, job) {
 
   const showPreview = (asset) => {
     const selected = refs.has(String(asset.id));
+    const info = assetInfo(asset);
     browserState.previewAssetId = String(asset.id);
     previewMedia.replaceChildren(mediaNode(asset));
     previewName.textContent = asset.originalName || '未命名素材';
-    previewMeta.textContent = `${kindLabel(asset)}・${fileSize(asset.size)}・${selected
-      ? `V${version || '—'} 已帶入` : `V${version || '—'} 未帶入`}`;
+    previewMeta.textContent = `${info.role}・${info.origin}・${fileSize(asset.size)}・${selected
+      ? `V${version || '—'} 有引用` : `V${version || '—'} 未引用`}`;
     previewDownload.href = assetUrl(asset, true);
     preview.hidden = false;
     if (root) root.querySelectorAll('.asset-browser-card').forEach((card) => {
@@ -1137,16 +1235,18 @@ function projectAssetCard(projectDetail, job) {
   };
 
   const assetCard = (asset) => {
+    const info = assetInfo(asset);
     const thumb = el('div', { class: `asset-browser-thumb ${asset.kind === 'image' ? 'image' : 'video'}` },
       mediaNode(asset, true));
     if (asset.kind !== 'image') thumb.append(el('span', { class: 'asset-play', 'aria-hidden': 'true' }, '▶'));
     return el('button', {
       type: 'button', class: 'asset-browser-card', 'data-asset-id': String(asset.id),
-      'aria-pressed': 'false', 'aria-label': `預覽${kindLabel(asset)}：${asset.originalName || '未命名素材'}`,
+      'aria-pressed': 'false', 'aria-label': `預覽${info.role}：${asset.originalName || '未命名素材'}`,
       onclick: () => showPreview(asset),
     }, thumb, el('span', { class: 'asset-browser-copy' },
       el('b', {}, asset.originalName || '未命名素材'),
-      el('span', {}, `${kindLabel(asset)}・${fileSize(asset.size)}`)));
+      el('span', {}, `${info.role}・${info.origin}・${fileSize(asset.size)}`),
+      el('span', { class: 'asset-status' }, refs.has(String(asset.id)) ? '本版有引用' : 'Project 可重用')));
   };
 
   const unresolvedRefCard = (id) => el('div', { class: 'note' },
@@ -1154,12 +1254,26 @@ function projectAssetCard(projectDetail, job) {
     el('div', { style: 'margin-top:4px' },
       `素材 ID：${id}。Project 素材清單中已找不到，因此目前無法預覽或下載。`));
 
+  const selectedByCategory = (category) => selectedAssets.filter((asset) => assetInfo(asset).category === category);
+  const compositionValue = (category, empty) => {
+    const matches = selectedByCategory(category);
+    return matches.length ? matches.map((asset) => asset.originalName || assetInfo(asset).role).join('、') : empty;
+  };
+  const compositionSummary = el('div', { class: 'composition-summary' },
+    el('div', { class: 'composition-item' }, el('b', {}, '沿用版本成片'),
+      el('span', {}, compositionValue('source', '無'))),
+    el('div', { class: 'composition-item' }, el('b', {}, '講者 Avatar'),
+      el('span', {}, compositionValue('avatar', '無直接引用'))),
+    el('div', { class: 'composition-item' }, el('b', {}, '素材型 B-roll'),
+      el('span', {}, compositionValue('broll', '無'))));
+
   const selectedSection = el('section', { class: 'asset-selected' },
     el('div', { class: 'asset-section-head' },
-      el('h3', {}, `這一版帶入的素材（${selectedRefCount}）`),
+      el('h3', {}, `本版輸入與沿用內容（${selectedRefCount}）`),
       el('span', { class: 'asset-readonly' }, `🔒 V${version || '—'} 唯讀`)),
     el('div', { class: 'asset-section-note' },
-      '帶入只代表這一版引用了素材；是否實際出現在成片，仍以配圖計畫或時間軸證據為準。'),
+      '「本版有引用」不等於「已入鏡」；是否實際出現在成片，仍以時間軸或 Render 證據為準。'),
+    compositionSummary,
     selectedRefCount
       ? el('div', { class: 'asset-browser-grid' },
           ...selectedAssets.map(assetCard), ...unresolvedRefIds.map(unresolvedRefCard))
@@ -1187,13 +1301,13 @@ function projectAssetCard(projectDetail, job) {
     library = el('details', libraryAttrs,
       el('summary', {},
         el('span', { class: 'asset-library-title' }, `專案素材庫（另有 ${availableAssets.length} 個）`),
-        el('span', { class: 'asset-library-state' }, '這一版未帶入')),
+        el('span', { class: 'asset-library-state' }, '這一版未引用')),
       libraryBody);
     if (browserState.libraryOpen) loadLibrary();
   }
 
   root = el('div', { class: 'card' },
-    el('div', { class: 'asset-browser-head' }, el('h2', {}, '素材')),
+    el('div', { class: 'asset-browser-head' }, el('h2', {}, '本版組成與素材')),
     el('div', { class: 'asset-workspace' },
       el('aside', { class: 'asset-sidebar' }, selectedSection, library),
       preview));
@@ -1236,6 +1350,9 @@ function automationStageCard(job) {
 function graphicBrollEvidenceCard(job, reviewMode = false) {
   const evidence = job.graphicBroll;
   if (!evidence) return null;
+  const verified = !!(job.renderEvidence
+    && job.renderInputManifestSha256
+    && job.renderEvidence.renderInputManifestSha256 === job.renderInputManifestSha256);
   const cards = (evidence.cards || []).map((card) => el('div', {
     style: 'border:1px solid var(--line);border-radius:10px;padding:12px;background:#0d2340;color:white',
   },
@@ -1245,9 +1362,11 @@ function graphicBrollEvidenceCard(job, reviewMode = false) {
     `${card.resolvedPlacement.startSec.toFixed(1)}s – ${card.resolvedPlacement.endSec.toFixed(1)}s`
       + `・char ${card.startCharIdx}–${card.endCharIdx}`)));
   const content = [
-    el('h2', {}, reviewMode ? 'Render 前 audit・系統圖卡' : '系統圖卡與 render evidence'),
+    el('div', { class: 'asset-section-head' },
+      el('h2', { style: 'margin:0' }, reviewMode ? 'Render 前 audit・系統 B-roll' : '本版系統生成的 B-roll'),
+      el('span', { class: 'asset-readonly' }, verified ? '已列入驗證 Render' : '已配置時間軸')),
     el('div', { class: 'hint' },
-      '這些是 composition-native graphic cards，不是 Project Asset；秒數與 char range 會直接進 Remotion timeline。'),
+      '這些是系統根據本版講稿生成的 graphic B-roll，不是 Project 素材庫檔案；下列秒數是實際 timeline placement。'),
     el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px' }, ...cards),
     el('details', { class: 'technical-details' },
       el('summary', {}, '查看追溯雜湊'),
@@ -1289,11 +1408,21 @@ async function loadJob() {
   const projectAssetSig = projectDetail && projectDetail.project
     ? (projectDetail.project.assets || []).map((asset) =>
       [asset.id, asset.kind, asset.originalName, asset.size].join(':')).join('|') : '';
+  const revisionSummaries = (projectDetail && projectDetail.revisionSummaries) || [];
+  const currentRevisionSummary = revisionSummaries.find((revision) => revision.jobId === job.id)
+    || revisionSummaries.find((revision) => revision.id === job.revisionId) || null;
+  const revisionSig = revisionSummaries.map((revision) => [
+    revision.id, revision.status, revision.title, revision.createdAt, revision.submittedAt,
+    revision.startedAt, revision.finishedAt, revision.workflowMode,
+    revision.source && revision.source.kind,
+    revision.source && revision.source.parentRevisionId,
+  ].join(':')).join('|');
   const logText = text || '（還沒有輸出）';
   const sig = [job.id, job.status, job.queuePosition ?? '', (job.outputs || []).length, job.error || '',
     job.stage || '', job.cancelRequestedAt || '', job.cancelledAt || '', job.failedStage || '',
     job.renderInputManifestSha256 || '', JSON.stringify(job.timelinePlacements || []),
-    projectDetailError ? projectDetailError.message : '', revisionRefs.join(','), projectAssetSig].join('|');
+    projectDetailError ? projectDetailError.message : '', revisionRefs.join(','), projectAssetSig,
+    revisionSig].join('|');
   if (sig === jobSig && box.childElementCount) {
     const liveLog = box.querySelector('pre.log');
     if (liveLog && liveLog.textContent !== logText) {
@@ -1307,6 +1436,13 @@ async function loadJob() {
   const keep = box.querySelector('pre.log');
   const scrolled = keep ? keep.scrollTop + keep.clientHeight >= keep.scrollHeight - 40 : true;
 
+  const importedRevision = currentRevisionSummary
+    && currentRevisionSummary.source && currentRevisionSummary.source.kind === 'imported';
+  const headerTime = importedRevision
+    ? `歷史紀錄時間 ${formatDateTime(currentRevisionSummary.createdAt)}・時間語意未保存`
+    : job.submittedAt
+      ? `送出 Run ${formatDateTime(job.submittedAt)}`
+      : `版本紀錄建立 ${formatDateTime(job.createdAt)}`;
   const head = el('div', { class: 'card' },
     el('div', { style: 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' },
       el('h2', { style: 'margin:0' }, (TPLS[job.template] || {}).label + '　' + (job.title || '').replace(/\n/g, ' ')),
@@ -1324,7 +1460,7 @@ async function loadJob() {
         ? '繼續編輯下一版' : '建立下一版') : '',
       el('button', { class: 'ghost', onclick: () => { openJob = null; go('list'); } }, '← 回列表')),
     el('div', { style: 'color:var(--dim);font-size:13px;margin-top:8px' },
-      `${job.owner}・${new Date(job.createdAt).toLocaleString('zh-TW', { hour12: false })}`),
+      `${job.owner}・${headerTime}`),
     job.error ? el('div', { class: 'note', style: 'margin-top:14px;background:#fdecec;border-color:#f2c9c9;color:#8b2020' }, job.error) : '');
 
   const parts = [head];
@@ -1336,17 +1472,7 @@ async function loadJob() {
       el('div', { class: 'note' },
         '素材資料暫時無法載入，請稍後重試或重新整理。這不代表本版沒有素材。')));
   } else if (projectDetail && projectDetail.project) {
-    const versions = (projectDetail.project.revisions || []).slice().sort((a, b) => b.number - a.number);
-    parts.push(el('div', { class: 'card' },
-      el('h2', {}, '版本紀錄'),
-      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
-        ...versions.map((revision) => el('button', {
-          class: revision.jobId === job.id ? 'go' : 'ghost',
-          onclick: () => {
-            if (!revision.jobId || revision.jobId === job.id) return;
-            openJob = revision.jobId; jobSig = null; loadJob();
-          },
-        }, `V${revision.number}・${STATUS_TEXT[revision.status] || revision.status}`)))));
+    parts.push(revisionHistoryCard(projectDetail, job));
     parts.push(projectAssetCard(projectDetail, job));
   }
 
@@ -1377,6 +1503,12 @@ async function loadJob() {
     parts.push(el('div', { class: 'card' }, el('h2', {}, '成品'),
       el('div', { class: 'note' }, '這支已經超過保留期限，影片檔案清掉了（工作紀錄還留著）。需要的話請重新出片。')));
   } else if (job.status === 'done' && job.outputs) {
+    const outputEvidence = job.renderEvidence
+      && job.renderInputManifestSha256
+      && job.renderEvidence.renderInputManifestSha256 === job.renderInputManifestSha256
+      ? '本系統已驗證的 Render 成品'
+      : importedRevision ? '已保存的歷史成品；本系統沒有當時的 Render evidence'
+        : '已保存的成品';
     const grid = el('div', { class: 'outs' });
     for (const o of job.outputs) {
       grid.append(el('figure', {},
@@ -1387,7 +1519,8 @@ async function loadJob() {
           el('a', { class: 'ghost', href: `/api/jobs/${job.id}/file/${o.name}?dl=1`,
             style: 'text-decoration:none' }, '下載'))));
     }
-    const card = el('div', { class: 'card' }, el('h2', {}, '成品'), grid);
+    const card = el('div', { class: 'card' }, el('h2', {}, '成品輸出'),
+      el('div', { class: 'asset-section-note' }, outputEvidence), grid);
     if (job.archived && job.archived.length) card.append(
       el('div', { class: 'local-output' },
         el('span', { 'aria-hidden': 'true' }, '✓'),
@@ -1441,10 +1574,33 @@ function drawProjectContext() {
   const box = $('#projectContext');
   if (!activeProject) { box.hidden = true; box.replaceChildren(); return; }
   const sourceVersion = iterationReturn && iterationReturn.revisionNumber;
+  const nextVersion = Number(activeProject.latestRevision || 0) + 1;
+  const speaker = reusedSpeakerAsset
+    ? reusedSpeakerAsset.originalName || '既有 Avatar' : '無可沿用 Avatar';
+  const manualAssets = reusedAssets.length
+    ? reusedAssets.map((asset) => asset.originalName || asset.id).join('、') : '無';
+  const automatic = workflowMode === 'auto-broll';
+  const modeSummary = automatic
+    ? '自動生成 graphic B-roll'
+    : '人工素材流程（不會自動生成 graphic B-roll）';
+  const policySummary = controlPolicy === 'auto'
+    ? (automatic ? '送出後自動跑到成品' : '送出後不暫停，素材準備完成就直接出片')
+    : 'Render 前暫停等待 audit';
   box.hidden = false;
   box.replaceChildren(
     el('h2', {}, `正在迭代「${activeProject.name}」`),
-    el('div', {}, `這次會${sourceVersion ? `以 V${sourceVersion} 為起點，` : ''}建立 V${Number(activeProject.latestRevision || 0) + 1}，不會建立另一個影片專案資料夾。`),
+    el('div', {}, `這次會${sourceVersion ? `從 V${sourceVersion} 延伸，` : ''}建立 V${nextVersion}，不會建立另一個 Project。`),
+    el('div', { class: 'composition-summary' },
+      el('div', { class: 'composition-item' }, el('b', {}, '下一版模式'), el('span', {}, modeSummary)),
+      el('div', { class: 'composition-item' }, el('b', {}, '講者 Avatar'), el('span', {}, speaker)),
+      el('div', { class: 'composition-item' }, el('b', {}, '沿用的人工素材'),
+        el('span', {}, automatic ? '自動流程不帶入' : manualAssets))),
+    el('div', { class: 'note', style: 'margin-top:10px' }, automatic
+      ? `系統會依本次講稿重新生成圖卡，不沿用上一版圖卡或成品；${policySummary}。`
+      : `這版會帶入：${manualAssets}。${reusedSpeakerAsset
+        ? '將沿用上列 Avatar。'
+        : '未帶入 Avatar；若直接送出，既有流程會呼叫 HeyGen 產生講者影片。'}${policySummary}；`
+        + '若要驗收自動圖卡，請建立「投廣」Project。'),
     el('div', { class: 'hint', style: 'margin-top:4px;color:#44658f' },
       '返回詳情不會建立新版本，這份尚未送出的表單會保留在目前瀏覽器。'),
     el('div', { style: 'margin-top:12px;display:flex;gap:8px;flex-wrap:wrap' },
@@ -1475,11 +1631,17 @@ async function iterateProject(job) {
         + `要放棄那份草稿，改從 V${job.revisionNumber || '—'} 建立下一版嗎？`);
       if (!discard) return;
     }
-    const { project, revision } = await api(`/api/projects/${job.projectId}${job.revisionId
+    const { project, revision, revisionSummaries } = await api(`/api/projects/${job.projectId}${job.revisionId
       ? `?revision=${encodeURIComponent(job.revisionId)}` : ''}`);
     activeProject = project;
     projectAssetLibraryOpen = false;
-    iterationReturn = { jobId: job.id, revisionNumber: job.revisionNumber || (revision && revision.number) };
+    const revisionSummary = (revisionSummaries || []).find((item) => item.id === (revision && revision.id));
+    iterationReturn = {
+      jobId: job.id,
+      revisionId: revision && revision.id,
+      revisionNumber: job.revisionNumber || (revision && revision.number),
+      sourceKind: revisionSummary && revisionSummary.source && revisionSummary.source.kind,
+    };
     const selectedAssetRefs = (revision && revision.assetRefs) || [];
     const selectedAssetIds = new Set(selectedAssetRefs);
     reusedAssets = (project.assets || []).filter((asset) =>

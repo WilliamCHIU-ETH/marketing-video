@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   getBodyAfterVoice,
+  getTitleText,
   cleanBodyWithIndex,
 } = require('./script-utils');
 
@@ -257,8 +258,7 @@ fs.writeFileSync(TEXT_CARD_PATH, JSON.stringify(textCards, null, 2));
 console.log(`✅ 文字特效卡：${textCards.length} 個 → ${path.relative(ROOT, TEXT_CARD_PATH)}`);
 
 // ─── 標題寫入 video-meta.json ──────────────────────────
-const parts = scriptRaw.split('===');
-const titleText = parts.length >= 3 ? parts[1].trim() : (parts[0] ?? '').trim();
+const titleText = getTitleText(scriptRaw);
 if (fs.existsSync(VIDEO_META_PATH)) {
   const meta = JSON.parse(fs.readFileSync(VIDEO_META_PATH, 'utf-8'));
   meta.titleText = titleText;

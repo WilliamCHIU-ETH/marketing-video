@@ -50,6 +50,18 @@ function getBodyAfterVoice(scriptRaw) {
 }
 
 /**
+ * 取出 body 前一段作為影片標題。
+ * 同時支援歷史三段式（=== title === body）與前台四段式
+ *（voice === reserved === title === body）；不可固定拿 parts[1]，否則前台格式會讀到空段。
+ */
+function getTitleText(scriptRaw) {
+  const parts = scriptRaw.split('===');
+  return parts.length >= 3
+    ? (parts[parts.length - 2] || '').trim()
+    : (parts[0] || '').trim();
+}
+
+/**
  * 把 bodyAfterVoice 清洗成 cleaned chars，並記錄每個 char 在 bodyAfterVoice 中的原位 origIdx。
  *
  * 清洗動作：
@@ -123,5 +135,6 @@ module.exports = {
   parseVoiceRules,
   applyVoiceRulesForward,
   getBodyAfterVoice,
+  getTitleText,
   cleanBodyWithIndex,
 };

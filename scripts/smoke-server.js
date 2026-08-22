@@ -493,7 +493,11 @@ async function main() {
   assert.match(html, /Automation stage/);
   assert.match(html, /停止工作/);
   assert.match(html, /從.*階段重試/);
-  assert.match(html, /這一版帶入的素材/);
+  assert.match(html, /本版輸入與沿用內容/);
+  assert.match(html, /版本脈絡與時間/);
+  assert.match(html, /原始指派／生成／匯入時間語意未保存/);
+  assert.match(html, /送出後不暫停，素材準備完成就直接出片/);
+  assert.match(html, /本版系統生成的 B-roll/);
   assert.match(html, /專案素材庫/);
   assert.match(html, /網頁預覽/);
   assert.match(html, /是否實際出現在成片/);
@@ -629,11 +633,81 @@ async function main() {
   const autoSubmitted = await request(base, `/api/jobs/${autoDraft.job.id}/submit`, { method: 'POST' });
   assert.equal(autoSubmitted.job.status, 'queued');
   assert.equal(autoSubmitted.job.stage, 'queued');
+  assert.ok(autoSubmitted.job.submittedAt);
   const autoProject = await request(base,
     `/api/projects/${autoDraft.job.projectId}?revision=${autoDraft.job.revisionId}`);
   assert.equal(autoProject.revision.options.graphicBrollMode, 'card-v1');
+  assert.equal(autoProject.revision.submittedAt, autoSubmitted.job.submittedAt);
+  assert.equal(autoProject.revisionSummaries.length, 1);
+  assert.equal(autoProject.revisionSummaries[0].workflowMode, 'auto-broll');
+  assert.equal(autoProject.revisionSummaries[0].source.kind, 'run');
+  assert.equal(autoProject.revisionSummaries[0].source.parentRevisionId, null);
+  assert.equal(autoProject.revisionSummaries[0].submittedAt, autoSubmitted.job.submittedAt);
   assert.equal(autoProject.project.assets.filter((asset) => asset.kind === 'speaker-video').length, 1);
   assert.equal(autoProject.project.assets.some((asset) => ['image', 'video'].includes(asset.kind)), false);
+  const compactProjects = await request(base, '/api/projects');
+  const compactAutoProject = compactProjects.projects.find((item) => item.id === autoDraft.job.projectId);
+  assert.equal(Object.hasOwn(compactAutoProject, 'revisionSummaries'), false);
+
+  // Legacy migration metadata is useful for time semantics, but local manifest paths must never
+  // escape through the public read model. Restore the fixture before lifecycle tests continue.
+  const autoRevisionFile = path.join(DATA_DIR, 'projects', autoDraft.job.projectId,
+    'revisions', `${autoDraft.job.revisionId}.json`);
+  const autoProjectFile = path.join(DATA_DIR, 'projects', autoDraft.job.projectId, 'project.json');
+  const autoRevisionFixture = JSON.parse(fs.readFileSync(autoRevisionFile, 'utf8'));
+  const autoProjectFixture = JSON.parse(fs.readFileSync(autoProjectFile, 'utf8'));
+  try {
+    const migratedFixture = JSON.parse(JSON.stringify(autoRevisionFixture));
+    migratedFixture.migration = {
+      id: 'smoke-import', tool: 'fixture', manifest: '/private/secret/manifest.json',
+      sourceJobDir: '/private/secret/job',
+    };
+    migratedFixture.workflowMode = 'unknown-workflow';
+    migratedFixture.options.workflowMode = 'unknown-workflow';
+    migratedFixture.outputs = [{
+      id: 'secret-output', name: 'fixture.mp4', mediaType: 'video/mp4', size: 1,
+      path: '/private/secret/revision-output.mp4',
+      archive: '/private/secret/revision-archive.mp4',
+    }];
+    migratedFixture.archived = ['/private/secret/revision-archive.mp4'];
+    fs.writeFileSync(autoRevisionFile, JSON.stringify(migratedFixture, null, 2));
+    const migratedProjectFixture = JSON.parse(JSON.stringify(autoProjectFixture));
+    migratedProjectFixture.migration = {
+      tool: 'fixture', migratedAt: '2026-08-23T00:00:00.000Z',
+      source: '/private/secret/project', sourceJobDir: '/private/secret/project-job',
+    };
+    migratedProjectFixture.assets[0].sourcePaths = ['/private/secret/avatar.mp4'];
+    migratedProjectFixture.revisions[0].outputs = [{
+      id: 'secret-output', name: 'fixture.mp4', mediaType: 'video/mp4', size: 1,
+      path: '/private/secret/project-output.mp4',
+      archive: '/private/secret/project-archive.mp4',
+    }];
+    fs.writeFileSync(autoProjectFile, JSON.stringify(migratedProjectFixture, null, 2));
+    const migratedReadModel = await request(base,
+      `/api/projects/${autoDraft.job.projectId}?revision=${autoDraft.job.revisionId}`);
+    assert.equal(migratedReadModel.revisionSummaries[0].source.kind, 'imported');
+    assert.equal(migratedReadModel.revisionSummaries[0].source.migration.id, 'smoke-import');
+    assert.equal(migratedReadModel.revisionSummaries[0].source.migration.tool, 'fixture');
+    assert.equal(migratedReadModel.revisionSummaries[0].workflowMode, null);
+    assert.deepEqual(migratedReadModel.project.migration, {
+      tool: 'fixture', migratedAt: '2026-08-23T00:00:00.000Z',
+    });
+    assert.equal(Object.hasOwn(migratedReadModel.project.assets[0], 'sourcePaths'), false);
+    assert.equal(Object.hasOwn(migratedReadModel.revision, 'archived'), false);
+    assert.equal(Object.hasOwn(migratedReadModel.revision.outputs[0], 'archive'), false);
+    assert.equal(Object.hasOwn(migratedReadModel.revision.outputs[0], 'path'), false);
+    assert.equal(Object.hasOwn(migratedReadModel.project.revisions[0].outputs[0], 'archive'), false);
+    assert.equal(JSON.stringify(migratedReadModel).includes('/private/secret/'), false);
+    const migratedListModel = await request(base, '/api/projects');
+    const migratedListProject = migratedListModel.projects
+      .find((item) => item.id === autoDraft.job.projectId);
+    assert.equal(Object.hasOwn(migratedListProject.assets[0], 'sourcePaths'), false);
+    assert.equal(Object.hasOwn(migratedListProject.revisions[0].outputs[0], 'archive'), false);
+    assert.equal(JSON.stringify(migratedListProject).includes('/private/secret/'), false);
+  } finally {
+    fs.writeFileSync(autoRevisionFile, JSON.stringify(autoRevisionFixture, null, 2));
+    fs.writeFileSync(autoProjectFile, JSON.stringify(autoProjectFixture, null, 2));
+  }
   const autoCancelled = await request(base, `/api/jobs/${autoDraft.job.id}/cancel`, { method: 'POST' });
   assert.equal(autoCancelled.job.status, 'cancelled');
   assert.ok(autoCancelled.job.cancelledAt);
@@ -770,6 +844,24 @@ async function main() {
     method: 'POST',
     body: PNG_FIXTURE,
   });
+  const uploadProjectFile = path.join(DATA_DIR, 'projects', created.job.projectId, 'project.json');
+  const uploadProjectFixture = JSON.parse(fs.readFileSync(uploadProjectFile, 'utf8'));
+  try {
+    const legacyImage = uploadProjectFixture.assets.find((asset) => asset.kind === 'image');
+    legacyImage.sourcePaths = ['/private/secret/legacy-image.png'];
+    fs.writeFileSync(uploadProjectFile, JSON.stringify(uploadProjectFixture, null, 2));
+    const duplicateUpload = await request(base,
+      `/api/jobs/${id}/upload?name=shot1.png&originalName=${encodeURIComponent('重複素材')}`, {
+        method: 'POST', body: PNG_FIXTURE,
+      });
+    assert.equal(Object.hasOwn(duplicateUpload.asset, 'path'), false);
+    assert.equal(Object.hasOwn(duplicateUpload.asset, 'sourcePaths'), false);
+    assert.equal(JSON.stringify(duplicateUpload).includes('/private/secret/'), false);
+  } finally {
+    const restoredProject = JSON.parse(fs.readFileSync(uploadProjectFile, 'utf8'));
+    for (const asset of restoredProject.assets) delete asset.sourcePaths;
+    fs.writeFileSync(uploadProjectFile, JSON.stringify(restoredProject, null, 2));
+  }
   await request(base, `/api/jobs/${id}/upload?name=broll1.mp4&originalName=${encodeURIComponent('../B Roll.mp4')}`, {
     method: 'POST',
     body: MP4_FIXTURE,
@@ -975,11 +1067,29 @@ async function main() {
   assert.equal(afterAbortV2.project.assets.some((asset) => asset.id === abandonedAssetId), false);
   assert.equal((await fetch(base + `/api/jobs/${abandonedV2.job.id}`)).status, 404);
 
+  const beforeInvalidParent = await request(base, `/api/projects/${created.job.projectId}`);
+  const invalidParent = await fetch(base + '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      parentRevisionId: 'v999',
+      template: 'focusstock',
+      title: '不應建立的來源版本',
+      body: '來源版本不存在時不得留下新 Revision。',
+    }),
+  });
+  assert.equal(invalidParent.status, 409);
+  const afterInvalidParent = await request(base, `/api/projects/${created.job.projectId}`);
+  assert.equal(afterInvalidParent.project.latestRevision, beforeInvalidParent.project.latestRevision);
+  assert.equal(afterInvalidParent.project.revisions.length, beforeInvalidParent.project.revisions.length);
+
   const iterated = await request(base, '/api/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       projectId: created.job.projectId,
+      parentRevisionId: created.job.revisionId,
       reuseAssetIds: [reusableImage.id, reusableVideo.id],
       template: 'focusstock',
       owner: 'smoke-test',
@@ -1012,6 +1122,9 @@ async function main() {
     `/api/projects/${created.job.projectId}?revision=${iterated.job.revisionId}`);
   assert.equal(secondRevision.revision.id, 'v002');
   assert.deepEqual(secondRevision.revision.assetRefs, [reusableImage.id, reusableVideo.id]);
+  assert.equal(secondRevision.revision.parentRevisionId, created.job.revisionId);
+  assert.equal(secondRevision.revisionSummaries.find((item) => item.id === iterated.job.revisionId)
+    .source.parentRevisionId, created.job.revisionId);
 
   const repeatedSubmit = await fetch(base + `/api/jobs/${id}/submit`, { method: 'POST' });
   assert.equal(repeatedSubmit.status, 409);
@@ -1053,6 +1166,18 @@ async function main() {
   const recoveryJobJson = JSON.parse(fs.readFileSync(recoveryJobFile, 'utf8'));
   recoveryJobJson.status = 'rendering';
   recoveryJobJson.pid = 0;
+  recoveryJobJson.sourceJobDir = '/private/secret/top-level-job';
+  recoveryJobJson.sourceRoots = ['/private/secret/root'];
+  recoveryJobJson.manifest = '/private/secret/top-level-manifest.json';
+  recoveryJobJson.migration = {
+    tool: 'fixture', migratedAt: '2026-08-23T00:00:00.000Z',
+    sourceJobDir: '/private/secret/nested-job', manifest: '/private/secret/nested-manifest.json',
+  };
+  recoveryJobJson.outputs = [{
+    id: 'secret-job-output', name: 'fixture.mp4', mediaType: 'video/mp4', size: 1,
+    path: '/private/secret/job-output.mp4', archive: '/private/secret/job-archive.mp4',
+  }];
+  recoveryJobJson.archived = ['/private/secret/job-archive.mp4'];
   fs.writeFileSync(recoveryJobFile, JSON.stringify(recoveryJobJson, null, 2));
   const recoveryProjectFile = path.join(DATA_DIR, 'projects', recoveryJob.job.projectId, 'project.json');
   const recoveryProjectJson = JSON.parse(fs.readFileSync(recoveryProjectFile, 'utf8'));
@@ -1077,6 +1202,13 @@ async function main() {
   const recoveredProject = await request(base,
     `/api/projects/${recoveryJob.job.projectId}?revision=${recoveryJob.job.revisionId}`);
   assert.equal(recoveredJob.job.status, 'failed');
+  assert.deepEqual(recoveredJob.job.migration, {
+    tool: 'fixture', migratedAt: '2026-08-23T00:00:00.000Z',
+  });
+  assert.equal(Object.hasOwn(recoveredJob.job, 'archived'), false);
+  assert.equal(Object.hasOwn(recoveredJob.job.outputs[0], 'archive'), false);
+  assert.equal(Object.hasOwn(recoveredJob.job.outputs[0], 'path'), false);
+  assert.equal(JSON.stringify(recoveredJob.job).includes('/private/secret/'), false);
   assert.equal(recoveredProject.revision.status, 'failed');
   assert.equal(recoveredProject.project.revisions[0].status, 'failed');
   assert.notEqual(recoveredProject.project.updatedAt, recoverySentinel);
@@ -1799,7 +1931,9 @@ async function main() {
     `/api/projects/${compactable.job.projectId}?revision=${compactable.job.revisionId}`);
   assert.equal(compactProject.revision.status, 'done');
   assert.deepEqual(compactProject.revision.assetRefs, [compactUpload.asset.id]);
-  assert.deepEqual(compactProject.revision.outputs, [compactOutputRecord]);
+  assert.deepEqual(compactProject.revision.outputs, [{
+    name: compactOutputRecord.name, size: compactOutputRecord.size,
+  }]);
   const compactPlayback = await fetch(base + `/api/jobs/${compactable.job.id}/file/final.mp4`);
   assert.equal(compactPlayback.status, 200);
   assert.deepEqual(Buffer.from(await compactPlayback.arrayBuffer()), MP4_FIXTURE);
@@ -2099,7 +2233,10 @@ if (mode !== 'wait') process.exitCode = mode.startsWith('success') ? 0 : 1;
   base = `http://127.0.0.1:${normalSuccessReady.port}`;
   const normalSuccessResult = await waitForJobStatus(base, normalSuccessLogFailure.job.id, 'done');
   assert.equal(normalSuccessResult.job.outputs.length, 2);
-  assert.equal(normalSuccessResult.job.archived.length, 2);
+  assert.equal(Object.hasOwn(normalSuccessResult.job, 'archived'), false);
+  const normalSuccessStored = JSON.parse(fs.readFileSync(path.join(normalWorkerDir, 'jobs',
+    normalSuccessLogFailure.job.id, 'job.json'), 'utf8'));
+  assert.equal(normalSuccessStored.archived.length, 2);
   const normalSuccessProject = await request(base,
     `/api/projects/${normalSuccessLogFailure.job.projectId}`
       + `?revision=${normalSuccessLogFailure.job.revisionId}`);
