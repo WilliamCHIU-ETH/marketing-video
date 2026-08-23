@@ -101,6 +101,21 @@ const BRAND = BRAND_ARG ? BRAND_ARG.split("=").slice(1).join("=") : null;
 //   兩個旗標都不加時行為跟以前完全一樣（一路跑到底），既有終端機指令不受影響。
 const STOP_BEFORE_RENDER = process.argv.includes("--stop-before-render");
 const RENDER_ONLY = process.argv.includes("--render-only");
+const GRAPHIC_BROLL_ARG = process.argv.find((arg) => arg.startsWith("--graphic-broll="));
+const GRAPHIC_BROLL_MODE = GRAPHIC_BROLL_ARG
+  ? GRAPHIC_BROLL_ARG.slice("--graphic-broll=".length)
+  : "disabled";
+if (!["disabled", "card-v1"].includes(GRAPHIC_BROLL_MODE)) {
+  console.error(`❌ 不認得的 graphic B-Roll mode：${GRAPHIC_BROLL_MODE}`);
+  process.exit(1);
+}
+if (GRAPHIC_BROLL_MODE === "card-v1" && TEMPLATE !== "default") {
+  console.error("❌ card-v1 目前只支援 default / MarketingVideo 版型");
+  process.exit(1);
+}
+
+const WORKSPACE_STAGE_FILE = process.env.WORKSPACE_STAGE_FILE || null;
+const WORKSPACE_CANCEL_FILE = process.env.WORKSPACE_CANCEL_FILE || null;
 
 // ── 設定 ──────────────────────────────────
 let HEYGEN_API_KEY;
@@ -224,6 +239,55 @@ function log(msg) {
   console.log(`\n[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
+function managedRunToken() {
+  const token = HEYGEN_TRACE_ENV.WORKSPACE_RUN_TOKEN || "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token)
+    ? token
+    : null;
+}
+
+function atomicWriteManagedJson(file, value) {
+  if (!file) return;
+  const fs = require("fs");
+  const path = require("path");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temp, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 });
+    fs.renameSync(temp, file);
+  } finally {
+    try { fs.unlinkSync(temp); } catch (_) {}
+  }
+}
+
+function cancellationRequested() {
+  const token = managedRunToken();
+  if (!token || !WORKSPACE_CANCEL_FILE || !existsSync(WORKSPACE_CANCEL_FILE)) return false;
+  try {
+    const request = JSON.parse(readFileSync(WORKSPACE_CANCEL_FILE, "utf8"));
+    return request && request.schemaVersion === 1 && request.workspaceRunToken === token
+      && typeof request.requestedAt === "string";
+  } catch (_) {
+    return false;
+  }
+}
+
+function reportStage(stage) {
+  const token = managedRunToken();
+  if (!token || !WORKSPACE_STAGE_FILE) return;
+  atomicWriteManagedJson(WORKSPACE_STAGE_FILE, {
+    schemaVersion: 1,
+    workspaceRunToken: token,
+    stage,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function enterStage(stage) {
+  if (cancellationRequested()) throw new Error("取消請求已收到，本輪停止");
+  reportStage(stage);
+}
+
 function run(cmd) {
   log(`執行：${cmd}`);
   execSync(cmd, { cwd: PROJECT_DIR, stdio: "inherit" });
@@ -251,6 +315,15 @@ function runBackground(cmd, label) {
  * 回傳 Promise 或 null（該版型沒有要分析的圖）。
  */
 function startImageAnalysis() {
+  // card-v1 的唯一內容型視覺是 deterministic graphic card。它不讀 APP 截圖；若仍啟動
+  // legacy OCR，沒有新圖時會留下上一個 Run 的 app-images.generated.json，後續也可能被
+  // auto-shot 誤用。這條 automation-first path 因此明確略過整段 legacy image analysis。
+  if (GRAPHIC_BROLL_MODE === "card-v1") {
+    writeFileSync(resolve(PROJECT_DIR, "src/app-images.generated.json"), '{"images":[]}\n');
+    writeFileSync(resolve(PROJECT_DIR, "src/marketing-shots.generated.json"), "[]\n");
+    log("ℹ️ card-v1 不使用 APP 截圖，略過 legacy 圖片分析");
+    return null;
+  }
   // 三大法人：固定版面資訊圖 → 用①②③④編號推區塊帶（供聚焦/高亮效果）
   if (TEMPLATE === "institution") {
     // 資訊圖檔名不挑：使用者常丟 0812.png 這種日期命名。
@@ -1096,6 +1169,7 @@ async function main() {
   // lock 會在 exit 時刪除；owner marker 則保留到下一個 run.js 取得工作區時覆寫。
   // server 重啟後藉由 job-specific token 判斷 public/ 目前究竟屬於哪一支工作。
   writeFileSync(ownerFile, JSON.stringify(ownership));
+  enterStage(RENDER_ONLY ? "rendering" : "preparing");
   // 被終止（關終端機=SIGHUP、Ctrl+C=SIGINT、kill=SIGTERM）時也清 .run.lock。
   // 注意：這不會讓生成繼續——關視窗 run.js 一樣會死、新 heygen.mp4 不會下載；
   // 只是死得乾淨、不留 lock 卡住下一次執行。
@@ -1109,6 +1183,19 @@ async function main() {
   // --render-only：前台已經把配圖計畫確認過了，直接出片。
   // 不重跑 HeyGen／加速／轉字幕／OCR —— 那些的產物都還在 public/ 與 src/*.generated.json。
   if (RENDER_ONLY) {
+    // Legacy/manual 快照可能建立於 graphic-broll.generated.json 尚不存在的版本。
+    // restore 時不能讓 shared workspace 上一支 auto Run 的 card-v1 漏進這次成片，
+    // 所以 disabled render-only 必須在 render 前明確覆寫成空 plan。auto-broll 則只能
+    // 沿用準備階段已保存、由 server manifest 驗證過的 card-v1 plan。
+    if (GRAPHIC_BROLL_MODE === "disabled") {
+      execFileSync(process.execPath, [
+        "scripts/graphic-broll-plan.js",
+        "--mode=disabled",
+        "--script=public/script.txt",
+        "--subtitles=src/subtitles.json",
+        "--out=src/graphic-broll.generated.json",
+      ], { cwd: PROJECT_DIR, stdio: "inherit" });
+    }
     log("▶️  --render-only：沿用現有 public/ 與配圖計畫，直接 render");
     renderTemplate();
     return;
@@ -1228,11 +1315,14 @@ async function main() {
 
   // 6. 跑 Remotion 後製（transcribe / correct-subtitles 兩版型共用；parse-script / 配圖 / render 各自版本）
   log("開始 Remotion 後製");
+  enterStage("transcribing");
   run("npm run transcribe");
+  enterStage("aligning-subtitles");
   run("npm run correct-subtitles");
   prepareShots();
 
   if (STOP_BEFORE_RENDER) {
+    reportStage("prepared");
     log("⏸  已指定 --stop-before-render：配圖計畫算好了，這裡停下不 render。");
     log("   前台會把計畫拿去給人看，確認後再用 --render-only 接著跑。");
     return;
@@ -1246,6 +1336,7 @@ async function main() {
  * ⚠️ 手寫標記優先的規則不變：(shot:) / (imageN) / (focus:) 標到的段落自動一律不碰。
  */
 function prepareShots() {
+  enterStage("planning");
   if (TEMPLATE === "dapan") {
     run("npm run parse-script:dapan");
     try {
@@ -1270,17 +1361,39 @@ function prepareShots() {
       log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
     }
   } else {
+    // card-v1 不允許上一個 manual Run 的 screenshot shot plan 混進本次成片。
+    // 先清空再 parse；即使後續 planner 失敗，也不會留下仍可被 renderer 讀取的舊計畫。
+    if (GRAPHIC_BROLL_MODE === "card-v1") {
+      writeFileSync(resolve(PROJECT_DIR, "src/marketing-shots.generated.json"), "[]\n");
+    }
     run("npm run parse-script");
-    try {
-      run("npm run auto-shot:default");
-    } catch (e) {
-      log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
+    if (GRAPHIC_BROLL_MODE === "card-v1") {
+      log("ℹ️ card-v1 已清空 legacy screenshot shot plan，改由 graphic B-Roll planner 配置");
+    } else {
+      try {
+        run("npm run auto-shot:default");
+      } catch (e) {
+        log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
+      }
     }
   }
+
+  // 每一輪都明確覆寫 plan。停用時也寫空計畫，避免 shared workspace 將上一支圖卡
+  // 帶進舊 manual flow；card-v1 則是 deterministic、provider-free，失敗時必須中止。
+  enterStage(GRAPHIC_BROLL_MODE === "card-v1" ? "generating-broll" : "planning");
+  execFileSync(process.execPath, [
+    "scripts/graphic-broll-plan.js",
+    `--mode=${GRAPHIC_BROLL_MODE}`,
+    "--script=public/script.txt",
+    "--subtitles=src/subtitles.json",
+    "--out=src/graphic-broll.generated.json",
+  ], { cwd: PROJECT_DIR, stdio: "inherit" });
+  reportStage("prepared");
 }
 
 /** 只做 render。--render-only 會直接跳到這裡，沿用現有的 public/ 與 *.generated.json。 */
 function renderTemplate() {
+  enterStage("rendering");
   if (TEMPLATE === "dapan") {
     // 同一份 heygen/字幕/腳本出兩支：直式先出，橫式後出（2026-08-10 使用者拍板）
     run("npm run render:dapan");
@@ -1304,6 +1417,7 @@ function renderTemplate() {
     run("npm run render");
     log("✅ 完成！輸出影片在 out/output.mp4");
   }
+  reportStage("finalizing");
 }
 
 /**
