@@ -118,12 +118,51 @@
   .revision-copy span{display:block;font-size:12px;color:var(--dim);margin-top:2px}
   .revision-time{text-align:right;font-size:11.5px;color:var(--dim);white-space:nowrap}
   .revision-time b{display:block;color:var(--ink);font-size:11.5px}
+  .revision-history-head{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+  .revision-history-head h2{margin:0}
+  .revision-info-trigger{appearance:none;width:36px;height:36px;display:grid;place-items:center;padding:0;
+    border:1px solid var(--line);border-radius:50%;background:#fff;color:var(--dim);font-family:inherit;
+    font-size:14px;font-weight:600;line-height:1;
+    cursor:pointer;transition:transform 140ms cubic-bezier(.23,1,.32,1),border-color 140ms ease,color 140ms ease}
+  .revision-info-trigger:hover{border-color:#b7c9e6;color:var(--accent)}
+  .revision-info-trigger:active{transform:scale(.97)}
+  .revision-info-trigger:focus-visible{outline:3px solid rgba(31,111,235,.25);outline-offset:2px}
+  .revision-time-popover{width:min(380px,calc(100vw - 32px));margin:auto;padding:18px 20px;
+    border:1px solid var(--line);border-radius:12px;background:#fff;color:var(--ink);box-shadow:0 16px 42px rgba(27,31,36,.16);
+    font-family:inherit;font-size:13px;line-height:1.7}
+  .revision-time-popover h3{font-size:14px;margin:0 0 7px}
+  .revision-time-popover p{margin:0;color:var(--dim)}
+  .revision-time-help-fallback{margin-left:auto;position:relative}
+  .revision-time-help-fallback>summary{list-style:none}
+  .revision-time-help-fallback>summary::-webkit-details-marker{display:none}
+  .revision-time-help-fallback[open]>.revision-time-popover{display:block;position:absolute;right:0;top:44px;z-index:10}
   .composition-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}
   .composition-item{border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:#fff;min-width:0}
   .composition-item b{display:block;font-size:11.5px;color:var(--dim);font-weight:550}
   .composition-item span{display:block;font-size:12.5px;font-weight:650;margin-top:2px;overflow-wrap:anywhere}
   .asset-status{display:inline-block!important;width:max-content;margin-top:5px!important;padding:2px 7px;
     border-radius:999px;background:#eef4ff;color:var(--accent)!important;font-size:10.5px!important}
+  .graphic-preview{margin-top:14px;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:#fff}
+  .graphic-preview-copy{padding:11px 13px;border-bottom:1px solid var(--line)}
+  .graphic-preview-copy b{display:block;font-size:13.5px}
+  .graphic-preview-copy span{display:block;font-size:12px;color:var(--dim);margin-top:2px}
+  .graphic-preview video{width:100%;max-height:520px;object-fit:contain;border-radius:0;background:#000}
+  .graphic-preview-status{min-height:26px;padding:5px 13px 7px;color:var(--dim);font-size:12px}
+  .graphic-plan-label{font-size:12px;color:var(--dim);margin-top:13px}
+  .graphic-plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:7px}
+  .graphic-plan-card{appearance:none;width:100%;min-width:0;text-align:left;border:1px solid var(--line);
+    border-radius:10px;padding:12px;background:#fff;color:var(--ink);font:inherit}
+  button.graphic-plan-card{cursor:pointer;transition:transform 140ms cubic-bezier(.23,1,.32,1),
+    border-color 140ms ease,background 140ms ease}
+  button.graphic-plan-card:hover{border-color:#b7c9e6;background:#fbfdff}
+  button.graphic-plan-card:active{transform:scale(.985)}
+  button.graphic-plan-card:focus-visible{outline:3px solid rgba(31,111,235,.25);outline-offset:2px}
+  button.graphic-plan-card.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:#f7faff}
+  button.graphic-plan-card:disabled{cursor:not-allowed;opacity:.62;transform:none}
+  .graphic-plan-card b{display:block;font-size:13.5px;overflow-wrap:anywhere}
+  .graphic-plan-card .body{margin-top:5px;font-size:12.5px;color:var(--dim)}
+  .graphic-plan-card .placement{margin-top:7px;font-size:11.5px;color:var(--accent)}
+  .graphic-plan-card .action{display:block;margin-top:8px;font-size:12px;font-weight:650;color:var(--accent)}
   .asset-browser-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}
   .asset-browser-head h2{margin:0}
   .asset-readonly{font-size:11.5px;color:var(--dim);background:var(--soft);padding:3px 9px;
@@ -1098,6 +1137,84 @@ function formatDateTime(value) {
     : date.toLocaleString('zh-TW', { hour12: false });
 }
 
+function verifiedGraphicPreviewOutput(job) {
+  const isSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  const isOutputSize = (value) => Number.isSafeInteger(value) && value > 0;
+  if (!job || job.status !== 'done' || job.pruned || job.workflowMode !== 'auto-broll') return null;
+  const graphic = job.graphicBroll;
+  const manifest = job.renderInputManifest;
+  const evidence = job.renderEvidence;
+  if (!graphic || graphic.schemaVersion !== 1 || graphic.mode !== 'card-v1'
+      || !isSha256(graphic.planSha256)
+      || !Array.isArray(graphic.cards) || !graphic.cards.length
+      || !graphic.cards.every((card) => card && card.resolvedPlacement
+        && Number.isFinite(card.resolvedPlacement.startSec)
+        && Number.isFinite(card.resolvedPlacement.endSec)
+        && card.resolvedPlacement.endSec > card.resolvedPlacement.startSec)) return null;
+  if (!manifest || manifest.schemaVersion !== 1 || !manifest.options
+      || manifest.options.workflowMode !== 'auto-broll'
+      || manifest.options.graphicBrollMode !== 'card-v1'
+      || !Array.isArray(manifest.artifactInputs)) return null;
+  const planInput = manifest.artifactInputs.find((input) =>
+    input && input.path === 'src/graphic-broll.generated.json');
+  if (!planInput || !isSha256(planInput.sha256)
+      || planInput.sha256 !== graphic.planSha256) return null;
+  if (!evidence || evidence.schemaVersion !== 1 || !isSha256(job.renderInputManifestSha256)
+      || !isSha256(evidence.renderInputManifestSha256)
+      || evidence.renderInputManifestSha256 !== job.renderInputManifestSha256
+      || !Array.isArray(evidence.outputs) || !Array.isArray(job.outputs)) return null;
+  for (const output of job.outputs) {
+    if (!output || typeof output.name !== 'string' || !output.name.trim()
+        || !isSha256(output.sha256) || !isOutputSize(output.size)) continue;
+    const match = evidence.outputs.find((item) => item
+      && typeof item.name === 'string' && item.name.trim()
+      && isSha256(item.sha256) && isOutputSize(item.size)
+      && item.name === output.name
+      && item.size === output.size && item.sha256 === output.sha256);
+    if (match) return output;
+  }
+  return null;
+}
+
+function revisionTimeHelp() {
+  const id = 'revision-time-help';
+  const label = '說明版本時間的定義';
+  const panel = (attributes = {}) => el('div', {
+    class: 'revision-time-popover', role: 'note', ...attributes,
+  },
+  el('h3', { id: `${id}-title` }, '版本時間怎麼讀'),
+  el('p', {}, '新版本的「送出 Run」代表本次工作成功進入佇列；完成時間代表流程留下的結束時間。'
+    + '歷史匯入只保留一個歷史紀錄時間，原始指派、生成與匯入時點沒有分別保存，無法回推。'));
+  const supportsPopover = typeof HTMLElement.prototype.showPopover === 'function';
+  if (!supportsPopover) {
+    return {
+      control: el('details', { class: 'revision-time-help-fallback' },
+        el('summary', { class: 'revision-info-trigger', 'aria-label': label },
+          el('span', { 'aria-hidden': 'true' }, 'i')),
+        panel()),
+      panel: null,
+    };
+  }
+  const trigger = el('button', {
+    type: 'button', class: 'revision-info-trigger', popovertarget: id,
+    'aria-label': label, 'aria-controls': id, 'aria-expanded': 'false',
+  }, el('span', { 'aria-hidden': 'true' }, 'i'));
+  const popover = panel({ id, popover: 'auto', 'aria-labelledby': `${id}-title` });
+  popover.addEventListener('toggle', () => {
+    trigger.setAttribute('aria-expanded', popover.matches(':popover-open') ? 'true' : 'false');
+  });
+  trigger.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      popover.togglePopover();
+    } else if (event.key === 'Escape' && popover.matches(':popover-open')) {
+      event.preventDefault();
+      popover.hidePopover();
+    }
+  });
+  return { control: trigger, panel: popover };
+}
+
 function revisionHistoryCard(projectDetail, job) {
   const versions = (projectDetail.revisionSummaries || projectDetail.project.revisions || [])
     .slice().sort((a, b) => b.number - a.number);
@@ -1116,7 +1233,7 @@ function revisionHistoryCard(projectDetail, job) {
         ? `送出 Run ${formatDateTime(revision.submittedAt)}`
         : `版本紀錄建立 ${formatDateTime(revision.createdAt)}`;
     const secondaryTime = imported
-      ? '原始指派／生成／匯入時間語意未保存'
+      ? '匯入紀錄・時間語意未保存'
       : revision.finishedAt ? `完成 ${formatDateTime(revision.finishedAt)}` : '尚未留下完成時間';
     return el('button', {
       type: 'button', class: `revision-row${current ? ' on' : ''}`,
@@ -1129,15 +1246,17 @@ function revisionHistoryCard(projectDetail, job) {
     el('span', { class: 'revision-number' }, `V${revision.number}`),
     el('span', { class: 'revision-copy' },
       el('b', {}, revision.title || '未命名版本'),
-      el('span', {}, `${parent}・${workflow}${source.experimentId ? `・${source.experimentId}` : ''}`)),
+      el('span', {}, `${parent}・${workflow}${source.experimentId ? `・${source.experimentId}` : ''}`
+        + (imported ? '・匯入紀錄' : ''))),
     el('span', { class: 'revision-time' },
       el('b', {}, STATUS_TEXT[revision.status] || revision.status || '—'),
       el('span', {}, primaryTime), el('span', {}, secondaryTime)));
   });
+  const help = revisionTimeHelp();
   return el('div', { class: 'card' },
-    el('h2', {}, '版本脈絡與時間'),
-    el('div', { class: 'asset-section-note' },
-      '新版本顯示實際送出 Run 的時間；歷史匯入只顯示保留下來的紀錄時間，不冒充指派、生成或匯入時間。'),
+    el('div', { class: 'revision-history-head' },
+      el('h2', {}, '版本脈絡與時間'), help.control),
+    help.panel,
     el('div', { class: 'revision-list' }, ...rows));
 }
 
@@ -1350,24 +1469,178 @@ function automationStageCard(job) {
 function graphicBrollEvidenceCard(job, reviewMode = false) {
   const evidence = job.graphicBroll;
   if (!evidence) return null;
-  const verified = !!(job.renderEvidence
-    && job.renderInputManifestSha256
-    && job.renderEvidence.renderInputManifestSha256 === job.renderInputManifestSha256);
-  const cards = (evidence.cards || []).map((card) => el('div', {
-    style: 'border:1px solid var(--line);border-radius:10px;padding:12px;background:#0d2340;color:white',
-  },
-  el('b', {}, card.headline || '圖卡'),
-  card.body ? el('div', { style: 'margin-top:6px;font-size:13px;opacity:.86' }, card.body) : '',
-  el('div', { style: 'margin-top:8px;font-size:12px;color:#8fc7ff' },
-    `${card.resolvedPlacement.startSec.toFixed(1)}s – ${card.resolvedPlacement.endSec.toFixed(1)}s`
-      + `・char ${card.startCharIdx}–${card.endCharIdx}`)));
+  const previewOutput = verifiedGraphicPreviewOutput(job);
+  const verified = !!previewOutput;
+  let preview = null;
+  let playSegment = null;
+  const cardButtons = [];
+  if (verified) {
+    const previewTitle = el('b', {}, '成片實際畫面');
+    const previewDescription = el('span', {},
+      '來自本版 verified output，包含 Avatar、字幕、圖卡與套框；graphic B-roll 不是獨立 MP4。');
+    const status = el('div', { class: 'graphic-preview-status', 'aria-live': 'polite' },
+      '選一張圖卡，播放器會直接播放它在本版成片中的實際片段。');
+    const video = el('video', {
+      controls: 'controls', preload: 'metadata', playsinline: 'playsinline',
+      src: `/api/jobs/${encodeURIComponent(job.id)}/file/${encodeURIComponent(previewOutput.name)}`,
+      'aria-label': '本版 verified 成片的 graphic B-roll 片段預覽',
+    });
+    const state = {
+      mode: 'idle', token: 0, internalSeek: false,
+      pending: null, startSec: 0, endSec: 0, label: '', selected: null,
+    };
+    const selectCard = (button) => {
+      for (const candidate of cardButtons) {
+        const on = candidate === button;
+        candidate.classList.toggle('on', on);
+        candidate.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+      state.selected = button;
+    };
+    const leaveSegmentMode = (message, clearSelection = true) => {
+      state.mode = 'idle';
+      state.pending = null;
+      state.internalSeek = false;
+      state.token += 1;
+      if (clearSelection) selectCard(null);
+      if (message) status.textContent = message;
+    };
+    const finishSegment = () => {
+      if (state.mode !== 'segment') return;
+      state.mode = 'idle';
+      state.token += 1;
+      if (!video.paused) video.pause();
+      status.textContent = `${state.label}片段播放完成；可選另一張，或使用播放器自由觀看整支成片。`;
+    };
+    const checkBoundary = () => {
+      if (state.mode === 'segment' && Number.isFinite(video.currentTime)
+          && video.currentTime >= state.endSec - 0.035) finishSegment();
+    };
+    const watchBoundary = (token) => {
+      if (state.mode !== 'segment' || state.token !== token || !video.isConnected) return;
+      checkBoundary();
+      if (state.mode !== 'segment' || state.token !== token) return;
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => watchBoundary(token));
+      } else {
+        requestAnimationFrame(() => watchBoundary(token));
+      }
+    };
+    const activateArmedSegment = () => {
+      if (state.mode !== 'armed') return;
+      state.mode = 'segment';
+      state.token += 1;
+      const token = state.token;
+      status.textContent = `正在播放「${state.label}」的成片實際畫面（${state.startSec.toFixed(1)}s–${state.endSec.toFixed(1)}s）。`;
+      watchBoundary(token);
+    };
+    const beginSegment = (card, button) => {
+      const placement = card && card.resolvedPlacement;
+      if (!placement || !Number.isFinite(placement.startSec) || !Number.isFinite(placement.endSec)
+          || placement.endSec <= placement.startSec) {
+        leaveSegmentMode('這張圖卡缺少有效的時間軸位置，目前無法預覽。');
+        return;
+      }
+      if (video.readyState < 1 || !Number.isFinite(video.duration)) {
+        state.pending = { card, button };
+        selectCard(button);
+        status.textContent = '正在讀取成片時間資訊…';
+        video.load();
+        return;
+      }
+      const startSec = Math.max(0, placement.startSec - 0.3);
+      const endSec = Math.min(video.duration, placement.endSec + 0.3);
+      if (endSec <= startSec) {
+        leaveSegmentMode('這張圖卡的時間超出成片範圍，目前無法預覽。');
+        return;
+      }
+      state.mode = 'armed';
+      state.pending = null;
+      state.internalSeek = true;
+      state.startSec = startSec;
+      state.endSec = endSec;
+      state.label = card.headline || '這張圖卡';
+      state.token += 1;
+      const token = state.token;
+      selectCard(button);
+      status.textContent = `正在定位「${state.label}」的成片實際畫面（${startSec.toFixed(1)}s–${endSec.toFixed(1)}s）…`;
+      const wasPlaying = !video.paused;
+      video.currentTime = startSec;
+      const playing = video.play();
+      if (wasPlaying) activateArmedSegment();
+      if (playing && typeof playing.catch === 'function') playing.catch(() => {
+        if (state.token !== token || state.mode !== 'armed') return;
+        status.textContent = `已定位至 ${startSec.toFixed(1)}s；請按播放器的播放鍵，仍會在 ${endSec.toFixed(1)}s 停下。`;
+      });
+    };
+    playSegment = beginSegment;
+    video.addEventListener('loadedmetadata', () => {
+      if (!state.pending) return;
+      const pending = state.pending;
+      beginSegment(pending.card, pending.button);
+    });
+    video.addEventListener('play', () => {
+      activateArmedSegment();
+    });
+    video.addEventListener('seeked', () => { state.internalSeek = false; });
+    video.addEventListener('seeking', () => {
+      if ((state.mode === 'segment' || state.mode === 'armed') && !state.internalSeek)
+        leaveSegmentMode('自由播放中；重新選一張圖卡即可回到片段預覽。');
+    });
+    video.addEventListener('pointerdown', () => {
+      if (state.mode === 'segment')
+        leaveSegmentMode('自由播放中；重新選一張圖卡即可回到片段預覽。');
+    });
+    video.addEventListener('keydown', () => {
+      if (state.mode === 'segment')
+        leaveSegmentMode('自由播放中；重新選一張圖卡即可回到片段預覽。');
+    });
+    video.addEventListener('pause', () => {
+      if (state.mode === 'segment') leaveSegmentMode('片段已暫停；重新選圖卡可從片段開頭播放。', false);
+    });
+    video.addEventListener('timeupdate', checkBoundary);
+    video.addEventListener('ended', () => finishSegment());
+    video.addEventListener('error', () => {
+      leaveSegmentMode('驗證紀錄仍在，但這支成片目前無法播放。請重新整理或檢查檔案是否仍存在。');
+      previewTitle.textContent = '成片目前無法播放';
+      previewDescription.textContent = '本版仍保留 Render evidence，但播放器目前讀不到對應檔案。';
+      for (const button of cardButtons) button.disabled = true;
+    });
+    preview = el('div', { class: 'graphic-preview' },
+      el('div', { class: 'graphic-preview-copy' },
+        previewTitle, previewDescription),
+      video, status);
+  }
+  const cards = (evidence.cards || []).map((card) => {
+    const placement = card.resolvedPlacement || {};
+    const copy = [
+      el('b', {}, card.headline || '圖卡'),
+      card.body ? el('div', { class: 'body' }, card.body) : '',
+      el('div', { class: 'placement' },
+        `${Number(placement.startSec).toFixed(1)}s – ${Number(placement.endSec).toFixed(1)}s`
+          + `・char ${card.startCharIdx}–${card.endCharIdx}`),
+    ];
+    if (!verified) return el('div', { class: 'graphic-plan-card' }, ...copy);
+    copy.push(el('span', { class: 'action' }, '看成片片段'));
+    const button = el('button', {
+      type: 'button', class: 'graphic-plan-card', 'aria-pressed': 'false',
+      'aria-label': `播放成片片段：${card.headline || '圖卡'}，${Number(placement.startSec).toFixed(1)}秒到${Number(placement.endSec).toFixed(1)}秒`,
+      onclick: (event) => playSegment(card, event.currentTarget),
+    }, ...copy);
+    cardButtons.push(button);
+    return button;
+  });
   const content = [
     el('div', { class: 'asset-section-head' },
       el('h2', { style: 'margin:0' }, reviewMode ? 'Render 前 audit・系統 B-roll' : '本版系統生成的 B-roll'),
       el('span', { class: 'asset-readonly' }, verified ? '已列入驗證 Render' : '已配置時間軸')),
     el('div', { class: 'hint' },
-      '這些是系統根據本版講稿生成的 graphic B-roll，不是 Project 素材庫檔案；下列秒數是實際 timeline placement。'),
-    el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px' }, ...cards),
+      verified
+        ? '下方播放器是本版成片；每張圖卡的秒數是實際 timeline placement。'
+        : '目前只有內容與時間配置摘要，尚無可驗證成片畫面；這些 graphic B-roll 不是 Project 素材庫檔案。'),
+    preview,
+    el('div', { class: 'graphic-plan-label' }, '內容／時間配置摘要（非實際畫面）'),
+    el('div', { class: 'graphic-plan-grid' }, ...cards),
     el('details', { class: 'technical-details' },
       el('summary', {}, '查看追溯雜湊'),
       el('code', {}, `script ${evidence.sourceScriptSha256}\nplan ${evidence.planSha256}`
@@ -1417,10 +1690,21 @@ async function loadJob() {
     revision.source && revision.source.kind,
     revision.source && revision.source.parentRevisionId,
   ].join(':')).join('|');
+  const graphicPlanInput = job.renderInputManifest && Array.isArray(job.renderInputManifest.artifactInputs)
+    ? job.renderInputManifest.artifactInputs.find((input) =>
+      input && input.path === 'src/graphic-broll.generated.json') : null;
+  const outputSig = (job.outputs || []).map((output) =>
+    [output.name, output.size, output.sha256].join(':')).join('|');
+  const renderEvidenceSig = job.renderEvidence
+    ? [job.renderEvidence.renderInputManifestSha256, job.renderEvidence.verifiedAt,
+      ...(job.renderEvidence.outputs || []).map((output) =>
+        [output.name, output.size, output.sha256].join(':'))].join('|') : '';
   const logText = text || '（還沒有輸出）';
   const sig = [job.id, job.status, job.queuePosition ?? '', (job.outputs || []).length, job.error || '',
     job.stage || '', job.cancelRequestedAt || '', job.cancelledAt || '', job.failedStage || '',
     job.renderInputManifestSha256 || '', JSON.stringify(job.timelinePlacements || []),
+    job.graphicBroll && job.graphicBroll.planSha256 || '', graphicPlanInput && graphicPlanInput.sha256 || '',
+    outputSig, renderEvidenceSig,
     projectDetailError ? projectDetailError.message : '', revisionRefs.join(','), projectAssetSig,
     revisionSig].join('|');
   if (sig === jobSig && box.childElementCount) {

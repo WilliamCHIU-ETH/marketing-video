@@ -495,9 +495,18 @@ async function main() {
   assert.match(html, /從.*階段重試/);
   assert.match(html, /本版輸入與沿用內容/);
   assert.match(html, /版本脈絡與時間/);
-  assert.match(html, /原始指派／生成／匯入時間語意未保存/);
+  assert.match(html, /說明版本時間的定義/);
+  assert.match(html, /popovertarget/);
+  assert.match(html, /showPopover/);
+  assert.match(html, /revision-time-help-fallback/);
+  assert.match(html, /匯入紀錄・時間語意未保存/);
+  assert.match(html, /原始指派、生成與匯入時點沒有分別保存，無法回推/);
   assert.match(html, /送出後不暫停，素材準備完成就直接出片/);
   assert.match(html, /本版系統生成的 B-roll/);
+  assert.match(html, /成片實際畫面/);
+  assert.match(html, /看成片片段/);
+  assert.match(html, /graphic B-roll 不是獨立 MP4/);
+  assert.match(html, /尚無可驗證成片畫面/);
   assert.match(html, /專案素材庫/);
   assert.match(html, /網頁預覽/);
   assert.match(html, /是否實際出現在成片/);
@@ -511,6 +520,61 @@ async function main() {
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
+
+  const inlineScript = html.match(/<script>([\s\S]*)<\/script>/);
+  assert.ok(inlineScript, '前台必須保留可解析的 inline script');
+  assert.doesNotThrow(() => new Function(inlineScript[1]));
+  const previewGateStart = html.indexOf('function verifiedGraphicPreviewOutput(job)');
+  const previewGateEnd = html.indexOf('\nfunction revisionTimeHelp()', previewGateStart);
+  assert.ok(previewGateStart > 0 && previewGateEnd > previewGateStart,
+    '必須能獨立驗證 graphic B-roll 成片預覽 evidence gate');
+  const verifiedGraphicPreviewOutput = new Function(
+    `${html.slice(previewGateStart, previewGateEnd)}\nreturn verifiedGraphicPreviewOutput;`)();
+  const previewFixture = {
+    status: 'done', pruned: false, workflowMode: 'auto-broll',
+    graphicBroll: {
+      schemaVersion: 1, mode: 'card-v1', planSha256: 'a'.repeat(64),
+      cards: [{ resolvedPlacement: { startSec: 1, endSec: 2 } }],
+    },
+    renderInputManifestSha256: 'b'.repeat(64),
+    renderInputManifest: {
+      schemaVersion: 1,
+      options: { workflowMode: 'auto-broll', graphicBrollMode: 'card-v1' },
+      artifactInputs: [{ path: 'src/graphic-broll.generated.json', sha256: 'a'.repeat(64) }],
+    },
+    outputs: [{ name: 'output.mp4', size: 123, sha256: 'c'.repeat(64) }],
+    renderEvidence: {
+      schemaVersion: 1, renderInputManifestSha256: 'b'.repeat(64),
+      outputs: [{ name: 'output.mp4', size: 123, sha256: 'c'.repeat(64) }],
+    },
+  };
+  const previewFixtureBefore = JSON.stringify(previewFixture);
+  assert.equal(verifiedGraphicPreviewOutput(previewFixture), previewFixture.outputs[0]);
+  assert.equal(JSON.stringify(previewFixture), previewFixtureBefore, '預覽 evidence gate 必須唯讀');
+  for (const mutate of [
+    (fixture) => { fixture.status = 'review'; },
+    (fixture) => { fixture.pruned = true; },
+    (fixture) => { fixture.workflowMode = 'manual-assets'; },
+    (fixture) => { fixture.renderInputManifest.artifactInputs[0].sha256 = 'wrong-plan'; },
+    (fixture) => {
+      delete fixture.graphicBroll.planSha256;
+      delete fixture.renderInputManifest.artifactInputs[0].sha256;
+    },
+    (fixture) => { fixture.renderInputManifestSha256 = 'not-a-sha256'; },
+    (fixture) => { fixture.renderEvidence.renderInputManifestSha256 = 'wrong-manifest'; },
+    (fixture) => { fixture.outputs[0].size = 0; fixture.renderEvidence.outputs[0].size = 0; },
+    (fixture) => {
+      fixture.outputs[0].sha256 = 'invalid';
+      fixture.renderEvidence.outputs[0].sha256 = 'invalid';
+    },
+    (fixture) => { fixture.renderEvidence.outputs[0].size = 999; },
+    (fixture) => { fixture.outputs = []; },
+  ]) {
+    const fixture = JSON.parse(JSON.stringify(previewFixture));
+    mutate(fixture);
+    assert.equal(verifiedGraphicPreviewOutput(fixture), null,
+      '不完整或不相符的 evidence 不得顯示成片實際畫面');
+  }
 
   const invalidWorkflow = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
