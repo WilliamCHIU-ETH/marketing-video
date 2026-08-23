@@ -220,3 +220,32 @@ test('parseArgs supports explicit mode and both option syntaxes', () => {
   assert.equal(parsed.subtitlesPath, path.resolve('./two.json'));
   assert.equal(parsed.outputPath, path.resolve('./three.json'));
 });
+
+test('card-v1 orchestrator skips legacy OCR and clears the default screenshot plan', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'run.js'), 'utf8');
+  const imageAnalysis = source.slice(
+    source.indexOf('function startImageAnalysis()'),
+    source.indexOf('function parseVoiceReplacements'),
+  );
+  assert.match(
+    imageAnalysis,
+    /if \(GRAPHIC_BROLL_MODE === "card-v1"\) \{\s*writeFileSync\(resolve\(PROJECT_DIR, "src\/app-images\.generated\.json"\), '\{"images":\[\]\}\\n'\);\s*writeFileSync\(resolve\(PROJECT_DIR, "src\/marketing-shots\.generated\.json"\), "\[\]\\n"\);[\s\S]*?return null;/,
+  );
+
+  const prepareShots = source.slice(
+    source.indexOf('function prepareShots()'),
+    source.indexOf('/** 只做 render。'),
+  );
+  assert.match(
+    prepareShots,
+    /if \(GRAPHIC_BROLL_MODE === "card-v1"\) \{\s*writeFileSync\(resolve\(PROJECT_DIR, "src\/marketing-shots\.generated\.json"\), "\[\]\\n"\);\s*\}/,
+  );
+  assert.match(
+    prepareShots,
+    /if \(GRAPHIC_BROLL_MODE === "card-v1"\) \{[\s\S]*?\} else \{\s*try \{\s*run\("npm run auto-shot:default"\);/,
+  );
+
+  const renderOnlyGate = source.indexOf('if (RENDER_ONLY) {');
+  const prepareImageAnalysis = source.indexOf('const imageAnalysis = startImageAnalysis();');
+  assert.ok(renderOnlyGate >= 0 && renderOnlyGate < prepareImageAnalysis);
+});

@@ -315,6 +315,15 @@ function runBackground(cmd, label) {
  * 回傳 Promise 或 null（該版型沒有要分析的圖）。
  */
 function startImageAnalysis() {
+  // card-v1 的唯一內容型視覺是 deterministic graphic card。它不讀 APP 截圖；若仍啟動
+  // legacy OCR，沒有新圖時會留下上一個 Run 的 app-images.generated.json，後續也可能被
+  // auto-shot 誤用。這條 automation-first path 因此明確略過整段 legacy image analysis。
+  if (GRAPHIC_BROLL_MODE === "card-v1") {
+    writeFileSync(resolve(PROJECT_DIR, "src/app-images.generated.json"), '{"images":[]}\n');
+    writeFileSync(resolve(PROJECT_DIR, "src/marketing-shots.generated.json"), "[]\n");
+    log("ℹ️ card-v1 不使用 APP 截圖，略過 legacy 圖片分析");
+    return null;
+  }
   // 三大法人：固定版面資訊圖 → 用①②③④編號推區塊帶（供聚焦/高亮效果）
   if (TEMPLATE === "institution") {
     // 資訊圖檔名不挑：使用者常丟 0812.png 這種日期命名。
@@ -1352,11 +1361,20 @@ function prepareShots() {
       log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
     }
   } else {
+    // card-v1 不允許上一個 manual Run 的 screenshot shot plan 混進本次成片。
+    // 先清空再 parse；即使後續 planner 失敗，也不會留下仍可被 renderer 讀取的舊計畫。
+    if (GRAPHIC_BROLL_MODE === "card-v1") {
+      writeFileSync(resolve(PROJECT_DIR, "src/marketing-shots.generated.json"), "[]\n");
+    }
     run("npm run parse-script");
-    try {
-      run("npm run auto-shot:default");
-    } catch (e) {
-      log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
+    if (GRAPHIC_BROLL_MODE === "card-v1") {
+      log("ℹ️ card-v1 已清空 legacy screenshot shot plan，改由 graphic B-Roll planner 配置");
+    } else {
+      try {
+        run("npm run auto-shot:default");
+      } catch (e) {
+        log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
+      }
     }
   }
 

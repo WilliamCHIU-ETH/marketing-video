@@ -22,10 +22,28 @@ function fixture() {
   fs.writeFileSync(path.join(artifactRoot, 'src', 'subtitles.json'), '{"_scriptCharTimes":[]}');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'graphic-broll.generated.json'), '{"schemaVersion":1,"mode":"disabled","cards":[]}');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'video-meta.json'), '{"heygenDurationSec":1,"outroDurationSec":0,"title":"晨報"}');
-  fs.writeFileSync(path.join(rendererRoot, 'src', 'GraphicBrollCard.tsx'), 'export const GraphicBrollCard = 1;');
-  fs.writeFileSync(path.join(rendererRoot, 'src', 'MarketingVideo.tsx'), 'export const MarketingVideo = 1;');
-  fs.writeFileSync(path.join(rendererRoot, 'src', 'timeline.ts'), 'export const timeline = 1;');
-  fs.writeFileSync(path.join(rendererRoot, 'package-lock.json'), '{"lockfileVersion":3}');
+  for (const [relativePath, content] of [
+    ['package-lock.json', '{"lockfileVersion":3}'],
+    ['package.json', '{"scripts":{"render":"remotion render MarketingVideo out/output.mp4"}}'],
+    ['remotion.config.ts', "import {Config} from '@remotion/cli/config';"],
+    ['run.js', "require('child_process').execSync('npm run render');"],
+    ['scripts/heygen-video-title.js', 'module.exports = {};'],
+    ['scripts/public-utils.js', 'module.exports = {};'],
+    ['tsconfig.json', '{"compilerOptions":{"jsx":"react-jsx"}}'],
+    ['src/GraphicBrollCard.tsx', 'export const GraphicBrollCard = 1;'],
+    ['src/MarketingVideo.tsx', 'export const MarketingVideo = 1;'],
+    ['src/Root.tsx', 'export const Root = 1;'],
+    ['src/ShotFocus.tsx', 'export const ShotFocus = 1;'],
+    ['src/Subtitles.tsx', 'export const Subtitles = 1;'],
+    ['src/TextCard.tsx', 'export const TextCard = 1;'],
+    ['src/fonts.ts', 'export const fonts = 1;'],
+    ['src/index.ts', 'export const index = 1;'],
+    ['src/timeline.ts', 'export const timeline = 1;'],
+  ]) {
+    const file = path.join(rendererRoot, relativePath);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  }
   return { root, artifactRoot, rendererRoot };
 }
 
@@ -95,15 +113,27 @@ test('必要的 script、Avatar、subtitle、graphic plan 或 video-meta 缺檔�
   }
 });
 
-test('graphic card renderer implementation 或 dependency lock 改變會改變 digest', () => {
+test('完整 renderer source、launch/config 或 dependency lock 改變都會改變 digest', () => {
   const roots = fixture();
   try {
     const initial = build(roots).sha256;
     for (const relativePath of [
       'src/GraphicBrollCard.tsx',
       'src/MarketingVideo.tsx',
+      'src/Root.tsx',
+      'src/ShotFocus.tsx',
+      'src/Subtitles.tsx',
+      'src/TextCard.tsx',
+      'src/fonts.ts',
+      'src/index.ts',
       'src/timeline.ts',
       'package-lock.json',
+      'package.json',
+      'remotion.config.ts',
+      'run.js',
+      'scripts/heygen-video-title.js',
+      'scripts/public-utils.js',
+      'tsconfig.json',
     ]) {
       const file = path.join(roots.rendererRoot, relativePath);
       const original = fs.readFileSync(file);
@@ -114,12 +144,62 @@ test('graphic card renderer implementation 或 dependency lock 改變會改變 d
   } finally { fs.rmSync(roots.root, { recursive: true, force: true }); }
 });
 
-test('必要 renderer source 或 package-lock 缺檔時 fail closed', () => {
+test('新增或刪除 nested renderer source 都會改變 digest', () => {
+  const roots = fixture();
+  try {
+    const initial = build(roots).sha256;
+    const nested = path.join(roots.rendererRoot, 'src', 'components', 'FutureCard.tsx');
+    fs.mkdirSync(path.dirname(nested), { recursive: true });
+    fs.writeFileSync(nested, 'export const FutureCard = 1;');
+    const withNested = build(roots).sha256;
+    assert.notEqual(withNested, initial);
+
+    fs.unlinkSync(nested);
+    assert.equal(build(roots).sha256, initial);
+
+    fs.unlinkSync(path.join(roots.rendererRoot, 'src', 'Subtitles.tsx'));
+    assert.notEqual(build(roots).sha256, initial);
+  } finally { fs.rmSync(roots.root, { recursive: true, force: true }); }
+});
+
+test('state/src 的 nested artifacts 歸 artifact evidence，不重複算 renderer identity', () => {
+  const roots = fixture();
+  try {
+    const nestedArtifact = path.join(
+      roots.artifactRoot,
+      'src',
+      'nested',
+      'future.generated.json',
+    );
+    fs.mkdirSync(path.dirname(nestedArtifact), { recursive: true });
+    fs.writeFileSync(nestedArtifact, '{"future":true}');
+    const sameLivePath = path.join(
+      roots.rendererRoot,
+      'src',
+      'nested',
+      'future.generated.json',
+    );
+    fs.mkdirSync(path.dirname(sameLivePath), { recursive: true });
+    fs.writeFileSync(sameLivePath, '{"stale":"must-not-own-identity"}');
+
+    const manifest = build(roots).manifest;
+    assert.equal(manifest.artifactInputs.some(
+      (item) => item.path === 'src/nested/future.generated.json'), true);
+    assert.equal(manifest.rendererIdentity.some(
+      (item) => item.path === 'src/nested/future.generated.json'), false);
+  } finally { fs.rmSync(roots.root, { recursive: true, force: true }); }
+});
+
+test('必要 renderer entry、launch/config 或 dependency lock 缺檔時 fail closed', () => {
   for (const relativePath of [
-    'src/GraphicBrollCard.tsx',
-    'src/MarketingVideo.tsx',
-    'src/timeline.ts',
+    'src/index.ts',
     'package-lock.json',
+    'package.json',
+    'remotion.config.ts',
+    'run.js',
+    'scripts/heygen-video-title.js',
+    'scripts/public-utils.js',
+    'tsconfig.json',
   ]) {
     const roots = fixture();
     try {

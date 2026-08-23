@@ -1639,7 +1639,8 @@ function graphicBrollEvidenceCard(job, reviewMode = false) {
         ? '下方播放器是本版成片；每張圖卡的秒數是實際 timeline placement。'
         : '目前只有內容與時間配置摘要，尚無可驗證成片畫面；這些 graphic B-roll 不是 Project 素材庫檔案。'),
     preview,
-    el('div', { class: 'graphic-plan-label' }, '內容／時間配置摘要（非實際畫面）'),
+    el('div', { class: 'graphic-plan-label' },
+      verified ? '本版 B-roll 使用片段' : 'B-roll 內容／時間配置'),
     el('div', { class: 'graphic-plan-grid' }, ...cards),
     el('details', { class: 'technical-details' },
       el('summary', {}, '查看追溯雜湊'),
@@ -1880,7 +1881,7 @@ function drawProjectContext() {
       el('div', { class: 'composition-item' }, el('b', {}, '沿用的人工素材'),
         el('span', {}, automatic ? '自動流程不帶入' : manualAssets))),
     el('div', { class: 'note', style: 'margin-top:10px' }, automatic
-      ? `系統會依本次講稿重新生成圖卡，不沿用上一版圖卡或成品；${policySummary}。`
+      ? `系統會以本次講稿建立本版圖卡計畫並送出新的 Run；圖卡可能與上一版相同，仍以各版本紀錄為準；${policySummary}。`
       : `這版會帶入：${manualAssets}。${reusedSpeakerAsset
         ? '將沿用上列 Avatar。'
         : '未帶入 Avatar；若直接送出，既有流程會呼叫 HeyGen 產生講者影片。'}${policySummary}；`

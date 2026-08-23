@@ -14,9 +14,12 @@ const DEFAULT_COMPOSITION_FILES = [
 ];
 const DEFAULT_RENDERER_FILES = [
   'package-lock.json',
-  'src/GraphicBrollCard.tsx',
-  'src/MarketingVideo.tsx',
-  'src/timeline.ts',
+  'package.json',
+  'remotion.config.ts',
+  'run.js',
+  'scripts/heygen-video-title.js',
+  'scripts/public-utils.js',
+  'tsconfig.json',
 ];
 const REQUIRED_ARTIFACT_INPUTS = [
   'public/script.txt',
@@ -25,7 +28,10 @@ const REQUIRED_ARTIFACT_INPUTS = [
   'src/subtitles.json',
   'src/video-meta.json',
 ];
-const REQUIRED_RENDERER_INPUTS = [...DEFAULT_RENDERER_FILES];
+const REQUIRED_RENDERER_INPUTS = [
+  ...DEFAULT_RENDERER_FILES,
+  'src/index.ts',
+];
 
 function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -107,11 +113,20 @@ function buildRenderInputManifest({
 }) {
   if (!artifactRoot || !rendererRoot || !template || !compositionId)
     throw new Error('render input manifest 缺少 artifactRoot／rendererRoot 或必要欄位');
+  // state/src owns every generated render artifact captured for this Run. The live checkout owns
+  // every remaining source file. Their union is the complete repo-local Remotion source envelope;
+  // recursive discovery avoids silently losing provenance when a new component is imported later.
+  const artifactSourcePaths = regularFilesUnder(artifactRoot, 'src');
   const artifactPaths = [...new Set([
     ...regularFilesUnder(artifactRoot, 'public'),
-    ...DEFAULT_COMPOSITION_FILES,
+    ...artifactSourcePaths,
   ])].sort();
-  const rendererPaths = [...DEFAULT_RENDERER_FILES].sort();
+  const artifactSourceSet = new Set(artifactSourcePaths);
+  const rendererPaths = [...new Set([
+    ...DEFAULT_RENDERER_FILES,
+    ...regularFilesUnder(rendererRoot, 'src')
+      .filter((relativePath) => !artifactSourceSet.has(relativePath)),
+  ])].sort();
   const artifactInputs = artifactPaths
     .map((relativePath) => fingerprintFile(artifactRoot, relativePath)).filter(Boolean);
   const rendererIdentity = rendererPaths
@@ -128,7 +143,7 @@ function buildRenderInputManifest({
     throw new Error(`renderer identity 缺少必要檔案：${missingRenderer.join(', ')}`);
   const manifest = {
     schemaVersion: 1,
-    rendererContractVersion: 'composition-native-card-v1',
+    rendererContractVersion: 'remotion-source-closure-v1',
     template,
     compositionId,
     options: {
