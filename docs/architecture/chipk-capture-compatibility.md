@@ -8,7 +8,7 @@ dependency of this repository.
 
 | Provider ID | Contract | Tool version | Release tag | Release commit |
 |---|---:|---:|---|---|
-| `chipk-simulator-capture` | `1` | `0.2.0` | `v0.2.0` | `87c033bed59fd53242b1679bc71b39fb20a11832` |
+| `chipk-simulator-capture` | `1` | `0.2.1` | `v0.2.1` | `b19f264aa1576bd6f1a24b2f20dbffef59f7ebb0` |
 
 Runtime verifies only the Provider ID, contract version, and reported tool version. The release
 tag and commit record the immutable source identity that passed the release gate; the CLI does not
