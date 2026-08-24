@@ -18,6 +18,7 @@ const DEFAULT_RENDERER_FILES = [
   'remotion.config.ts',
   'run.js',
   'scripts/heygen-video-title.js',
+  'scripts/prepared-phone-material-plan.js',
   'scripts/public-utils.js',
   'tsconfig.json',
 ];
@@ -110,6 +111,7 @@ function buildRenderInputManifest({
   withAd = false,
   workflowMode = 'manual-assets',
   graphicBrollMode = 'disabled',
+  preparedPhoneMode = 'disabled',
 }) {
   if (!artifactRoot || !rendererRoot || !template || !compositionId)
     throw new Error('render input manifest 缺少 artifactRoot／rendererRoot 或必要欄位');
@@ -135,6 +137,17 @@ function buildRenderInputManifest({
   const presentRenderer = new Set(rendererIdentity.map((item) => item.path));
   const missingArtifacts = REQUIRED_ARTIFACT_INPUTS
     .filter((relativePath) => !presentArtifacts.has(relativePath));
+  if (preparedPhoneMode === 'ready-to-place') {
+    for (const relativePath of [
+      'public/prepared-phone-material.intent.json',
+      'public/prepared-phone-material.mp4',
+      'src/Focusstock/prepared-phone-material.generated.json',
+    ]) {
+      if (!presentArtifacts.has(relativePath)) missingArtifacts.push(relativePath);
+    }
+  } else if (preparedPhoneMode !== 'disabled') {
+    throw new Error(`render input preparedPhoneMode 不合法：${preparedPhoneMode}`);
+  }
   const missingRenderer = REQUIRED_RENDERER_INPUTS
     .filter((relativePath) => !presentRenderer.has(relativePath));
   if (missingArtifacts.length)
@@ -151,6 +164,7 @@ function buildRenderInputManifest({
       withAd: Boolean(withAd),
       workflowMode,
       graphicBrollMode,
+      preparedPhoneMode,
     },
     artifactInputs,
     rendererIdentity,

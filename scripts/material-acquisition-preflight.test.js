@@ -20,9 +20,27 @@ const PNG = Buffer.from(
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.2.1',
+  toolVersion: '0.3.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
+  contractCapabilities: [
+    {
+      contractVersion: 1, operations: ['screenshot', 'record'],
+      requestSchema: 'contracts/capture-request.schema.json',
+      resultSchema: 'contracts/capture-result.schema.json',
+    },
+    {
+      contractVersion: 2, operations: ['prepared-video'],
+      requestSchema: 'contracts/capture-request-v2.schema.json',
+      resultSchema: 'contracts/capture-result-v2.schema.json',
+      presentationProfiles: [{
+        id: 'chipk.stock-main-force-portrait.v1', version: 1,
+        status: 'ready_to_place', sourceKind: 'screenshot',
+        routeIds: ['chipk.stock.main-force'], stockIds: ['3441'],
+        artifactRole: 'prepared-video',
+      }],
+    },
+  ],
 };
 
 function sha256(value) {
@@ -48,7 +66,7 @@ function fixture(t) {
   const result = {
     contractVersion: 1,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
     status: 'completed',
     artifacts: [
       {
@@ -179,7 +197,7 @@ test('completed screenshot bundle becomes fresh only after full validation', asy
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
-  assert.equal(value.providerVersion, '0.2.1');
+  assert.equal(value.providerVersion, '0.3.0');
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
 });
@@ -206,7 +224,7 @@ test('result envelope is closed and bound to request/provider/status/error invar
   const { request, result } = fixture(t);
   const badValues = [
     { ...result, requestId: 'other' },
-    { ...result, provider: { id: 'other', toolVersion: '0.2.1' } },
+    { ...result, provider: { id: 'other', toolVersion: '0.3.0' } },
     { ...result, evidence: [] },
     { ...result, error: { code: 'x', message: 'x', retryable: false } },
     { ...result, extra: true },

@@ -113,6 +113,18 @@ if (GRAPHIC_BROLL_MODE === "card-v1" && TEMPLATE !== "default") {
   console.error("❌ card-v1 目前只支援 default / MarketingVideo 版型");
   process.exit(1);
 }
+const PREPARED_PHONE_ARG = process.argv.find((arg) => arg.startsWith("--prepared-phone="));
+const PREPARED_PHONE_MODE = PREPARED_PHONE_ARG
+  ? PREPARED_PHONE_ARG.slice("--prepared-phone=".length)
+  : "disabled";
+if (!["disabled", "ready-to-place"].includes(PREPARED_PHONE_MODE)) {
+  console.error(`❌ 不認得的 prepared phone mode：${PREPARED_PHONE_MODE}`);
+  process.exit(1);
+}
+if (PREPARED_PHONE_MODE === "ready-to-place" && TEMPLATE !== "focusstock") {
+  console.error("❌ ready-to-place phone material 目前只支援 focusstock 版型");
+  process.exit(1);
+}
 
 const WORKSPACE_STAGE_FILE = process.env.WORKSPACE_STAGE_FILE || null;
 const WORKSPACE_CANCEL_FILE = process.env.WORKSPACE_CANCEL_FILE || null;
@@ -1196,6 +1208,13 @@ async function main() {
         "--out=src/graphic-broll.generated.json",
       ], { cwd: PROJECT_DIR, stdio: "inherit" });
     }
+    if (PREPARED_PHONE_MODE === "disabled") {
+      execFileSync(process.execPath, [
+        "scripts/prepared-phone-material-plan.js",
+        "--mode=disabled",
+        "--out=src/Focusstock/prepared-phone-material.generated.json",
+      ], { cwd: PROJECT_DIR, stdio: "inherit" });
+    }
     log("▶️  --render-only：沿用現有 public/ 與配圖計畫，直接 render");
     renderTemplate();
     return;
@@ -1387,6 +1406,15 @@ function prepareShots() {
     "--script=public/script.txt",
     "--subtitles=src/subtitles.json",
     "--out=src/graphic-broll.generated.json",
+  ], { cwd: PROJECT_DIR, stdio: "inherit" });
+  execFileSync(process.execPath, [
+    "scripts/prepared-phone-material-plan.js",
+    `--mode=${PREPARED_PHONE_MODE}`,
+    "--intent=public/prepared-phone-material.intent.json",
+    "--video=public/prepared-phone-material.mp4",
+    "--subtitles=src/subtitles.json",
+    "--video-meta=src/video-meta.json",
+    "--out=src/Focusstock/prepared-phone-material.generated.json",
   ], { cwd: PROJECT_DIR, stdio: "inherit" });
   reportStage("prepared");
 }

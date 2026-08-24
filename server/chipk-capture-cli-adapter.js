@@ -27,6 +27,11 @@ function typedStderrCode(stderr) {
   return typeof code === 'string' && /^[A-Za-z0-9_]{1,80}$/.test(code) ? code : null;
 }
 
+function exactOperations(value, expected) {
+  return Array.isArray(value) && value.length === expected.length
+    && expected.every((operation, index) => value[index] === operation);
+}
+
 function runJson(command, args, { timeoutMs, runner, acceptResultOnNonzero = false }) {
   return new Promise((resolve, reject) => {
     runner(command, args, {
@@ -68,7 +73,8 @@ function validateProviderCapabilities(value, expected = PROVIDER_LOCK) {
   if (!value || value.providerId !== expected.providerId
       || value.schemaVersion !== expected.contractVersion
       || typeof value.toolVersion !== 'string' || !value.toolVersion.trim()
-      || !Array.isArray(value.operations)) {
+      || typeof value.productionReady !== 'boolean'
+      || !exactOperations(value.operations, ['screenshot', 'record'])) {
     throw new CaptureCliAdapterError(
       'ChipK Capture CLI returned an incompatible capability document',
       'provider_contract_incompatible');
@@ -77,6 +83,42 @@ function validateProviderCapabilities(value, expected = PROVIDER_LOCK) {
     throw new CaptureCliAdapterError(
       'ChipK Capture CLI version does not match the consumer lock',
       'provider_version_incompatible');
+  }
+  if (!Number.isInteger(expected.readyToPlaceContractVersion)
+      || typeof expected.readyToPlaceProfileId !== 'string'
+      || !Array.isArray(value.contractCapabilities)) {
+    throw new CaptureCliAdapterError(
+      'ChipK Capture CLI does not declare ready-to-place capabilities',
+      'provider_contract_incompatible');
+  }
+  const legacyMatches = value.contractCapabilities.filter(
+    (entry) => entry && entry.contractVersion === expected.contractVersion);
+  const legacy = legacyMatches.length === 1 ? legacyMatches[0] : null;
+  if (!legacy || !exactOperations(legacy.operations, ['screenshot', 'record'])
+      || typeof legacy.requestSchema !== 'string' || !legacy.requestSchema
+      || typeof legacy.resultSchema !== 'string' || !legacy.resultSchema) {
+    throw new CaptureCliAdapterError(
+      'ChipK Capture CLI legacy capability is incompatible',
+      'provider_contract_incompatible');
+  }
+  const matches = value.contractCapabilities.filter(
+    (entry) => entry && entry.contractVersion === expected.readyToPlaceContractVersion);
+  const capability = matches.length === 1 ? matches[0] : null;
+  const profiles = capability && capability.presentationProfiles;
+  const profileMatches = Array.isArray(profiles)
+    ? profiles.filter((item) => item && item.id === expected.readyToPlaceProfileId) : [];
+  const profile = profileMatches.length === 1 ? profileMatches[0] : null;
+  if (!capability || !exactOperations(capability.operations, ['prepared-video'])
+      || typeof capability.requestSchema !== 'string' || !capability.requestSchema
+      || typeof capability.resultSchema !== 'string' || !capability.resultSchema
+      || !profile || profile.version !== 1 || profile.status !== 'ready_to_place'
+      || profile.sourceKind !== 'screenshot' || profile.artifactRole !== 'prepared-video'
+      || !Array.isArray(profile.routeIds)
+      || !profile.routeIds.includes('chipk.stock.main-force')
+      || !exactOperations(profile.stockIds, ['3441'])) {
+    throw new CaptureCliAdapterError(
+      'ChipK Capture CLI ready-to-place capability is incompatible',
+      'provider_contract_incompatible');
   }
   return value;
 }

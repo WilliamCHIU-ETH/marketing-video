@@ -31,10 +31,28 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
-const { createProjectStore, extensionForMediaType, inspectMediaFile } = require('./project-store');
+const {
+  createProjectStore,
+  extensionForMediaType,
+  inspectMediaFile,
+  isGenericReusableAsset,
+} = require('./project-store');
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
-const { normalizeMaterialAcquisitionIntent } = require('./material-acquisition');
-const { prepareJobMaterialAcquisition } = require('./material-acquisition-runtime');
+const {
+  normalizeMaterialAcquisitionIntent,
+  resolvePreparedVideoPlacement,
+} = require('./material-acquisition');
+const {
+  PREPARED_PLAN,
+  buildPreparedPhoneTimelinePlacement,
+  compactPreparedPhoneAcquisition,
+  commitPreparedPhoneMaterialSelection,
+  finalizePreparedPhoneMaterial,
+  prepareJobMaterialAcquisition,
+  rollbackPreparedPhoneMaterialSelection,
+  validatePreparedPhonePlacementMath,
+  validatePreparedPhoneProjectAsset,
+} = require('./material-acquisition-runtime');
 const {
   buildRenderInputManifest,
   verifyDeclaredFileFingerprints,
@@ -205,6 +223,10 @@ const TEMPLATES = {
 const WORKFLOW_MODES = new Set(['manual-assets', 'auto-broll']);
 const CONTROL_POLICIES = new Set(['auto', 'pause-before-render']);
 const GRAPHIC_BROLL_PLAN = 'src/graphic-broll.generated.json';
+
+function preparedPhoneMode(job) {
+  return job.materialAcquisition?.operation === 'prepared-video' ? 'ready-to-place' : 'disabled';
+}
 
 function compositionIdFor(job) {
   if (job.template === 'default') return 'MarketingVideo';
@@ -394,7 +416,7 @@ function ownedJobDir(id) {
 
 function ownedJobPayloadDir(id, subdir) {
   const dir = ownedJobDir(id);
-  if (!dir || !/^(input|state|thumbs|out|pipeline)$/.test(subdir)) return null;
+  if (!dir || !/^(input|state|thumbs|out|pipeline|acquisition)$/.test(subdir)) return null;
   const target = path.join(dir, subdir);
   if (!fs.existsSync(target)) return target;
   try {
@@ -1190,6 +1212,7 @@ function clearWorkspaceInputs() {
   }
   // 標注檔要指名清掉。不能用 *.json 一律清 —— deeplinks.json 是投廣品牌素材。
   rmrf(path.join(pub, 'annotations.json'));
+  rmrf(path.join(pub, 'prepared-phone-material.intent.json'));
 }
 
 function snapshotWorkspace(job) {
@@ -1247,6 +1270,66 @@ function validateGraphicBrollPlanForJob(job, baseDir) {
   return { plan, planSha256: fileSha256(file) };
 }
 
+function validatePreparedPhonePlanForJob(job, baseDir) {
+  const file = path.join(baseDir, ...PREPARED_PLAN.split('/'));
+  let plan;
+  try { plan = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { throw new Error(`prepared phone plan 無法解析：${error.message}`); }
+  const expectedMode = preparedPhoneMode(job);
+  if (!plan || plan.schemaVersion !== 1 || plan.mode !== expectedMode
+      || plan.template !== 'focusstock' || plan.timelineBasis !== 'focusstock-main-v1')
+    throw new Error(`prepared phone plan contract 不符（預期 ${expectedMode}）`);
+  if (expectedMode === 'disabled') {
+    if (plan.source !== null || plan.presentation !== null || plan.placement !== null
+        || plan.visualOwnership !== null)
+      throw new Error('disabled prepared phone plan 必須是空計畫');
+    return { plan, planSha256: fileSha256(file) };
+  }
+  let focusstockShots;
+  try {
+    focusstockShots = JSON.parse(fs.readFileSync(path.join(
+      baseDir, 'src', 'Focusstock', 'focusstock-shots.generated.json'), 'utf8'));
+  } catch (_) {
+    throw new Error('ready-to-place 缺少 Focusstock shot suppression evidence');
+  }
+  if (!Array.isArray(focusstockShots) || focusstockShots.length !== 0)
+    throw new Error('ready-to-place 不可與一般 Focusstock 截圖／B-Roll 同時出現');
+  const result = job.materialAcquisitionResult;
+  const source = plan.source;
+  const placement = plan.placement;
+  const ownership = plan.visualOwnership;
+  const pendingEvidence = result?.placementStatus === 'compiled_pending_evidence'
+    && result.automaticTimelineUse === false && !result.preparedArtifact?.assetRef;
+  const committed = result?.placementStatus === 'compiled'
+    && result.automaticTimelineUse === true && !!result.preparedArtifact?.assetRef;
+  if (job.template !== 'focusstock' || !result || (!pendingEvidence && !committed)
+      || result.compiledPlanFile !== PREPARED_PLAN
+      || result.compiledPlanSha256 !== fileSha256(file)
+      || plan.contractVersion !== 2 || plan.requestId !== result.requestId
+      || plan.presentation?.profileId !== job.materialAcquisition.presentation?.profileId
+      || !ownership || ownership.owner !== 'prepared-phone-video'
+      || ownership.conflictPolicy !== 'suppress-entire-overlapping-placement'
+      || JSON.stringify(ownership.suppressedChannels)
+        !== JSON.stringify(['focusstock-shots', 'focusstock-broll'])
+      || !source || source.fileName !== 'prepared-phone-material.mp4'
+      || source.artifactRole !== 'prepared-video'
+      || source.sha256 !== result.preparedArtifact.sha256
+      || source.size !== result.preparedArtifact.size
+      || !placement || placement.layoutId !== job.materialAcquisition.placement?.layoutId
+      || !Number.isFinite(placement.startSec) || placement.startSec < 0
+      || !Number.isFinite(placement.endSec) || placement.endSec <= placement.startSec
+      || !Number.isInteger(placement.durationInFrames) || placement.durationInFrames < 1
+      || placement.playbackRate !== 1 || placement.muted !== true
+      || placement.objectFit !== 'contain' || placement.crop !== 'none'
+      || placement.trim !== 'none' || placement.loop !== false)
+    throw new Error('ready-to-place prepared phone plan 與 Run evidence 不一致');
+  const video = path.join(baseDir, 'public', source.fileName);
+  if (!fs.existsSync(video) || fileSha256(video) !== source.sha256)
+    throw new Error('prepared phone plan 指向的 MP4 bytes 已改變');
+  validatePreparedPhonePlacementMath(plan, video);
+  return { plan, planSha256: fileSha256(file) };
+}
+
 function buildJobRenderInput(job, artifactRoot) {
   return buildRenderInputManifest({
     artifactRoot,
@@ -1259,13 +1342,14 @@ function buildJobRenderInput(job, artifactRoot) {
     withAd: !!job.withAd,
     workflowMode: job.workflowMode || 'manual-assets',
     graphicBrollMode: job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+    preparedPhoneMode: preparedPhoneMode(job),
   });
 }
 
-function captureAutomationEvidence(job) {
+function captureAutomationEvidence(job, preparedCandidate = null) {
   const state = path.join(jobDir(job.id), 'state');
   const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
-  job.graphicBroll = {
+  const graphicBroll = {
     schemaVersion: plan.schemaVersion,
     mode: plan.mode,
     style: plan.style,
@@ -1273,27 +1357,65 @@ function captureAutomationEvidence(job) {
     planSha256,
     cards: plan.cards,
   };
-  job.timelinePlacements = plan.cards.map((card) => ({
+  const timelinePlacements = plan.cards.map((card) => ({
     cardId: card.id,
     startCharIdx: card.startCharIdx,
     endCharIdx: card.endCharIdx,
     startSec: card.resolvedPlacement.startSec,
     endSec: card.resolvedPlacement.endSec,
   }));
-  if (job.workflowMode === 'auto-broll') {
+  const prepared = validatePreparedPhonePlanForJob(job, state);
+  if (prepared.plan.mode === 'ready-to-place') {
+    const assetRef = preparedCandidate?.asset?.id
+      || job.materialAcquisitionResult?.preparedArtifact?.assetRef;
+    if (!assetRef) throw new Error('prepared phone Project Asset 尚未通過候選 ingest');
+    timelinePlacements.push(
+      buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef));
+  }
+  let renderInputManifest = null;
+  let renderInputManifestSha256 = null;
+  if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {
     const renderInput = buildJobRenderInput(job, state);
-    job.renderInputManifest = renderInput.manifest;
-    job.renderInputManifestSha256 = renderInput.sha256;
-  } else {
-    // Legacy manual review 會在準備後修改 shot plan；M02A 不替它宣稱一份 pre-edit
-    // manifest 是實際 render input。Automation-first Run 才使用 immutable manifest gate。
-    job.renderInputManifest = null;
-    job.renderInputManifestSha256 = null;
+    renderInputManifest = renderInput.manifest;
+    renderInputManifestSha256 = renderInput.sha256;
+  }
+  const previous = {
+    assetRefs: [...(job.assetRefs || [])],
+    materialAcquisitionResult: JSON.parse(JSON.stringify(job.materialAcquisitionResult || null)),
+    graphicBroll: job.graphicBroll,
+    timelinePlacements: job.timelinePlacements,
+    renderInputManifest: job.renderInputManifest,
+    renderInputManifestSha256: job.renderInputManifestSha256,
+  };
+  try {
+    job.graphicBroll = graphicBroll;
+    job.timelinePlacements = timelinePlacements;
+    job.renderInputManifest = renderInputManifest;
+    job.renderInputManifestSha256 = renderInputManifestSha256;
+    if (preparedCandidate?.asset) {
+      const committedPlacement = commitPreparedPhoneMaterialSelection({
+        job, asset: preparedCandidate.asset, plan: prepared.plan, projectStore: PROJECT_STORE,
+      });
+      job.timelinePlacements[job.timelinePlacements.length - 1] = committedPlacement;
+    }
+    saveJob(job);
+  } catch (error) {
+    rollbackPreparedPhoneMaterialSelection(job);
+    job.assetRefs = previous.assetRefs;
+    job.materialAcquisitionResult = previous.materialAcquisitionResult;
+    job.graphicBroll = previous.graphicBroll;
+    job.timelinePlacements = previous.timelinePlacements;
+    job.renderInputManifest = previous.renderInputManifest;
+    job.renderInputManifestSha256 = previous.renderInputManifestSha256;
+    try { saveJob(job); } catch (_) {}
+    throw error;
   }
 }
 
 function verifyRestoredRenderInput(job) {
-  if (job.workflowMode !== 'auto-broll') return null;
+  if (job.workflowMode !== 'auto-broll' && preparedPhoneMode(job) !== 'ready-to-place') return null;
+  if (preparedPhoneMode(job) === 'ready-to-place')
+    validatePreparedPhoneProjectAsset({ job, projectStore: PROJECT_STORE });
   if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
     throw new Error('這個 Run 缺少可追溯的 render input manifest');
   const state = path.join(jobDir(job.id), 'state');
@@ -1302,6 +1424,10 @@ function verifyRestoredRenderInput(job) {
   if (statePlanSha256 !== job.graphicBroll?.planSha256
       || restoredPlanSha256 !== statePlanSha256)
     throw new Error('render retry 的 graphic B-Roll plan 已改變，拒絕重新生成或靜默替換');
+  const { planSha256: statePreparedSha256 } = validatePreparedPhonePlanForJob(job, state);
+  const { planSha256: restoredPreparedSha256 } = validatePreparedPhonePlanForJob(job, ROOT);
+  if (statePreparedSha256 !== restoredPreparedSha256)
+    throw new Error('render retry 的 prepared phone plan 已改變');
   // Rebuild the same two-root identity as prepare: immutable Run artifacts + the actual checkout.
   // This catches both state tampering and renderer/package-lock drift without ever snapshotting code.
   const current = buildJobRenderInput(job, state);
@@ -2125,15 +2251,24 @@ async function doPrepare(job) {
 
   const args = [`--template=${job.template}`, '--stop-before-render'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
+  args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
   if (job.brand) args.push(`--brand=${job.brand}`);
   if (job.skipGenerate) args.push('--skip-generate');
   if (job.noSpeed) args.push('--no-speed');
   if (job.withAd) args.push('--with-ad');
+  let preparedCandidate = null;
   try {
     await runPipeline(job, args);
+    preparedCandidate = finalizePreparedPhoneMaterial({
+      job,
+      jobDirectory: jobDir(job.id),
+      workspaceRoot: ROOT,
+      publicDirectory: WORKSPACE_PUBLIC_DIR,
+      projectStore: PROJECT_STORE,
+    });
     captureProjectAssets(job);
     snapshotWorkspace(job);
-    captureAutomationEvidence(job);
+    captureAutomationEvidence(job, preparedCandidate);
     job.planView = buildPlanView(job);
   } catch (error) {
     capturePaidSpeakerAfterFailure({
@@ -2148,7 +2283,7 @@ async function doPrepare(job) {
       // plan is never treated as valid evidence, but the snapshot remains auditable/recoverable.
       try { captureProjectAssets(job); } catch (_) {}
       try { snapshotWorkspace(job); } catch (_) {}
-      try { captureAutomationEvidence(job); } catch (_) {}
+      try { captureAutomationEvidence(job, preparedCandidate); } catch (_) {}
     }
     throw error;
   }
@@ -2183,6 +2318,7 @@ async function doRender(job) {
 
   const args = [`--template=${job.template}`, '--render-only'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
+  args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
   if (job.withAd) args.push('--with-ad');
   let evidence;
   try {
@@ -2698,11 +2834,26 @@ const server = http.createServer(async (req, res) => {
       if (!CONTROL_POLICIES.has(controlPolicy))
         return send(res, 400, { error: 'controlPolicy 不合法' });
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
+      if (materialAcquisition?.operation === 'prepared-video' && body.template !== 'focusstock')
+        return send(res, 400, { error: 'ready-to-place 手機素材目前只支援焦點股日報' });
+      if (materialAcquisition?.operation === 'prepared-video' && !!body.withAd)
+        return send(res, 400, { error: 'ready-to-place 手機素材目前不支援 Focusstock 廣告版' });
       if (workflowMode === 'auto-broll' && body.template !== 'default')
         return send(res, 400, { error: '自動圖卡 V1 目前只支援投廣模板（MarketingVideo）' });
       if (workflowMode === 'auto-broll' && materialAcquisition)
         return send(res, 400, { error: '自動圖卡流程只接受講稿與 Avatar MP4，不接受額外素材擷取' });
       if (!body.body || !body.body.trim()) return send(res, 400, { error: '腳本是空的' });
+      const placementScriptText = buildScript({
+        voice: body.voice, title: body.title, body: body.body,
+      });
+      if (materialAcquisition?.operation === 'prepared-video') {
+        try {
+          materialAcquisition = resolvePreparedVideoPlacement(
+            materialAcquisition, placementScriptText);
+        } catch (error) {
+          return send(res, 400, { error: error.message });
+        }
+      }
       const parentRevisionId = body.parentRevisionId == null || body.parentRevisionId === ''
         ? null : String(body.parentRevisionId);
       if (parentRevisionId && !body.projectId)
@@ -2716,12 +2867,15 @@ const server = http.createServer(async (req, res) => {
       const title = String(body.title || '').split('\n')
         .map((l) => (tcfg.wrap ? l.trim() : l.trim().slice(0, tcfg.per))).filter(Boolean)
         .slice(0, tcfg.lines).join('\n');
-      const reuseAssetIds = Array.isArray(body.reuseAssetIds)
+      const scriptText = buildScript({ voice: body.voice, title, body: body.body });
+      let reuseAssetIds = Array.isArray(body.reuseAssetIds)
         ? [...new Set(body.reuseAssetIds.map(String))] : [];
       const reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
         ? null : String(body.reuseSpeakerAssetId);
       if (workflowMode === 'auto-broll' && reuseAssetIds.length)
         return send(res, 400, { error: '自動圖卡流程不能同時帶入人工圖片或 B-Roll' });
+      if (materialAcquisition?.operation === 'prepared-video' && reuseAssetIds.length)
+        return send(res, 400, { error: 'ready-to-place 手機素材會取代本版一般圖片／B-Roll' });
       if (reuseAssetIds.length > MAX_REUSED_ASSETS)
         return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片與 B-Roll 素材` });
       if (!body.projectId && (reuseAssetIds.length || reuseSpeakerAssetId))
@@ -2743,6 +2897,12 @@ const server = http.createServer(async (req, res) => {
           owner: (body.owner || '').trim() || '未署名',
         });
       }
+      // A prepared phone clip belongs to one compiled placement. Iteration must reacquire a new
+      // ready-to-place clip/placement instead of silently carrying the prior Revision's clip as B-roll.
+      reuseAssetIds = reuseAssetIds.filter((assetId) => {
+        const asset = (project.assets || []).find((item) => item.id === assetId);
+        return asset?.role !== 'prepared-phone-video';
+      });
       let parentRevision = null;
       if (parentRevisionId) {
         try { parentRevision = PROJECT_STORE.getRevision(project.id, parentRevisionId); }
@@ -2752,9 +2912,11 @@ const server = http.createServer(async (req, res) => {
       }
       const invalidReuse = reuseAssetIds.find((assetId) => {
         const asset = (project.assets || []).find((item) => item.id === assetId);
-        return !asset || !['image', 'video'].includes(asset.kind);
+        return !isGenericReusableAsset(asset);
       });
-      if (invalidReuse) return send(res, 400, { error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用` });
+      if (invalidReuse) return send(res, 400, {
+        error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用；prepared 手機素材只能由 Capture placement 選用`,
+      });
       const speakerAsset = reuseSpeakerAssetId
         ? (project.assets || []).find((item) => item.id === reuseSpeakerAssetId) : null;
       if (reuseSpeakerAssetId && (!speakerAsset || speakerAsset.kind !== 'speaker-video'))
@@ -2815,8 +2977,7 @@ const server = http.createServer(async (req, res) => {
           ...(materialAcquisition ? { materialAcquisition } : {}),
         };
         ensureDir(path.join(jobDir(job.id), 'input'));
-        fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
-          buildScript({ voice: body.voice, title, body: body.body }));
+        fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'), scriptText);
         if (speakerAsset) {
           PROJECT_STORE.materializeAsset(project.id, speakerAsset.id,
             path.join(jobDir(job.id), 'input', 'heygen.mp4'));
@@ -2826,6 +2987,8 @@ const server = http.createServer(async (req, res) => {
         let brollIndex = 1;
         for (const assetId of reuseAssetIds) {
           const asset = (project.assets || []).find((item) => item.id === assetId);
+          if (!isGenericReusableAsset(asset))
+            throw new Error(`素材 ${assetId} 不可由一般素材流程 materialize`);
           let ext = extensionForMediaType(asset.mediaType);
           if (!ext) {
             const originalExt = path.extname(asset.originalName || '').toLowerCase();
@@ -2863,6 +3026,8 @@ const server = http.createServer(async (req, res) => {
       if (!spec) return send(res, 400, { error: '不允許的上傳檔名' });
       if (job.workflowMode === 'auto-broll' && name !== 'heygen.mp4')
         return send(res, 409, { error: '自動圖卡流程只接受 Avatar MP4，不接受人工 B-Roll 素材' });
+      if (job.materialAcquisition?.operation === 'prepared-video' && name !== 'heygen.mp4')
+        return send(res, 409, { error: 'ready-to-place 手機素材不可再混入一般圖片／B-Roll' });
       const limit = spec.limit;
       const declared = Number(req.headers['content-length'] || 0);
       if (declared > limit) return send(res, 413, { error: `上傳檔案超過 ${Math.round(limit / 1048576)} MB 上限` });
@@ -3238,6 +3403,17 @@ function pruneOldJobs() {
       const t = Date.parse(j.finishedAt || j.createdAt) || 0;
       const retentionExpired = idx >= KEEP_RECENT && t <= cutoff;
       if (!isCompactableProjectRun && !retentionExpired) return;
+      if (isCompactableProjectRun && j.materialAcquisition?.operation === 'prepared-video') {
+        const compacted = compactPreparedPhoneAcquisition({
+          job: j,
+          jobDirectory: jobDir(j.id),
+          projectStore: PROJECT_STORE,
+          saveJob,
+          nowISO,
+        });
+        if (!compacted?.compacted) return;
+        freed += compacted.bytesFreed;
+      }
       for (const sub of ['input', 'state', 'thumbs']) {
         const d = ownedJobPayloadDir(j.id, sub);
         if (!d) continue;
@@ -3249,6 +3425,13 @@ function pruneOldJobs() {
       if (hasDurableOutputs) {
         const d = ownedJobPayloadDir(j.id, 'out');
         if (canRemoveRunOutputDir(d, outputs, verifiedOutputs)) {
+          freed += dirSize(d);
+          rmrf(d);
+        }
+      }
+      if (retentionExpired && !isCompactableProjectRun) {
+        const d = ownedJobPayloadDir(j.id, 'acquisition');
+        if (d) {
           freed += dirSize(d);
           rmrf(d);
         }

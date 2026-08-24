@@ -14,9 +14,29 @@ const {
 const capabilities = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.2.1',
+  toolVersion: '0.3.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
+  contractCapabilities: [
+    {
+      contractVersion: 1,
+      operations: ['screenshot', 'record'],
+      requestSchema: 'contracts/capture-request.schema.json',
+      resultSchema: 'contracts/capture-result.schema.json',
+    },
+    {
+      contractVersion: 2,
+      operations: ['prepared-video'],
+      requestSchema: 'contracts/capture-request-v2.schema.json',
+      resultSchema: 'contracts/capture-result-v2.schema.json',
+      presentationProfiles: [{
+        id: 'chipk.stock-main-force-portrait.v1', version: 1,
+        status: 'ready_to_place', sourceKind: 'screenshot',
+        routeIds: ['chipk.stock.main-force'], stockIds: ['3441'],
+        artifactRole: 'prepared-video',
+      }],
+    },
+  ],
 };
 
 function outputDir(t) {
@@ -60,7 +80,7 @@ test('acquire writes a private request file and invokes the locked CLI shape', a
     return callback(null, JSON.stringify({
       contractVersion: 1,
       requestId: request.requestId,
-      provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+      provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
       status: 'completed',
       artifacts: [],
     }), '');
@@ -77,7 +97,7 @@ test('typed non-completed result on provider exit 3 is returned to the Port', as
   const runner = (_command, _args, _options, callback) => callback(error, JSON.stringify({
     contractVersion: 1,
     requestId: 'req-human',
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
     status: 'human_action_required',
     artifacts: [],
     error: { code: 'vip_session_required' },
@@ -159,4 +179,55 @@ test('capability version mismatch is rejected by the exact consumer lock', async
     (error) => error instanceof CaptureCliAdapterError
       && error.code === 'provider_version_incompatible',
   );
+});
+
+test('capability contract entries must preserve the legacy top level and exact v2 operation', async () => {
+  const cases = [
+    {
+      ...capabilities,
+      operations: ['screenshot', 'record', 'prepared-video'],
+    },
+    {
+      ...capabilities,
+      contractCapabilities: capabilities.contractCapabilities.filter(
+        (entry) => entry.contractVersion !== 1),
+    },
+    {
+      ...capabilities,
+      contractCapabilities: capabilities.contractCapabilities.map((entry) =>
+        entry.contractVersion === 2
+          ? { ...entry, operations: ['prepared-video', 'record'] }
+          : entry),
+    },
+    {
+      ...capabilities,
+      contractCapabilities: capabilities.contractCapabilities.map((entry) =>
+        entry.contractVersion === 2
+          ? {
+              ...entry,
+              presentationProfiles: entry.presentationProfiles.map((profile) => ({
+                ...profile, stockIds: ['9999'],
+              })),
+            }
+          : entry),
+    },
+    {
+      ...capabilities,
+      contractCapabilities: capabilities.contractCapabilities.map((entry) =>
+        entry.contractVersion === 2
+          ? { ...entry, presentationProfiles: [
+              ...entry.presentationProfiles, ...entry.presentationProfiles,
+            ] }
+          : entry),
+    },
+  ];
+  for (const value of cases) {
+    await assert.rejects(
+      () => probeChipKCaptureCli({
+        runner: (_c, _a, _o, cb) => cb(null, JSON.stringify(value), ''),
+      }),
+      (error) => error instanceof CaptureCliAdapterError
+        && error.code === 'provider_contract_incompatible',
+    );
+  }
 });

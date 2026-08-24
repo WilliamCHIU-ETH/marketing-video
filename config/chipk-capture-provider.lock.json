@@ -1,9 +1,12 @@
 {
   "providerId": "chipk-simulator-capture",
   "contractVersion": 1,
-  "toolVersion": "0.2.1",
+  "readyToPlaceContractVersion": 2,
+  "readyToPlaceProfileId": "chipk.stock-main-force-portrait.v1",
+  "toolVersion": "0.3.0",
   "release": {
-    "tag": "v0.2.1",
-    "commit": "b19f264aa1576bd6f1a24b2f20dbffef59f7ebb0"
+    "tag": "v0.3.0",
+    "commit": null,
+    "status": "pending-provider-release"
   }
 }

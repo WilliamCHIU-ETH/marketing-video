@@ -21,6 +21,9 @@ function fixture() {
   fs.writeFileSync(path.join(artifactRoot, 'public', 'heygen.mp4'), 'avatar-fixture');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'subtitles.json'), '{"_scriptCharTimes":[]}');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'graphic-broll.generated.json'), '{"schemaVersion":1,"mode":"disabled","cards":[]}');
+  fs.mkdirSync(path.join(artifactRoot, 'src', 'Focusstock'), { recursive: true });
+  fs.writeFileSync(path.join(artifactRoot, 'src', 'Focusstock', 'prepared-phone-material.generated.json'),
+    '{"schemaVersion":1,"mode":"disabled","template":"focusstock","timelineBasis":"focusstock-main-v1","source":null,"presentation":null,"placement":null,"visualOwnership":null}');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'video-meta.json'), '{"heygenDurationSec":1,"outroDurationSec":0,"title":"晨報"}');
   for (const [relativePath, content] of [
     ['package-lock.json', '{"lockfileVersion":3}'],
@@ -28,6 +31,7 @@ function fixture() {
     ['remotion.config.ts', "import {Config} from '@remotion/cli/config';"],
     ['run.js', "require('child_process').execSync('npm run render');"],
     ['scripts/heygen-video-title.js', 'module.exports = {};'],
+    ['scripts/prepared-phone-material-plan.js', 'module.exports = {};'],
     ['scripts/public-utils.js', 'module.exports = {};'],
     ['tsconfig.json', '{"compilerOptions":{"jsx":"react-jsx"}}'],
     ['src/GraphicBrollCard.tsx', 'export const GraphicBrollCard = 1;'],
@@ -113,6 +117,36 @@ test('必要的 script、Avatar、subtitle、graphic plan 或 video-meta 缺檔�
   }
 });
 
+test('ready-to-place mode requires and fingerprints prepared MP4, intent, and generated plan', () => {
+  const roots = fixture();
+  try {
+    fs.writeFileSync(path.join(roots.artifactRoot, 'public', 'prepared-phone-material.mp4'),
+      'prepared-video-bytes');
+    fs.writeFileSync(path.join(roots.artifactRoot, 'public', 'prepared-phone-material.intent.json'),
+      '{"mode":"ready-to-place"}');
+    const options = {
+      artifactRoot: roots.artifactRoot,
+      rendererRoot: roots.rendererRoot,
+      template: 'focusstock',
+      compositionId: 'Focusstock',
+      workflowMode: 'manual-assets',
+      graphicBrollMode: 'disabled',
+      preparedPhoneMode: 'ready-to-place',
+    };
+    const first = buildRenderInputManifest(options);
+    assert.equal(first.manifest.options.preparedPhoneMode, 'ready-to-place');
+    for (const relativePath of [
+      'public/prepared-phone-material.mp4',
+      'public/prepared-phone-material.intent.json',
+      'src/Focusstock/prepared-phone-material.generated.json',
+    ]) assert.ok(first.manifest.artifactInputs.some((item) => item.path === relativePath));
+    fs.appendFileSync(path.join(roots.artifactRoot, 'public', 'prepared-phone-material.mp4'), 'drift');
+    assert.notEqual(buildRenderInputManifest(options).sha256, first.sha256);
+    fs.unlinkSync(path.join(roots.artifactRoot, 'public', 'prepared-phone-material.intent.json'));
+    assert.throws(() => buildRenderInputManifest(options), /prepared-phone-material\.intent\.json/);
+  } finally { fs.rmSync(roots.root, { recursive: true, force: true }); }
+});
+
 test('完整 renderer source、launch/config 或 dependency lock 改變都會改變 digest', () => {
   const roots = fixture();
   try {
@@ -132,6 +166,7 @@ test('完整 renderer source、launch/config 或 dependency lock 改變都會改
       'remotion.config.ts',
       'run.js',
       'scripts/heygen-video-title.js',
+      'scripts/prepared-phone-material-plan.js',
       'scripts/public-utils.js',
       'tsconfig.json',
     ]) {
@@ -198,6 +233,7 @@ test('必要 renderer entry、launch/config 或 dependency lock 缺檔時 fail c
     'remotion.config.ts',
     'run.js',
     'scripts/heygen-video-title.js',
+    'scripts/prepared-phone-material-plan.js',
     'scripts/public-utils.js',
     'tsconfig.json',
   ]) {

@@ -17,7 +17,7 @@
 
 同一支影片後續調整時，從專案詳情選擇「建立下一版」。V1、V2 會留在同一個 Project，既有圖片與 B-Roll 影片可直接沿用；系統仍會為每次執行建立隔離 Run，但不把 Run 當成另一支影片。
 
-localhost 前台的 Project Asset 支援 PNG／JPEG 圖片，以及 MP4／MOV／M4V／WebM B-Roll。一般 B-Roll 與 `heygen.mp4` 講者影片是不同角色：B-Roll 可保存、預覽及跨版本沿用；講者影片則獨立保存供 pipeline 使用，不會與 B-Roll 互相誤用。目前自動 OCR、素材配置與 Remotion 合成仍以圖片為主；B-Roll 在這一階段尚不代表已自動剪入成片。
+localhost 前台的 Project Asset 支援 PNG／JPEG 圖片，以及 MP4／MOV／M4V／WebM B-Roll。一般 B-Roll、`heygen.mp4` 講者影片與 Capture 交付的 `prepared-phone-video` 是不同角色。一般 B-Roll 被保存不代表已進入成片；`prepared-phone-video` 只有在 timeline placement 編譯、hash 與 render-input evidence 都通過後才會被 Revision 選中，Marketing Video 只放置它，不重新剪輯手機內容。
 
 
 
@@ -95,7 +95,7 @@ npm start                              # Remotion Studio，不是使用者前台
 
 - `npm run smoke` 使用 repo 外的臨時 `DATA_DIR`、停用 worker、清空 provider keys，並阻擋／記錄 child process 與 outbound network 嘗試。
 - 正常 Project、Revision 與 Run state 預設放在 ignored 的 `runtime-data/`。
-- 成功 Project Run 的正式成品確認寫入 Project 後，`input/`、`state/`、`thumbs/` 與 `out/` payload 會立即清除；只保留小型 Run record／log 供目前 UI 與機器狀態使用。
+- 成功 Project Run 的正式成品確認寫入 Project 後，`input/`、`state/`、`thumbs/` 與 `out/` payload 會立即清除；ready-to-place acquisition 另會在 Project clip／placement／Render evidence 都成立後移除重複 MP4 與 screenshot，只保留 JSON audit sidecars。Run record／log 與 sidecars 都是小型追溯資料。
 - 大型品牌素材不進 Git；本 workspace 的 ignored `assets` symlink 指向 `../data/assets/`。
 - 啟動 server 不會自動清理舊 job；只有顯式設定 `AUTO_PRUNE_ON_START=1` 才會 prune。
 - 非 localhost 模式目前沒有完整認證，server 會預設拒絕啟動。
