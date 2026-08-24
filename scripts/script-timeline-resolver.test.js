@@ -60,10 +60,19 @@ test('resolver fails closed on ambiguous, missing, timeline-length, and timing d
     placement: { anchor }, scriptRaw,
     subtitles: { _scriptCharTimes: validTimes.slice(1) }, fps: 30,
   }), (error) => error.code === 'placement_timeline_drift');
-  validTimes[anchor.startCharIdx] = { start: '0.2', end: 0.3 };
-  assert.throws(() => resolvePlacementStart({
-    placement: { anchor }, scriptRaw, subtitles: { _scriptCharTimes: validTimes }, fps: 30,
-  }), (error) => error.code === 'placement_anchor_unresolved');
+  for (const invalidTiming of [
+    { start: '0.2', end: 0.3 },
+    { start: 0.2, end: null },
+    { start: 0.2, end: 0.1 },
+    { start: 0, end: 0 },
+  ]) {
+    const driftedTimes = validTimes.map((timing) => ({ ...timing }));
+    driftedTimes[anchor.startCharIdx] = invalidTiming;
+    assert.throws(() => resolvePlacementStart({
+      placement: { anchor }, scriptRaw,
+      subtitles: { _scriptCharTimes: driftedTimes }, fps: 30,
+    }), (error) => error.code === 'placement_anchor_unresolved');
+  }
 });
 
 test('explicit startSec is renderer-rounded without requiring script or subtitles', () => {

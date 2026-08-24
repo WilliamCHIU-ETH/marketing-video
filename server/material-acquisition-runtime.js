@@ -431,6 +431,15 @@ function mergePreparedPhoneTimelineChannels({
   return [...preserved, ...focusstockVisualPlacements, preparedPlacement];
 }
 
+function selectPreparedPhoneGraphicBroll(existingGraphicBroll, generatedGraphicBroll) {
+  if (existingGraphicBroll?.mode !== 'composition-v1') return generatedGraphicBroll;
+  if (existingGraphicBroll.schemaVersion !== 1
+      || !Array.isArray(existingGraphicBroll.cards) || existingGraphicBroll.cards.length === 0) {
+    fail('Recorded composition B-roll evidence is invalid', 'placement_compile_failed');
+  }
+  return existingGraphicBroll;
+}
+
 function inspectPreparedVideo(file) {
   let value;
   try {
@@ -1059,6 +1068,7 @@ module.exports = {
   nextShotName,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
+  selectPreparedPhoneGraphicBroll,
   validateCompiledPreparedPlan,
   validateFocusstockVisualTimelinePlacements,
   validatePreparedPhonePlacementMath,

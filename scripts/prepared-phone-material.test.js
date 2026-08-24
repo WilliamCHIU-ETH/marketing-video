@@ -29,6 +29,7 @@ const {
   mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
+  selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
   validatePreparedFocusstockAssetRefs,
   validatePreparedPhoneProjectAsset,
@@ -712,7 +713,7 @@ test('fractional seconds are suppressed when renderer-rounded frames overlap pre
   }]);
 });
 
-test('Focusstock custom B-roll uses the same half-open suppression at frame 1616', () => {
+test('Focusstock visual contract keeps endpoint-touching B-roll and suppresses a full overlap', () => {
   const priorClip = focusstockVisualFrameInterval(43.8, 53.85);
   const mainforceGuide = focusstockVisualFrameInterval(53.85, 59.04);
   const prepared = { startFrame: 1616, endFrame: 1766 };
@@ -735,25 +736,6 @@ test('Focusstock custom B-roll uses the same half-open suppression at frame 1616
     mainforceGuide.startFrame, mainforceGuide.endFrame,
     prepared.startFrame, prepared.endFrame), true,
   '07-mainforce-guide begins at prepared frame 1616 and is suppressed in full');
-
-  const component = fs.readFileSync(path.join(
-    __dirname, '..', 'src', 'Focusstock', 'FocusstockBrollLayer.tsx'), 'utf8');
-  assert.match(component,
-    /!preparedPhoneSuppressesFocusstockVisual\(clip\.startSec, clip\.endSec\)/,
-  'custom B-roll renderer must consume the prepared-phone suppression helper');
-  const composition = fs.readFileSync(path.join(
-    __dirname, '..', 'src', 'Focusstock', 'FocusstockComposition.tsx'), 'utf8');
-  assert.ok(composition.indexOf('<FocusstockBrollLayer />') >= 0);
-  assert.ok(composition.indexOf('<FocusstockBrollLayer />')
-    < composition.indexOf('<PreparedPhoneMaterialLayer />'));
-  const disabledPlan = JSON.parse(fs.readFileSync(path.join(
-    __dirname, '..', 'src', 'Focusstock', 'focusstock-broll.generated.json'), 'utf8'));
-  assert.deepEqual(disabledPlan, {
-    schemaVersion: 1,
-    mode: 'disabled',
-    timelineBasis: 'focusstock-main-v1',
-    clips: [],
-  });
 });
 
 test('Focusstock visual timeline placements are an exact evidence-bound retry contract', (t) => {
@@ -786,6 +768,21 @@ test('Focusstock visual timeline placements are an exact evidence-bound retry co
     focusstockVisualPlacements: expected,
     preparedPlacement: replacementPrepared,
   }), [recordedCompositionPlacement, ...expected, replacementPrepared]);
+
+  const recordedComposition = {
+    schemaVersion: 1,
+    mode: 'composition-v1',
+    cards: [{ id: 'broll-01' }],
+    provenance: { level: 'reconstructed-after-render' },
+  };
+  const generatedDisabled = { schemaVersion: 1, mode: 'disabled', cards: [] };
+  assert.equal(selectPreparedPhoneGraphicBroll(
+    recordedComposition, generatedDisabled), recordedComposition,
+  'prepared capture must preserve PR36 composition metadata instead of replacing it');
+  assert.equal(selectPreparedPhoneGraphicBroll(null, generatedDisabled), generatedDisabled);
+  assert.throws(() => selectPreparedPhoneGraphicBroll(
+    { schemaVersion: 1, mode: 'composition-v1', cards: [] }, generatedDisabled),
+  (error) => error.code === 'placement_compile_failed');
 
   const mutations = [
     { name: 'missing placement', placements: [prepared] },

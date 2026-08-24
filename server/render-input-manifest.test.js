@@ -24,8 +24,6 @@ function fixture() {
   fs.mkdirSync(path.join(artifactRoot, 'src', 'Focusstock'), { recursive: true });
   fs.writeFileSync(path.join(artifactRoot, 'src', 'Focusstock', 'prepared-phone-material.generated.json'),
     '{"schemaVersion":1,"mode":"disabled","template":"focusstock","timelineBasis":"focusstock-main-v1","source":null,"presentation":null,"placement":null,"visualOwnership":null}');
-  fs.writeFileSync(path.join(artifactRoot, 'src', 'Focusstock', 'focusstock-broll.generated.json'),
-    '{"schemaVersion":1,"mode":"disabled","timelineBasis":"focusstock-main-v1","clips":[]}');
   fs.writeFileSync(path.join(artifactRoot, 'src', 'video-meta.json'), '{"heygenDurationSec":1,"outroDurationSec":0,"title":"晨報"}');
   for (const [relativePath, content] of [
     ['package-lock.json', '{"lockfileVersion":3}'],
@@ -143,7 +141,6 @@ test('ready-to-place mode requires and fingerprints prepared MP4, intent, and ge
       'public/prepared-phone-material.mp4',
       'public/prepared-phone-material.intent.json',
       'src/Focusstock/prepared-phone-material.generated.json',
-      'src/Focusstock/focusstock-broll.generated.json',
     ]) assert.ok(first.manifest.artifactInputs.some((item) => item.path === relativePath));
     fs.appendFileSync(path.join(roots.artifactRoot, 'public', 'prepared-phone-material.mp4'), 'drift');
     assert.notEqual(buildRenderInputManifest(options).sha256, first.sha256);

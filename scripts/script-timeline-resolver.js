@@ -101,7 +101,8 @@ function resolvePlacementStart({ placement, scriptRaw = null, subtitles = null, 
     fail('placement_timeline_drift',
       'subtitle character timeline length does not match the cleaned script');
   const timing = charTimes[startCharIdx];
-  if (!timing || !Number.isFinite(timing.start) || timing.start < 0)
+  if (!timing || !Number.isFinite(timing.start) || !Number.isFinite(timing.end)
+      || timing.start < 0 || timing.end <= timing.start)
     fail('placement_anchor_unresolved', 'placement anchor has no valid subtitle time');
   return {
     ...roundedStart(timing.start, fps),

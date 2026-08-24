@@ -25,7 +25,6 @@ import { Subtitles } from '../Subtitles';
 import { ShotFocusImage } from '../ShotFocus';
 import videoMeta from '../video-meta.json';
 import focusstockAssets from './focusstock-assets.generated.json';
-import { FocusstockBrollLayer } from './FocusstockBrollLayer';
 import {
   PreparedPhoneMaterialLayer,
   preparedPhoneSuppressesFocusstockVisual,
@@ -147,9 +146,6 @@ export const FocusstockComposition: React.FC = () => {
             </Sequence>
           );
         })}
-
-        {/* 自訂 B-roll 與 screenshot runs 共用 prepared clip 的整段 half-open 抑制規則。 */}
-        <FocusstockBrollLayer />
 
         {/* Capture 已完成手機內部的焦點、縮放與呈現；這裡只負責 scene container 與 placement。 */}
         <PreparedPhoneMaterialLayer />

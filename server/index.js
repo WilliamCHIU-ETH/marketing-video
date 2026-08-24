@@ -53,6 +53,7 @@ const {
   mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
+  selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
   validatePreparedFocusstockAssetRefs,
   validatePreparedPhonePlacementMath,
@@ -1407,8 +1408,8 @@ function captureAutomationEvidence(job, preparedCandidate = null) {
     });
   }
   const graphicBroll = prepared.plan.mode === 'ready-to-place'
-      && job.graphicBroll?.mode === 'composition-v1'
-    ? job.graphicBroll : generatedGraphicBroll;
+    ? selectPreparedPhoneGraphicBroll(job.graphicBroll, generatedGraphicBroll)
+    : generatedGraphicBroll;
   let renderInputManifest = null;
   let renderInputManifestSha256 = null;
   if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {
