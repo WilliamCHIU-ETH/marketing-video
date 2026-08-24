@@ -1237,6 +1237,7 @@ function recordedCompositionPreviewOutput(job) {
   const graphic = job && job.graphicBroll;
   const provenance = graphic && graphic.provenance;
   const expected = provenance && provenance.output;
+  const serverEvidence = job && job.recordedCompositionEvidence;
   const cards = graphic && graphic.cards;
   const placements = job && job.timelinePlacements;
   if (!job || job.status !== 'done' || job.pruned
@@ -1244,8 +1245,18 @@ function recordedCompositionPreviewOutput(job) {
       || !isSha256(graphic.sourceScriptSha256) || !isSha256(graphic.planSha256)
       || !Array.isArray(cards) || !cards.length || !Array.isArray(placements)
       || !provenance || provenance.level !== 'reconstructed-after-render'
+      || !serverEvidence || serverEvidence.status !== 'verified'
+      || serverEvidence.projectId !== job.projectId
+      || serverEvidence.revisionId !== job.revisionId
+      || serverEvidence.renderInputManifestSha256 !== job.renderInputManifestSha256
+      || !Array.isArray(serverEvidence.cardIds) || serverEvidence.cardIds.length !== cards.length
       || !expected || typeof expected.name !== 'string' || !expected.name.trim()
       || !isSha256(expected.sha256) || !isOutputSize(expected.size)) return null;
+
+  if (!serverEvidence.output || serverEvidence.output.name !== expected.name
+      || serverEvidence.output.sha256 !== expected.sha256
+      || serverEvidence.output.size !== expected.size
+      || cards.some((card) => !serverEvidence.cardIds.includes(card && card.id))) return null;
 
   const allPlacementsMatch = cards.every((card) => {
     const placement = card && card.resolvedPlacement;
@@ -1929,6 +1940,7 @@ async function loadJob() {
   const sig = [job.id, job.status, job.queuePosition ?? '', (job.outputs || []).length, job.error || '',
     job.stage || '', job.cancelRequestedAt || '', job.cancelledAt || '', job.failedStage || '',
     job.renderInputManifestSha256 || '', JSON.stringify(job.timelinePlacements || []),
+    JSON.stringify(job.recordedCompositionEvidence || null),
     job.graphicBroll && job.graphicBroll.planSha256 || '', graphicPlanInput && graphicPlanInput.sha256 || '',
     brollPromptSig,
     outputSig, renderEvidenceSig,

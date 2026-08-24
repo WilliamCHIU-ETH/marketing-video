@@ -39,6 +39,7 @@ const {
   buildRenderInputManifest,
   verifyDeclaredFileFingerprints,
 } = require('./render-input-manifest');
+const { verifyRecordedCompositionEvidence } = require('./broll-composition-evidence');
 const { attachRecordedBrollPrompts } = require('./broll-prompt-provenance');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -2498,6 +2499,7 @@ function publicJob(j, options = {}) {
     detachedFromStatus, detachedOwnerPid, detachedWorkspaceContested,
     detachedCaptureAttempts, detachedCaptureRetryAt, cancelSignalSentAt,
     migration, sourceJobDir: _sourceJobDir, sourceRoots: _sourceRoots,
+    recordedCompositionEvidence: _recordedCompositionEvidence,
     manifest: _manifest, archived: _archived, outputs = [],
     ...rest
   } = j;
@@ -2524,6 +2526,12 @@ function publicJob(j, options = {}) {
         })),
       };
     }
+    try {
+      const project = PROJECT_STORE.get(j.projectId);
+      const revision = PROJECT_STORE.getRevision(j.projectId, j.revisionId);
+      const evidence = verifyRecordedCompositionEvidence({ job: j, project, revision });
+      if (evidence) safe.recordedCompositionEvidence = evidence;
+    } catch (_) {}
   }
   return safe;
 }

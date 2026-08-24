@@ -604,7 +604,8 @@ async function main() {
   }
 
   const recordedFixture = {
-    status: 'done', pruned: false,
+    status: 'done', pruned: false, projectId: 'project-1', revisionId: 'v001',
+    renderInputManifestSha256: 'e'.repeat(64),
     graphicBroll: {
       schemaVersion: 1, mode: 'composition-v1',
       sourceScriptSha256: 'a'.repeat(64), planSha256: 'b'.repeat(64),
@@ -625,6 +626,11 @@ async function main() {
     renderEvidence: {
       outputs: [{ name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) }],
     },
+    recordedCompositionEvidence: {
+      status: 'verified', projectId: 'project-1', revisionId: 'v001',
+      renderInputManifestSha256: 'e'.repeat(64), cardIds: ['broll-01'],
+      output: { name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) },
+    },
   };
   const recordedFixtureBefore = JSON.stringify(recordedFixture);
   assert.equal(recordedCompositionPreviewOutput(recordedFixture), recordedFixture.outputs[0]);
@@ -639,6 +645,8 @@ async function main() {
     (fixture) => { fixture.timelinePlacements[0].evidenceLevel = 'selected-only'; },
     (fixture) => { fixture.graphicBroll.cards[0].assetSha256 = 'invalid'; },
     (fixture) => { fixture.renderEvidence.outputs[0].size = 999; },
+    (fixture) => { fixture.recordedCompositionEvidence = null; },
+    (fixture) => { fixture.recordedCompositionEvidence.projectId = 'other-project'; },
   ]) {
     const fixture = JSON.parse(JSON.stringify(recordedFixture));
     mutate(fixture);
