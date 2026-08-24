@@ -50,6 +50,7 @@ const {
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
   finalizePreparedPhoneMaterial,
+  mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
   validateFocusstockVisualTimelinePlacements,
@@ -1375,7 +1376,7 @@ function buildJobRenderInput(job, artifactRoot) {
 function captureAutomationEvidence(job, preparedCandidate = null) {
   const state = path.join(jobDir(job.id), 'state');
   const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
-  const graphicBroll = {
+  const generatedGraphicBroll = {
     schemaVersion: plan.schemaVersion,
     mode: plan.mode,
     style: plan.style,
@@ -1383,7 +1384,7 @@ function captureAutomationEvidence(job, preparedCandidate = null) {
     planSha256,
     cards: plan.cards,
   };
-  const timelinePlacements = plan.cards.map((card) => ({
+  let timelinePlacements = plan.cards.map((card) => ({
     cardId: card.id,
     startCharIdx: card.startCharIdx,
     endCharIdx: card.endCharIdx,
@@ -1398,11 +1399,16 @@ function captureAutomationEvidence(job, preparedCandidate = null) {
     const assetRef = preparedCandidate?.asset?.id
       || job.materialAcquisitionResult?.preparedArtifact?.assetRef;
     if (!assetRef) throw new Error('prepared phone Project Asset 尚未通過候選 ingest');
-    timelinePlacements.push(...buildFocusstockVisualTimelinePlacements(
-      prepared.visualEvidence, prepared.visualEvidenceSha256));
-    timelinePlacements.push(
-      buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef));
+    timelinePlacements = mergePreparedPhoneTimelineChannels({
+      existingPlacements: job.timelinePlacements || [],
+      focusstockVisualPlacements: buildFocusstockVisualTimelinePlacements(
+        prepared.visualEvidence, prepared.visualEvidenceSha256),
+      preparedPlacement: buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef),
+    });
   }
+  const graphicBroll = prepared.plan.mode === 'ready-to-place'
+      && job.graphicBroll?.mode === 'composition-v1'
+    ? job.graphicBroll : generatedGraphicBroll;
   let renderInputManifest = null;
   let renderInputManifestSha256 = null;
   if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {

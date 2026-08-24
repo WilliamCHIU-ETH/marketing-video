@@ -20,6 +20,8 @@ const DEFAULT_RENDERER_FILES = [
   'scripts/heygen-video-title.js',
   'scripts/prepared-phone-material-plan.js',
   'scripts/public-utils.js',
+  'scripts/script-timeline-resolver.js',
+  'scripts/script-utils.js',
   'tsconfig.json',
 ];
 const REQUIRED_ARTIFACT_INPUTS = [

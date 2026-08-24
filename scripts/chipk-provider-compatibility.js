@@ -137,6 +137,7 @@ function compilePreparedPlan({ root, jobDirectory }) {
     '--mode=ready-to-place',
     `--intent=${path.join(publicDirectory, PREPARED_INTENT_INPUT)}`,
     `--video=${path.join(publicDirectory, PREPARED_VIDEO_INPUT)}`,
+    `--script=${path.join(publicDirectory, 'script.txt')}`,
     `--subtitles=${path.join(sourceDirectory, 'subtitles.json')}`,
     `--video-meta=${path.join(sourceDirectory, 'video-meta.json')}`,
     `--out=${path.join(workspaceRoot, ...PREPARED_PLAN.split('/'))}`,

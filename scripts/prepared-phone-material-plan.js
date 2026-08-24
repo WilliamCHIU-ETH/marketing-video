@@ -5,6 +5,10 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const {
+  ScriptTimelineResolverError,
+  resolvePlacementStart: resolveScriptPlacementStart,
+} = require('./script-timeline-resolver');
 
 const ROOT = path.resolve(__dirname, '..');
 const READY_MODE = 'ready-to-place';
@@ -12,6 +16,7 @@ const DISABLED_MODE = 'disabled';
 const FPS = 30;
 const DEFAULT_INTENT_PATH = path.join(ROOT, 'public', 'prepared-phone-material.intent.json');
 const DEFAULT_VIDEO_PATH = path.join(ROOT, 'public', 'prepared-phone-material.mp4');
+const DEFAULT_SCRIPT_PATH = path.join(ROOT, 'public', 'script.txt');
 const DEFAULT_SUBTITLES_PATH = path.join(ROOT, 'src', 'subtitles.json');
 const DEFAULT_VIDEO_META_PATH = path.join(ROOT, 'src', 'video-meta.json');
 const DEFAULT_OUTPUT_PATH = path.join(
@@ -53,6 +58,7 @@ function parseArgs(argv) {
     mode,
     intentPath: path.resolve(parseOption(argv, '--intent') || DEFAULT_INTENT_PATH),
     videoPath: path.resolve(parseOption(argv, '--video') || DEFAULT_VIDEO_PATH),
+    scriptPath: path.resolve(parseOption(argv, '--script') || DEFAULT_SCRIPT_PATH),
     subtitlesPath: path.resolve(parseOption(argv, '--subtitles') || DEFAULT_SUBTITLES_PATH),
     videoMetaPath: path.resolve(parseOption(argv, '--video-meta') || DEFAULT_VIDEO_META_PATH),
     outputPath: path.resolve(parseOption(argv, '--out') || DEFAULT_OUTPUT_PATH),
@@ -120,24 +126,22 @@ function validateIntent(intent) {
     fail('intent_incompatible', 'prepared phone intent 與 Focusstock ready-to-place contract 不符');
 }
 
-function resolveStartSec(placement, subtitles) {
-  const hasStart = placement.startSec != null;
-  const hasAnchor = placement.anchor != null;
-  if (hasStart === hasAnchor) fail('placement_invalid', 'placement 必須二擇一指定 startSec 或 anchor');
-  if (hasStart) {
-    const startSec = Number(placement.startSec);
-    if (!Number.isFinite(startSec) || startSec < 0) fail('placement_invalid', 'startSec 不合法');
-    return startSec;
+function resolvePlacementStart(placement, subtitles, scriptRaw = null) {
+  try {
+    return resolveScriptPlacementStart({ placement, subtitles, scriptRaw, fps: FPS });
+  } catch (error) {
+    if (error instanceof ScriptTimelineResolverError) fail(error.code, error.message);
+    throw error;
   }
-  const index = Number(placement.anchor?.startCharIdx);
-  const timing = Array.isArray(subtitles?._scriptCharTimes)
-    && Number.isInteger(index) && index >= 0 ? subtitles._scriptCharTimes[index] : null;
-  if (!timing || !Number.isFinite(timing.start) || timing.start < 0)
-    fail('placement_anchor_unresolved', 'anchor 無法從 subtitles 解出 timeline 位置');
-  return timing.start;
 }
 
-function compilePreparedPhonePlan({ intent, videoPath, subtitles, videoMeta, inspectedMedia }) {
+function resolveStartSec(placement, subtitles, scriptRaw = null) {
+  return resolvePlacementStart(placement, subtitles, scriptRaw).requestedStartSec;
+}
+
+function compilePreparedPhonePlan({
+  intent, videoPath, scriptRaw = null, subtitles, videoMeta, inspectedMedia,
+}) {
   validateIntent(intent);
   let stat;
   try { stat = fs.lstatSync(videoPath); } catch (_) {}
@@ -153,14 +157,14 @@ function compilePreparedPhonePlan({ intent, videoPath, subtitles, videoMeta, ins
   const heygenDurationSec = Number(videoMeta?.heygenDurationSec);
   if (!Number.isFinite(heygenDurationSec) || heygenDurationSec <= 0)
     fail('timeline_unavailable', 'Focusstock main timeline 時長無法確定');
-  const requestedStartSec = resolveStartSec(intent.placement, subtitles);
-  const startFrame = Math.round(requestedStartSec * FPS);
+  const resolvedStart = resolvePlacementStart(intent.placement, subtitles, scriptRaw);
+  const startFrame = resolvedStart.startFrame;
   const durationInFrames = Math.ceil(inspectedMedia.durationSeconds * FPS);
   const timelineFrames = Math.round(heygenDurationSec * FPS);
   if (startFrame < 0 || startFrame + durationInFrames > timelineFrames)
     fail('placement_out_of_bounds', 'prepared phone clip 無法完整放進 Focusstock main timeline');
   const endFrame = startFrame + durationInFrames;
-  const startSec = Number((startFrame / FPS).toFixed(6));
+  const startSec = resolvedStart.startSec;
   const endSec = Number((endFrame / FPS).toFixed(6));
   return {
     schemaVersion: 1,
@@ -221,11 +225,12 @@ function run(argv = process.argv.slice(2)) {
   }
   try {
     const intent = JSON.parse(fs.readFileSync(args.intentPath, 'utf8'));
+    const scriptRaw = fs.readFileSync(args.scriptPath, 'utf8');
     const subtitles = JSON.parse(fs.readFileSync(args.subtitlesPath, 'utf8'));
     const videoMeta = JSON.parse(fs.readFileSync(args.videoMetaPath, 'utf8'));
     const inspectedMedia = inspectPreparedVideo(args.videoPath);
     const plan = compilePreparedPhonePlan({
-      intent, videoPath: args.videoPath, subtitles, videoMeta, inspectedMedia,
+      intent, videoPath: args.videoPath, scriptRaw, subtitles, videoMeta, inspectedMedia,
     });
     writePlan(args.outputPath, plan);
     return plan;
@@ -253,6 +258,7 @@ module.exports = {
   disabledPlan,
   inspectPreparedVideo,
   parseArgs,
+  resolvePlacementStart,
   resolveStartSec,
   run,
   writePlan,

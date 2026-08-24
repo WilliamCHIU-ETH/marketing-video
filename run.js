@@ -1426,6 +1426,7 @@ function prepareShots() {
     `--mode=${PREPARED_PHONE_MODE}`,
     "--intent=public/prepared-phone-material.intent.json",
     "--video=public/prepared-phone-material.mp4",
+    "--script=public/script.txt",
     "--subtitles=src/subtitles.json",
     "--video-meta=src/video-meta.json",
     "--out=src/Focusstock/prepared-phone-material.generated.json",

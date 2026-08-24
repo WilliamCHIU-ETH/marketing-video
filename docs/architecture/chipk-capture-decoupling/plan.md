@@ -1,6 +1,6 @@
 # Marketing Video × ChipK Capture 解耦計畫
 
-Status: `V1 IMPLEMENTED; V2 READY-TO-PLACE CANDIDATE`
+Status: `V1 IMPLEMENTED; V2 READY-TO-PLACE CONTRACT RELEASED; LIVE E2E NOT YET PROVEN`
 
 Last verified: `2026-08-21 Asia/Taipei`
 

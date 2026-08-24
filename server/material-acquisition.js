@@ -5,12 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { inspectMediaFile } = require('./project-store');
-const {
-  applyVoiceRulesForward,
-  cleanBodyWithIndex,
-  getBodyAfterVoice,
-  parseVoiceRules,
-} = require('../scripts/script-utils');
+const { resolveUniquePhraseAnchor } = require('../scripts/script-timeline-resolver');
 const PROVIDER_LOCK = Object.freeze(require('../config/chipk-capture-provider.lock.json'));
 
 const PROVIDER_ID = PROVIDER_LOCK.providerId;
@@ -142,26 +137,14 @@ function normalizePlacement(value) {
 function resolvePreparedVideoPlacement(intent, scriptRaw) {
   const phrase = intent?.operation === 'prepared-video' && intent.placement?.anchor?.phrase;
   if (!phrase) return intent;
-  if (typeof scriptRaw !== 'string' || !scriptRaw.trim())
-    fail('placement.anchor.phrase requires the current script', 'invalid_material_intent');
-  const body = cleanBodyWithIndex(getBodyAfterVoice(scriptRaw)).map(({ char }) => char).join('');
-  const voicedPhrase = applyVoiceRulesForward(phrase, parseVoiceRules(scriptRaw));
-  const needle = cleanBodyWithIndex(voicedPhrase).map(({ char }) => char).join('');
-  if (!needle)
-    fail('placement.anchor.phrase is empty after script cleaning', 'invalid_material_intent');
-  const matches = [];
-  for (let index = body.indexOf(needle); index >= 0; index = body.indexOf(needle, index + 1)) {
-    matches.push(index);
-    if (matches.length > 1) break;
-  }
-  if (matches.length !== 1)
-    fail(matches.length ? 'placement.anchor.phrase is ambiguous in the cleaned script'
-      : 'placement.anchor.phrase was not found in the cleaned script', 'invalid_material_intent');
+  let resolved;
+  try { resolved = resolveUniquePhraseAnchor({ scriptRaw, phrase }); }
+  catch (error) { fail(error.message, 'invalid_material_intent'); }
   return {
     ...intent,
     placement: {
       layoutId: intent.placement.layoutId,
-      anchor: { phrase, startCharIdx: matches[0] },
+      anchor: { phrase, startCharIdx: resolved.startCharIdx },
     },
   };
 }

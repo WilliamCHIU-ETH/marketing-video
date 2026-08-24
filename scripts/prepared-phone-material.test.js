@@ -26,6 +26,7 @@ const {
   commitPreparedPhoneMaterialSelection,
   finalizePreparedPhoneMaterial,
   focusstockVisualFrameInterval,
+  mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
   validateFocusstockVisualTimelinePlacements,
@@ -39,6 +40,7 @@ const {
   compilePreparedPhonePlan,
   disabledPlan,
   inspectPreparedVideo,
+  resolvePlacementStart,
   run: runPreparedPlanner,
 } = require('./prepared-phone-material-plan');
 
@@ -232,6 +234,30 @@ test('phrase anchor resolves once against the same cleaned script used by subtit
   (error) => error.code === 'invalid_material_intent' && /not found/.test(error.message));
 });
 
+test('canonical phrase resolver maps the phrase start through subtitle time to renderer frame', () => {
+  const scriptRaw = '\n===\n===\n標題\n===\n前言開啟籌碼K線，接著說明。\n';
+  const intent = preparedIntent({
+    layoutId: 'focusstock-phone-portrait.v1', anchor: { phrase: '開啟籌碼K線' },
+  });
+  const resolvedIntent = resolvePreparedVideoPlacement(intent, scriptRaw);
+  assert.equal(resolvedIntent.placement.anchor.startCharIdx, 2,
+    'anchor 必須指向完整 phrase 的第一個字');
+
+  const charTimes = Array.from({ length: 12 }, (_, index) => ({
+    start: Number((1 + index * 0.04).toFixed(2)),
+    end: Number((1.03 + index * 0.04).toFixed(2)),
+  }));
+  const resolvedStart = resolvePlacementStart(
+    resolvedIntent.placement, { _scriptCharTimes: charTimes }, scriptRaw);
+  assert.deepEqual(resolvedStart, {
+    fps: 30,
+    requestedStartSec: 1.08,
+    startFrame: 32,
+    startSec: 1.066667,
+    anchor: { phrase: '開啟籌碼K線', startCharIdx: 2 },
+  });
+});
+
 test('v2 validates the exact five-role bundle and rejects raw-video substitution', (t) => {
   const fx = fixture(t);
   const validated = validateCaptureResult(fx.result, fx.request);
@@ -292,6 +318,7 @@ function compileRuntimePlan(ctx) {
     path.join(publicDirectory, PREPARED_VIDEO_INPUT));
   fs.copyFileSync(path.join(ctx.jobDirectory, 'input', PREPARED_INTENT_INPUT),
     path.join(publicDirectory, PREPARED_INTENT_INPUT));
+  fs.writeFileSync(path.join(publicDirectory, 'script.txt'), 'Synthetic prepared script.\n');
   fs.writeFileSync(path.join(srcDirectory, 'subtitles.json'), '{"_scriptCharTimes":[]}');
   fs.writeFileSync(path.join(srcDirectory, 'video-meta.json'), '{"heygenDurationSec":10}');
   fs.writeFileSync(path.join(srcDirectory, 'Focusstock', 'focusstock-shots.generated.json'), '[]\n');
@@ -299,6 +326,7 @@ function compileRuntimePlan(ctx) {
     '--mode=ready-to-place',
     `--intent=${path.join(publicDirectory, PREPARED_INTENT_INPUT)}`,
     `--video=${path.join(publicDirectory, PREPARED_VIDEO_INPUT)}`,
+    `--script=${path.join(publicDirectory, 'script.txt')}`,
     `--subtitles=${path.join(srcDirectory, 'subtitles.json')}`,
     `--video-meta=${path.join(srcDirectory, 'video-meta.json')}`,
     `--out=${path.join(workspaceRoot, ...PREPARED_PLAN.split('/'))}`,
@@ -738,9 +766,26 @@ test('Focusstock visual timeline placements are an exact evidence-bound retry co
   const evidenceSha256 = hash(JSON.stringify(evidence));
   const expected = buildFocusstockVisualTimelinePlacements(evidence, evidenceSha256);
   const prepared = { kind: 'prepared-phone-video' };
-  const validJob = { timelinePlacements: [...expected, prepared] };
+  const recordedCompositionPlacement = {
+    clipId: 'broll-01', assetRef: 'asset-video-1', assetSha256: 'a'.repeat(64),
+    startSec: 4, endSec: 5, evidenceLevel: 'reconstructed-after-render',
+  };
+  const validJob = {
+    timelinePlacements: [recordedCompositionPlacement, ...expected, prepared],
+  };
   assert.deepEqual(validateFocusstockVisualTimelinePlacements(
     validJob, evidence, evidenceSha256), expected);
+
+  const replacementPrepared = { kind: 'prepared-phone-video', assetRef: 'prepared-new' };
+  assert.deepEqual(mergePreparedPhoneTimelineChannels({
+    existingPlacements: [
+      recordedCompositionPlacement,
+      { ...expected[0], disposition: 'stale' },
+      { kind: 'prepared-phone-video', assetRef: 'prepared-old' },
+    ],
+    focusstockVisualPlacements: expected,
+    preparedPlacement: replacementPrepared,
+  }), [recordedCompositionPlacement, ...expected, replacementPrepared]);
 
   const mutations = [
     { name: 'missing placement', placements: [prepared] },
@@ -932,9 +977,11 @@ test('planner resolves char anchor and rejects any placement that would trim the
     },
   };
   const videoPath = path.join(fx.outputDirectory, 'prepared.mp4');
+  const scriptRaw = '\n===\n===\n標題\n===\n甲乙\n';
   const plan = compilePreparedPhonePlan({
     intent: input,
     videoPath,
+    scriptRaw,
     subtitles: { _scriptCharTimes: [{ start: 0, end: 0.2 }, { start: 3, end: 3.2 }] },
     videoMeta: { heygenDurationSec: 10 },
     inspectedMedia,
@@ -953,7 +1000,7 @@ test('planner resolves char anchor and rejects any placement that would trim the
   });
   assert.throws(() => compilePreparedPhonePlan({
     intent: { ...input, placement: { ...input.placement, anchor: undefined, startSec: 9.5 } },
-    videoPath, subtitles: {}, videoMeta: { heygenDurationSec: 10 }, inspectedMedia,
+    videoPath, scriptRaw, subtitles: {}, videoMeta: { heygenDurationSec: 10 }, inspectedMedia,
   }), (error) => error instanceof PreparedPhonePlanError && error.code === 'placement_out_of_bounds');
   assert.equal(disabledPlan().mode, 'disabled');
   assert.equal(disabledPlan().visualOwnership, null);

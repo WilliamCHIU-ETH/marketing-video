@@ -410,10 +410,25 @@ function validateFocusstockVisualTimelinePlacements(job, evidence, evidenceSha25
   const expected = buildFocusstockVisualTimelinePlacements(evidence, evidenceSha256);
   if (!Array.isArray(job.timelinePlacements))
     fail('Focusstock visual timeline placements are missing', 'placement_compile_failed');
-  const actual = job.timelinePlacements.filter((item) => item?.kind !== 'prepared-phone-video');
+  const actual = job.timelinePlacements.filter((item) =>
+    item?.kind === 'focusstock-shot-run' || item?.channel === 'focusstock-shots');
   if (JSON.stringify(actual) !== JSON.stringify(expected))
     fail('Focusstock visual timeline placements drifted', 'placement_compile_failed');
   return expected;
+}
+
+function mergePreparedPhoneTimelineChannels({
+  existingPlacements = [], focusstockVisualPlacements = [], preparedPlacement,
+}) {
+  if (!Array.isArray(existingPlacements) || !Array.isArray(focusstockVisualPlacements)
+      || !preparedPlacement || preparedPlacement.kind !== 'prepared-phone-video') {
+    fail('Prepared phone timeline merge contract is invalid', 'placement_compile_failed');
+  }
+  const preserved = existingPlacements.filter((item) => item
+    && item.kind !== 'prepared-phone-video'
+    && item.kind !== 'focusstock-shot-run'
+    && item.channel !== 'focusstock-shots');
+  return [...preserved, ...focusstockVisualPlacements, preparedPlacement];
 }
 
 function inspectPreparedVideo(file) {
@@ -1040,6 +1055,7 @@ module.exports = {
   PREPARED_VIDEO_INPUT,
   finalizePreparedPhoneMaterial,
   focusstockVisualFrameInterval,
+  mergePreparedPhoneTimelineChannels,
   nextShotName,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,

@@ -35,6 +35,8 @@ function fixture() {
     ['scripts/heygen-video-title.js', 'module.exports = {};'],
     ['scripts/prepared-phone-material-plan.js', 'module.exports = {};'],
     ['scripts/public-utils.js', 'module.exports = {};'],
+    ['scripts/script-timeline-resolver.js', 'module.exports = {};'],
+    ['scripts/script-utils.js', 'module.exports = {};'],
     ['tsconfig.json', '{"compilerOptions":{"jsx":"react-jsx"}}'],
     ['src/GraphicBrollCard.tsx', 'export const GraphicBrollCard = 1;'],
     ['src/MarketingVideo.tsx', 'export const MarketingVideo = 1;'],
@@ -171,6 +173,8 @@ test('完整 renderer source、launch/config 或 dependency lock 改變都會改
       'scripts/heygen-video-title.js',
       'scripts/prepared-phone-material-plan.js',
       'scripts/public-utils.js',
+      'scripts/script-timeline-resolver.js',
+      'scripts/script-utils.js',
       'tsconfig.json',
     ]) {
       const file = path.join(roots.rendererRoot, relativePath);
