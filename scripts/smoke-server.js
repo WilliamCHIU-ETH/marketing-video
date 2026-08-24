@@ -537,8 +537,11 @@ async function main() {
   const outputSectionEnd = html.indexOf('\n  const canCancel =', outputSectionStart);
   assert.ok(outputSectionStart > 0 && outputSectionEnd > outputSectionStart,
     '必須能獨立檢查完成版成品輸出 UI');
-  assert.doesNotMatch(html.slice(outputSectionStart, outputSectionEnd), /el\('video'/,
-    '成品輸出不得重複建立大型影片播放器');
+  assert.match(html.slice(outputSectionStart, outputSectionEnd),
+    /if \(!hasBrollEvidencePreview\(job\)\)/,
+    '只有沒有 B-roll evidence player 的完成版才顯示 fallback 成片播放器');
+  assert.match(html.slice(outputSectionStart, outputSectionEnd), /el\('video'/,
+    'manual-assets 與 legacy 完成版必須保留頁內成片播放器');
 
   const inlineScript = html.match(/<script>([\s\S]*)<\/script>/);
   assert.ok(inlineScript, '前台必須保留可解析的 inline script');
@@ -548,8 +551,10 @@ async function main() {
   assert.ok(previewGateStart > 0 && previewGateEnd > previewGateStart,
     '必須能獨立驗證 graphic B-roll 成片預覽 evidence gate');
   const previewGates = new Function(
-    `${html.slice(previewGateStart, previewGateEnd)}\nreturn {verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput};`)();
-  const { verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput } = previewGates;
+    `${html.slice(previewGateStart, previewGateEnd)}\nreturn {verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput, hasBrollEvidencePreview};`)();
+  const {
+    verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput, hasBrollEvidencePreview,
+  } = previewGates;
   const previewFixture = {
     status: 'done', pruned: false, workflowMode: 'auto-broll',
     graphicBroll: {
@@ -570,6 +575,8 @@ async function main() {
   };
   const previewFixtureBefore = JSON.stringify(previewFixture);
   assert.equal(verifiedGraphicPreviewOutput(previewFixture), previewFixture.outputs[0]);
+  assert.equal(hasBrollEvidencePreview(previewFixture), true,
+    '已有 verified B-roll player 時不得再顯示 output fallback player');
   assert.equal(JSON.stringify(previewFixture), previewFixtureBefore, '預覽 evidence gate 必須唯讀');
   for (const mutate of [
     (fixture) => { fixture.status = 'review'; },
@@ -621,6 +628,8 @@ async function main() {
   };
   const recordedFixtureBefore = JSON.stringify(recordedFixture);
   assert.equal(recordedCompositionPreviewOutput(recordedFixture), recordedFixture.outputs[0]);
+  assert.equal(hasBrollEvidencePreview(recordedFixture), true,
+    '已有 recorded placement player 時不得再顯示 output fallback player');
   assert.equal(JSON.stringify(recordedFixture), recordedFixtureBefore,
     'placement evidence gate 必須唯讀');
   for (const mutate of [
@@ -636,6 +645,10 @@ async function main() {
     assert.equal(recordedCompositionPreviewOutput(fixture), null,
       '不完整的 Project Asset／placement／Render linkage 不得顯示成片片段');
   }
+  assert.equal(hasBrollEvidencePreview({
+    status: 'done', workflowMode: 'manual-assets',
+    outputs: [{ name: 'output.mp4', size: 123, sha256: 'e'.repeat(64) }],
+  }), false, 'manual-assets 完成版沒有 B-roll evidence player，必須使用 output fallback player');
   const invalidWorkflow = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

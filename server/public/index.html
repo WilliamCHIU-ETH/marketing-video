@@ -265,6 +265,11 @@
   .collapsible-card-summary{margin-left:auto;font-size:12px;font-weight:500;color:var(--dim)}
   .collapsible-card-body{margin-top:16px}
   .output-list{display:flex;flex-direction:column;gap:8px}
+  .output-preview-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;
+    margin-bottom:12px}
+  .output-preview{min-width:0;margin:0}
+  .output-preview video{display:block;width:100%;max-height:520px;object-fit:contain;border-radius:9px;background:#000}
+  .output-preview figcaption{margin-top:6px;color:var(--dim);font-size:11.5px;overflow-wrap:anywhere}
   .output-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);
     border-radius:9px;background:#fff;min-width:0}
   .output-row b{font-size:12.5px;overflow-wrap:anywhere;min-width:0;flex:1}
@@ -1267,6 +1272,10 @@ function recordedCompositionPreviewOutput(job) {
   return output && rendered ? output : null;
 }
 
+function hasBrollEvidencePreview(job) {
+  return Boolean(verifiedGraphicPreviewOutput(job) || recordedCompositionPreviewOutput(job));
+}
+
 function revisionTimeHelp() {
   const id = 'revision-time-help';
   const label = '說明版本時間的定義';
@@ -2021,6 +2030,19 @@ async function loadJob() {
     }
     const body = el('div', { class: 'collapsible-card-body' },
       el('div', { class: 'asset-section-note' }, outputEvidence), outputList);
+    if (!hasBrollEvidencePreview(job)) {
+      const outputPreviews = el('div', { class: 'output-preview-list' });
+      for (const o of job.outputs) {
+        outputPreviews.append(el('figure', { class: 'output-preview' },
+          el('video', {
+            controls: 'controls', preload: 'metadata', playsinline: 'playsinline',
+            src: `/api/jobs/${encodeURIComponent(job.id)}/file/${encodeURIComponent(o.name)}`,
+            'aria-label': `成片預覽：${o.name}`,
+          }),
+          el('figcaption', {}, o.name)));
+      }
+      body.insertBefore(outputPreviews, outputList);
+    }
     if (job.archived && job.archived.length) body.append(
       el('div', { class: 'local-output' },
         el('span', { 'aria-hidden': 'true' }, '✓'),
