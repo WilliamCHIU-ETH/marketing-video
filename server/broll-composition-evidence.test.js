@@ -1,13 +1,17 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const test = require('node:test');
 const { verifyRecordedCompositionEvidence } = require('./broll-composition-evidence');
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
 
 function fixture() {
   const assetSha256 = 'a'.repeat(64);
   const outputSha256 = 'b'.repeat(64);
-  const manifestSha256 = 'c'.repeat(64);
   const placement = {
     clipId: 'broll-01', assetRef: 'asset-video-1', assetSha256,
     startSec: 1, endSec: 2, evidenceLevel: 'reconstructed-after-render',
@@ -16,6 +20,7 @@ function fixture() {
     schemaVersion: 1,
     artifactInputs: [{ path: 'public/broll1.mp4', size: 321, sha256: assetSha256 }],
   };
+  const manifestSha256 = sha256(JSON.stringify(manifest));
   const output = { name: 'output.mp4', size: 123, sha256: outputSha256 };
   const graphicBroll = {
     schemaVersion: 1, mode: 'composition-v1',
@@ -52,9 +57,30 @@ test('verifies composition playback only across Project, Revision and render-inp
   const input = fixture();
   assert.deepEqual(verifyRecordedCompositionEvidence(input), {
     status: 'verified', projectId: 'project-1', revisionId: 'v001',
-    renderInputManifestSha256: 'c'.repeat(64), cardIds: ['broll-01'],
+    renderInputManifestSha256: input.job.renderInputManifestSha256, cardIds: ['broll-01'],
     output: { name: 'output.mp4', size: 123, sha256: 'b'.repeat(64) },
   });
+});
+
+test('fails closed when the stored manifest digest does not match its canonical content', () => {
+  const input = fixture();
+  input.job.renderInputManifestSha256 = 'c'.repeat(64);
+  input.job.renderEvidence.renderInputManifestSha256 = 'c'.repeat(64);
+  input.revision.renderInputManifestSha256 = 'c'.repeat(64);
+  input.revision.renderEvidence.renderInputManifestSha256 = 'c'.repeat(64);
+  assert.equal(verifyRecordedCompositionEvidence(input), null);
+});
+
+test('fails closed when a card has ambiguous duplicate placements', () => {
+  for (const owner of ['job', 'revision']) {
+    const input = fixture();
+    input[owner].timelinePlacements.push({
+      ...input[owner].timelinePlacements[0],
+      startSec: 4,
+      endSec: 5,
+    });
+    assert.equal(verifyRecordedCompositionEvidence(input), null, owner);
+  }
 });
 
 test('fails closed when ownership, selection, placement or render provenance is missing', () => {

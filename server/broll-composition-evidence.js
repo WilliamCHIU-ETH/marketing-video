@@ -1,6 +1,12 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function computeManifestSha256(manifest) {
+  return crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+}
 
 function sameOutput(left, right) {
   return left && right
@@ -45,6 +51,7 @@ function verifyRecordedCompositionEvidence({ job, project, revision }) {
   const renderEvidence = job.renderEvidence;
   if (!SHA256_HEX.test(manifestSha256 || '')
       || !manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.artifactInputs)
+      || manifestSha256 !== computeManifestSha256(manifest)
       || !renderEvidence || renderEvidence.schemaVersion !== 1
       || renderEvidence.renderInputManifestSha256 !== manifestSha256
       || !Array.isArray(renderEvidence.outputs)
@@ -69,11 +76,12 @@ function verifyRecordedCompositionEvidence({ job, project, revision }) {
         || !Number.isSafeInteger(asset.size) || asset.size <= 0) return null;
     if (!manifest.artifactInputs.some((input) => input && input.sha256 === asset.sha256
         && input.size === asset.size)) return null;
-    const jobPlacement = job.timelinePlacements.find((item) => item
+    const jobPlacements = job.timelinePlacements.filter((item) => item
       && (item.clipId === card.id || item.cardId === card.id));
-    const revisionPlacement = revision.timelinePlacements.find((item) => item
+    const revisionPlacements = revision.timelinePlacements.filter((item) => item
       && (item.clipId === card.id || item.cardId === card.id));
-    if (!samePlacement(jobPlacement, revisionPlacement, card)) return null;
+    if (jobPlacements.length !== 1 || revisionPlacements.length !== 1
+        || !samePlacement(jobPlacements[0], revisionPlacements[0], card)) return null;
   }
 
   const jobOutput = (job.outputs || []).find((item) => sameOutput(item, expectedOutput));
