@@ -104,6 +104,7 @@ if (fs.existsSync(VIDEO_META_PATH)) {
   meta = JSON.parse(fs.readFileSync(VIDEO_META_PATH, 'utf-8'));
 }
 meta.headerDate = headerDate;
+meta.headerLabel = '台股晨報';
 
 // ─── 標題寫進 video-meta.json.titleText（給開場卡 TitleCard 用）───
 const scriptParts = scriptRaw.split('===');
