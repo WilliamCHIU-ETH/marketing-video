@@ -73,9 +73,19 @@ Project Assets distinguish `image`, general B-Roll `video`, and `speaker-video`.
 ## Optional ChipK Capture provider
 
 ChipK Simulator acquisition is an optional sibling provider. Its source, skill, route catalog,
-Simulator/session rules, and standalone tests belong in
-`../chipk-simulator-capture/`; read that repository's `AGENTS.md` and Capture skill before changing
-provider behavior. Do not copy provider implementation back into this repository.
+Simulator/session rules, standalone tests, and runtime executable have one canonical location:
+`/Users/chiu/Developer/chipk-simulator-capture`. Read that repository's `AGENTS.md` and
+`.agents/skills/chipk-simulator-capture/SKILL.md` before changing provider behavior; use
+`/Users/chiu/Developer/chipk-simulator-capture/bin/chipk-capture.js` for runtime capability checks
+and its `test/conformance-cli.js` only for synthetic compatibility. Do not copy provider
+implementation back into this repository.
+
+For video material, run the canonical Provider's `capabilities --json` first and prefer an
+advertised Contract v2 `prepared-video` operation with its supported presentation profile. An
+unsupported profile, route, or stock is a coverage gap and must fail closed; never replace it with
+a manual screenshot or raw recording. Provider v0.3.0 does not advertise
+`runReadiness.vipSession=verified_before_mutation`, so live acquire remains prohibited even though
+synthetic/test Contract v2 compatibility is supported.
 
 Marketing Video owns only the `MaterialAcquisitionPort`, CLI/JSON adapter, fallback policy,
 caller-owned job acquisition directory, result verification, Project Asset ingest, and downstream
