@@ -786,15 +786,65 @@ async function main() {
     }),
   });
   assert.equal(preparedPhraseDraft.job.status, 'draft');
+  assert.equal(preparedPhraseDraft.job.skipGenerate, false);
+  assert.equal(preparedPhraseDraft.job.noSpeed, false);
   assert.equal(preparedPhraseDraft.job.materialAcquisition.placement.anchor.phrase,
     '聯一光的主力動向');
   assert.equal(preparedPhraseDraft.job.materialAcquisition.placement.anchor.startCharIdx, 3);
+  await request(base, `/api/jobs/${preparedPhraseDraft.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+  const preparedUploadedSpeaker = await request(base, `/api/jobs/${preparedPhraseDraft.job.id}`);
+  assert.equal(preparedUploadedSpeaker.job.skipGenerate, true);
+  assert.equal(preparedUploadedSpeaker.job.noSpeed, true);
+
+  // Simulate a crash after the authoritative job.json write but before Revision options persisted.
+  // First restart must replay the mismatch; a second ordinary restart must not refresh timestamps.
+  await stopTestServer(child);
+  const preparedDraftRevisionFile = path.join(DATA_DIR, 'projects',
+    preparedPhraseDraft.job.projectId, 'revisions', `${preparedPhraseDraft.job.revisionId}.json`);
+  const driftedPreparedRevision = JSON.parse(fs.readFileSync(preparedDraftRevisionFile, 'utf8'));
+  driftedPreparedRevision.options.skipGenerate = false;
+  driftedPreparedRevision.options.noSpeed = false;
+  driftedPreparedRevision.updatedAt = '2001-01-01T00:00:00.000Z';
+  fs.writeFileSync(preparedDraftRevisionFile, JSON.stringify(driftedPreparedRevision, null, 2));
+  child = startTestServer();
+  const preparedRepairReady = await waitForReady(child);
+  base = `http://127.0.0.1:${preparedRepairReady.port}`;
+  const repairedPreparedRevision = await request(base,
+    `/api/projects/${preparedPhraseDraft.job.projectId}`
+      + `?revision=${preparedPhraseDraft.job.revisionId}`);
+  assert.equal(repairedPreparedRevision.revision.options.skipGenerate, true);
+  assert.equal(repairedPreparedRevision.revision.options.noSpeed, true);
+  assert.notEqual(repairedPreparedRevision.revision.updatedAt,
+    '2001-01-01T00:00:00.000Z');
+  const preparedRepairTimestamps = {
+    project: repairedPreparedRevision.project.updatedAt,
+    revision: repairedPreparedRevision.revision.updatedAt,
+  };
+  await stopTestServer(child);
+  child = startTestServer();
+  const preparedStableReady = await waitForReady(child);
+  base = `http://127.0.0.1:${preparedStableReady.port}`;
+  const stablePreparedRevision = await request(base,
+    `/api/projects/${preparedPhraseDraft.job.projectId}`
+      + `?revision=${preparedPhraseDraft.job.revisionId}`);
+  assert.deepEqual({
+    project: stablePreparedRevision.project.updatedAt,
+    revision: stablePreparedRevision.revision.updatedAt,
+  }, preparedRepairTimestamps);
+
   const preparedShotUpload = await fetch(
     base + `/api/jobs/${preparedPhraseDraft.job.id}/upload?name=shot1.png`, {
       method: 'POST', body: PNG_FIXTURE,
     });
   assert.equal(preparedShotUpload.status, 409);
-  assert.match((await preparedShotUpload.json()).error, /不可再混入/);
+  assert.match((await preparedShotUpload.json()).error, /不支援建立 Run 後再上傳/);
+  const preparedUploadedRevision = await request(base,
+    `/api/projects/${preparedPhraseDraft.job.projectId}`
+      + `?revision=${preparedPhraseDraft.job.revisionId}`);
+  assert.equal(preparedUploadedRevision.revision.options.skipGenerate, true);
+  assert.equal(preparedUploadedRevision.revision.options.noSpeed, true);
   await request(base, `/api/jobs/${preparedPhraseDraft.job.id}/abort`, { method: 'POST' });
 
   const ambiguousPreparedPhrase = await fetch(base + '/api/jobs', {
@@ -815,6 +865,16 @@ async function main() {
   assert.match((await ambiguousPreparedPhrase.json()).error, /ambiguous/);
 
   const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  const runSource = fs.readFileSync(path.join(ROOT, 'run.js'), 'utf8');
+  assert.match(runSource,
+    /PREPARED_PHONE_MODE === "ready-to-place"[\s\S]{0,300}throw new Error\("ready-to-place 圖片 auto-shot 失敗/,
+    'prepared + reused image 的 auto-shot 失敗必須中止，不可被 legacy best-effort catch 吃掉');
+  assert.match(runSource,
+    /PREPARED_PHONE_MODE === "ready-to-place"[\s\S]{0,300}throw new Error\("ready-to-place 圖片分析失敗/,
+    'prepared + reused image 的 OCR 分析失敗不得沿用 stale plan');
+  assert.match(serverSource,
+    /if \(job\.skipGenerate\) args\.push\('--skip-generate'\);[\s\S]{0,160}if \(job\.noSpeed\) args\.push\('--no-speed'\);/,
+    'API-forced speaker byte preservation flags must reach the pipeline command');
   const renderDoneBlock = serverSource.match(
     /transitionJobSafely\(job, \{[\s\S]{0,400}status: 'done',[\s\S]{0,700}\}\);/);
   assert.ok(renderDoneBlock, 'render 完成狀態必須以 durable transition 保存，再交給 cleanup');
@@ -1171,6 +1231,118 @@ async function main() {
   assert.equal(Object.hasOwn(reusableImage, 'path'), false);
   assert.equal(Object.hasOwn(reusableVideo, 'path'), false);
 
+  const preparedSpeakerSeed = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock', title: 'Prepared speaker seed',
+      body: '先建立可沿用的已完成講者 Project Asset。',
+    }),
+  });
+  await request(base, `/api/jobs/${preparedSpeakerSeed.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+  await request(base, `/api/jobs/${preparedSpeakerSeed.job.id}/submit`, { method: 'POST' });
+  const preparedSpeakerProject = await request(
+    base, `/api/projects/${preparedSpeakerSeed.job.projectId}`);
+  const preparedSpeakerAsset = preparedSpeakerProject.project.assets.find(
+    (asset) => asset.kind === 'speaker-video');
+  assert.ok(preparedSpeakerAsset);
+  const preparedWithReusedSpeaker = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: preparedSpeakerSeed.job.projectId,
+      parentRevisionId: preparedSpeakerSeed.job.revisionId,
+      reuseSpeakerAssetId: preparedSpeakerAsset.id,
+      template: 'focusstock', title: 'Prepared 沿用已完成講者',
+      body: '沿用講者時必須保留完全相同的 MP4 bytes。',
+      skipGenerate: false,
+      noSpeed: false,
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: { layoutId: 'focusstock-phone-portrait.v1', startSec: 2 },
+      },
+    }),
+  });
+  assert.equal(preparedWithReusedSpeaker.job.skipGenerate, true);
+  assert.equal(preparedWithReusedSpeaker.job.noSpeed, true);
+  assert.deepEqual(preparedWithReusedSpeaker.job.assetRefs, [preparedSpeakerAsset.id]);
+  assert.deepEqual(fs.readFileSync(path.join(DATA_DIR, 'jobs',
+    preparedWithReusedSpeaker.job.id, 'input', 'heygen.mp4')), MP4_FIXTURE);
+  const preparedReusedQueued = await request(
+    base, `/api/jobs/${preparedWithReusedSpeaker.job.id}/submit`, { method: 'POST' });
+  assert.equal(preparedReusedQueued.job.status, 'queued');
+  assert.equal(preparedReusedQueued.job.skipGenerate, true);
+  assert.equal(preparedReusedQueued.job.noSpeed, true);
+  const preparedReusedRevision = await request(base,
+    `/api/projects/${preparedSpeakerSeed.job.projectId}`
+      + `?revision=${preparedWithReusedSpeaker.job.revisionId}`);
+  assert.equal(preparedReusedRevision.revision.options.skipGenerate, true);
+  assert.equal(preparedReusedRevision.revision.options.noSpeed, true);
+
+  const preparedWithProjectImage = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      reuseAssetIds: [reusableImage.id],
+      template: 'focusstock', title: 'Prepared 搭配既有圖片',
+      body: '先看既有圖片，再看聯一光的主力畫面。',
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: { layoutId: 'focusstock-phone-portrait.v1', startSec: 2 },
+      },
+    }),
+  });
+  assert.deepEqual(preparedWithProjectImage.job.assetRefs, [reusableImage.id]);
+  assert.deepEqual(preparedWithProjectImage.job.focusstockVisualInputs, [{
+    kind: 'image',
+    assetRef: reusableImage.id,
+    inputName: 'shot1.png',
+    sha256: reusableImage.sha256,
+    size: reusableImage.size,
+    mediaType: reusableImage.mediaType,
+  }]);
+  assert.deepEqual(fs.readFileSync(path.join(
+    DATA_DIR, 'jobs', preparedWithProjectImage.job.id, 'input', 'shot1.png')), PNG_FIXTURE);
+  for (const [name, bytes] of [
+    ['shot2.png', ALT_PNG_FIXTURE],
+    ['broll1.mp4', MP4_FIXTURE],
+  ]) {
+    const latePreparedUpload = await fetch(
+      base + `/api/jobs/${preparedWithProjectImage.job.id}/upload?name=${name}`,
+      { method: 'POST', body: bytes });
+    assert.equal(latePreparedUpload.status, 409);
+    assert.match((await latePreparedUpload.json()).error, /不支援建立 Run 後再上傳/);
+  }
+  await request(base, `/api/jobs/${preparedWithProjectImage.job.id}/abort`, { method: 'POST' });
+
+  const beforePreparedVideoReuse = await request(base, `/api/projects/${created.job.projectId}`);
+  const preparedWithGenericVideo = await fetch(base + '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      reuseAssetIds: [reusableVideo.id],
+      template: 'focusstock', title: '不支援的 Prepared B-Roll',
+      body: '一般影片尚未有可驗證 placement。',
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: { layoutId: 'focusstock-phone-portrait.v1', startSec: 2 },
+      },
+    }),
+  });
+  assert.equal(preparedWithGenericVideo.status, 409);
+  assert.match((await preparedWithGenericVideo.json()).error, /尚未支援一般影片 B-Roll placement/);
+  const afterPreparedVideoReuse = await request(base, `/api/projects/${created.job.projectId}`);
+  assert.equal(afterPreparedVideoReuse.project.latestRevision,
+    beforePreparedVideoReuse.project.latestRevision);
+  assert.equal(afterPreparedVideoReuse.project.revisions.length,
+    beforePreparedVideoReuse.project.revisions.length);
+
   const jobsBeforeReuseLimit = await request(base, '/api/jobs');
   const jobDirsBeforeReuseLimit = fs.readdirSync(path.join(DATA_DIR, 'jobs')).sort();
   const projectBeforeReuseLimit = await request(base, `/api/projects/${created.job.projectId}`);
@@ -1425,7 +1597,7 @@ async function main() {
       role: 'prepared-phone-video',
       origin: 'chipk-simulator-capture',
     });
-  const preparedCarryDraft = await request(base, '/api/jobs', {
+  const preparedCarryDraft = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       projectId: created.job.projectId,
@@ -1436,10 +1608,8 @@ async function main() {
       body: '下一版必須重新取得 ready-to-place placement。',
     }),
   });
-  assert.deepEqual(preparedCarryDraft.job.assetRefs, []);
-  assert.equal(fs.existsSync(path.join(
-    DATA_DIR, 'jobs', preparedCarryDraft.job.id, 'input', 'broll1.mp4')), false);
-  await request(base, `/api/jobs/${preparedCarryDraft.job.id}/abort`, { method: 'POST' });
+  assert.equal(preparedCarryDraft.status, 400);
+  assert.match((await preparedCarryDraft.json()).error, /上一版 prepared 手機素材/);
 
   const repeatedSubmit = await fetch(base + `/api/jobs/${id}/submit`, { method: 'POST' });
   assert.equal(repeatedSubmit.status, 409);

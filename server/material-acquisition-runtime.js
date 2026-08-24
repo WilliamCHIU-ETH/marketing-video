@@ -10,6 +10,8 @@ const {
   acquireOptionalMaterial,
   buildCaptureRequest,
 } = require('./material-acquisition');
+const FOCUSSTOCK_VISUAL_TIMING = require(
+  '../src/Focusstock/focusstock-visual-timing.contract.json');
 
 const PREPARED_VIDEO_INPUT = 'prepared-phone-material.mp4';
 const PREPARED_INTENT_INPUT = 'prepared-phone-material.intent.json';
@@ -18,6 +20,10 @@ const PREPARED_PLAN = path.posix.join(
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const PREPARED_FPS = 30;
 const FOCUSSTOCK_MAIN_OFFSET_FRAMES = PREPARED_FPS;
+const FOCUSSTOCK_SHOT_MERGE_GAP_SEC = FOCUSSTOCK_VISUAL_TIMING.mergeGapSec;
+const FOCUSSTOCK_SHOTS = path.posix.join(
+  'src', 'Focusstock', 'focusstock-shots.generated.json');
+const SUBTITLES = path.posix.join('src', 'subtitles.json');
 
 function fail(message, code, details) {
   throw new MaterialAcquisitionError(message, code, details);
@@ -57,6 +63,354 @@ function hashFile(file) {
     } while (count);
   } finally { fs.closeSync(fd); }
   return hash.digest('hex');
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function focusstockVisualFrameInterval(startSec, endSec) {
+  if (FOCUSSTOCK_VISUAL_TIMING.schemaVersion !== 1
+      || FOCUSSTOCK_VISUAL_TIMING.fps !== PREPARED_FPS
+      || FOCUSSTOCK_VISUAL_TIMING.frameInterval?.start
+        !== 'round-start-sec-times-fps'
+      || FOCUSSTOCK_VISUAL_TIMING.frameInterval?.duration
+        !== 'max-one-round-duration-sec-times-fps'
+      || FOCUSSTOCK_VISUAL_TIMING.frameInterval?.semantics !== 'half-open'
+      || !Number.isFinite(startSec) || !Number.isFinite(endSec)
+      || startSec < 0 || endSec <= startSec) {
+    fail('Focusstock visual frame timing contract is invalid', 'placement_compile_failed');
+  }
+  const startFrame = Math.round(startSec * PREPARED_FPS);
+  const durationInFrames = Math.max(
+    1, Math.round((endSec - startSec) * PREPARED_FPS));
+  return {
+    fps: PREPARED_FPS,
+    startFrame,
+    endFrame: startFrame + durationInFrames,
+    durationInFrames,
+  };
+}
+
+function readRegularJson(root, relativePath, label) {
+  const file = path.join(root, ...relativePath.split('/'));
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) {}
+  if (!stat?.isFile() || stat.isSymbolicLink())
+    fail(`${label} is missing or unsafe`, 'placement_compile_failed');
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (_) { fail(`${label} is invalid`, 'placement_compile_failed'); }
+  return { file, value, sha256: hashFile(file) };
+}
+
+function validateBoundVisualFile(root, binding) {
+  const file = path.join(root, 'public', binding.inputName);
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) {}
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.size !== binding.size
+      || hashFile(file) !== binding.sha256) {
+    fail(`Focusstock image bytes drifted: ${binding.inputName}`, 'placement_compile_failed');
+  }
+}
+
+function validatePreparedFocusstockAssetRefs({ job, projectStore, workspaceRoot }) {
+  if (job.materialAcquisition?.operation !== 'prepared-video') return [];
+  const bindings = job.focusstockVisualInputs == null ? [] : job.focusstockVisualInputs;
+  if (!Array.isArray(bindings))
+    fail('Ready-to-place image bindings are invalid', 'placement_compile_failed');
+  if (!Array.isArray(job.assetRefs) || new Set(job.assetRefs).size !== job.assetRefs.length)
+    fail('Ready-to-place Revision assetRefs are invalid', 'placement_compile_failed');
+  const project = projectStore.get(job.projectId);
+  if (!project) fail('Ready-to-place Project is missing', 'placement_compile_failed');
+  const assetsById = new Map((project.assets || []).map((asset) => [asset.id, asset]));
+  const bindingByRef = new Map(bindings.map((binding) => [binding?.assetRef, binding]));
+  if (bindingByRef.size !== bindings.length)
+    fail('Ready-to-place image bindings are duplicated', 'placement_compile_failed');
+  for (const binding of bindings) {
+    const asset = assetsById.get(binding.assetRef);
+    const file = asset && projectStore.assetPath(job.projectId, asset.id);
+    let stat;
+    try { stat = file && fs.lstatSync(file); } catch (_) {}
+    if (!asset || asset.kind !== 'image' || asset.role === 'prepared-phone-video'
+        || asset.sha256 !== binding.sha256 || asset.size !== binding.size
+        || asset.mediaType !== binding.mediaType
+        || !stat?.isFile() || stat.isSymbolicLink() || stat.size !== binding.size
+        || hashFile(file) !== binding.sha256) {
+      fail(`Ready-to-place image asset drifted: ${binding.assetRef}`,
+        'placement_compile_failed');
+    }
+  }
+  const selectedRefs = new Set(job.assetRefs);
+  if (bindings.some((binding) => !selectedRefs.has(binding.assetRef)))
+    fail('Selected images do not match ready-to-place bindings', 'placement_compile_failed');
+  const currentPreparedRef = job.materialAcquisitionResult?.preparedArtifact?.assetRef || null;
+  const speakerRefs = [];
+  for (const assetRef of job.assetRefs) {
+    if (bindingByRef.has(assetRef)) continue;
+    const asset = assetsById.get(assetRef);
+    if (!asset)
+      fail(`Ready-to-place assetRef is outside the Project: ${assetRef}`,
+        'placement_compile_failed');
+    if (assetRef === currentPreparedRef) {
+      if (asset.kind !== 'video' || asset.role !== 'prepared-phone-video'
+          || asset.origin !== 'chipk-simulator-capture') {
+        fail('Current prepared asset identity is invalid', 'placement_compile_failed');
+      }
+      continue;
+    }
+    if (asset.kind === 'speaker-video' && !asset.role && !asset.origin) {
+      speakerRefs.push(assetRef);
+      continue;
+    }
+    fail(`Ready-to-place contains an unbound or unsupported assetRef: ${assetRef}`,
+      'placement_compile_failed');
+  }
+  const committed = job.materialAcquisitionResult?.placementStatus === 'compiled';
+  if ((committed && (!currentPreparedRef || !selectedRefs.has(currentPreparedRef)))
+      || (!committed && currentPreparedRef)) {
+    fail('Prepared assetRef does not match commit state', 'placement_compile_failed');
+  }
+  if (speakerRefs.length !== 1)
+    fail('Ready-to-place requires exactly one speaker asset', 'placement_compile_failed');
+  const speaker = assetsById.get(speakerRefs[0]);
+  const speakerFile = projectStore.assetPath(job.projectId, speaker.id);
+  const publicSpeaker = path.join(workspaceRoot, 'public', 'heygen.mp4');
+  let speakerStat;
+  let publicSpeakerStat;
+  try { speakerStat = fs.lstatSync(speakerFile); } catch (_) {}
+  try { publicSpeakerStat = fs.lstatSync(publicSpeaker); } catch (_) {}
+  if (speaker.mediaType !== 'video/mp4' || !speakerStat?.isFile()
+      || speakerStat.isSymbolicLink() || speakerStat.size !== speaker.size
+      || hashFile(speakerFile) !== speaker.sha256
+      || !publicSpeakerStat?.isFile() || publicSpeakerStat.isSymbolicLink()
+      || publicSpeakerStat.size !== speaker.size
+      || hashFile(publicSpeaker) !== speaker.sha256) {
+    fail('Speaker asset does not match the ready-to-place Render input',
+      'placement_compile_failed');
+  }
+  return bindings;
+}
+
+/**
+ * Rebuild the same Focusstock shot runs consumed by focusstock-timeline.ts. The evidence is derived
+ * from immutable input/hash bindings, the generated shot plan and the exact subtitle char timeline;
+ * no filename or upload alone is allowed to claim a rendered placement.
+ */
+function buildFocusstockVisualConflictEvidence({
+  job,
+  workspaceRoot,
+  preparedPlan,
+  jobDirectory = null,
+}) {
+  if (!workspaceRoot || !preparedPlan?.placement)
+    fail('Focusstock visual evidence is missing its prepared interval', 'placement_compile_failed');
+  const bindings = job.focusstockVisualInputs == null ? [] : job.focusstockVisualInputs;
+  if (!Array.isArray(bindings))
+    fail('Focusstock image input bindings are invalid', 'placement_compile_failed');
+  const bindingByName = new Map();
+  const assetRefs = new Set();
+  for (const binding of bindings) {
+    if (!binding || binding.kind !== 'image' || typeof binding.assetRef !== 'string'
+        || !binding.assetRef || assetRefs.has(binding.assetRef)
+        || typeof binding.inputName !== 'string'
+        || !/^shot\d{1,3}\.(?:png|jpe?g)$/i.test(binding.inputName)
+        || path.basename(binding.inputName) !== binding.inputName
+        || bindingByName.has(binding.inputName)
+        || !SHA256_HEX.test(binding.sha256 || '')
+        || !Number.isSafeInteger(binding.size) || binding.size < 1
+        || !['image/png', 'image/jpeg'].includes(binding.mediaType)) {
+      fail('Focusstock image input binding is invalid', 'placement_compile_failed');
+    }
+    assetRefs.add(binding.assetRef);
+    bindingByName.set(binding.inputName, binding);
+    validateBoundVisualFile(workspaceRoot, binding);
+    if (jobDirectory) {
+      const inputFile = path.join(jobDirectory, 'input', binding.inputName);
+      let stat;
+      try { stat = fs.lstatSync(inputFile); } catch (_) {}
+      if (!stat?.isFile() || stat.isSymbolicLink() || stat.size !== binding.size
+          || hashFile(inputFile) !== binding.sha256) {
+        fail(`Run image input bytes drifted: ${binding.inputName}`, 'placement_compile_failed');
+      }
+    }
+  }
+
+  const publicDirectory = path.join(workspaceRoot, 'public');
+  let publicShotNames = [];
+  try {
+    publicShotNames = fs.readdirSync(publicDirectory)
+      .filter((name) => /^shot\d{1,3}\.(?:png|jpe?g)$/i.test(name)).sort();
+  } catch (_) {
+    fail('Focusstock public image inputs are unavailable', 'placement_compile_failed');
+  }
+  const boundNames = [...bindingByName.keys()].sort();
+  if (JSON.stringify(publicShotNames) !== JSON.stringify(boundNames))
+    fail('Focusstock public images do not match selected Project Assets', 'placement_compile_failed');
+  if (jobDirectory) {
+    const inputDirectory = path.join(jobDirectory, 'input');
+    const inputShotNames = fs.readdirSync(inputDirectory)
+      .filter((name) => /^shot\d{1,3}\.(?:png|jpe?g)$/i.test(name)).sort();
+    if (JSON.stringify(inputShotNames) !== JSON.stringify(boundNames))
+      fail('Run images do not match selected Project Assets', 'placement_compile_failed');
+  }
+
+  const shotPlan = readRegularJson(workspaceRoot, FOCUSSTOCK_SHOTS, 'Focusstock shot plan');
+  const subtitles = readRegularJson(workspaceRoot, SUBTITLES, 'Focusstock subtitles timeline');
+  if (!Array.isArray(shotPlan.value))
+    fail('Focusstock shot plan must be an array', 'placement_compile_failed');
+  const charTimes = subtitles.value?._scriptCharTimes;
+  if (!Array.isArray(charTimes))
+    fail('Focusstock subtitles timeline has no script char times', 'placement_compile_failed');
+
+  const referencedNames = new Set();
+  const resolvedShots = shotPlan.value.map((shot, sourceIndex) => {
+    const binding = shot && bindingByName.get(shot.src);
+    if (!shot || !binding || !Number.isInteger(shot.startCharIdx)
+        || !Number.isInteger(shot.endCharIdx) || shot.startCharIdx < 0
+        || shot.endCharIdx < shot.startCharIdx || shot.endCharIdx >= charTimes.length) {
+      fail('Focusstock shot is unknown or unresolved', 'placement_compile_failed');
+    }
+    const startTime = charTimes[shot.startCharIdx];
+    const endTime = charTimes[shot.endCharIdx];
+    const startSec = startTime?.start;
+    const endSec = endTime?.end;
+    if (!Number.isFinite(startSec) || !Number.isFinite(endSec)
+        || startSec < 0 || endSec <= startSec) {
+      fail('Focusstock shot has an unresolved subtitle interval', 'placement_compile_failed');
+    }
+    referencedNames.add(shot.src);
+    return {
+      sourceIndex,
+      src: shot.src,
+      assetRef: binding.assetRef,
+      inputSha256: binding.sha256,
+      startCharIdx: shot.startCharIdx,
+      endCharIdx: shot.endCharIdx,
+      startSec,
+      endSec,
+    };
+  }).sort((a, b) => a.startSec - b.startSec);
+  if (referencedNames.size !== bindingByName.size
+      || boundNames.some((name) => !referencedNames.has(name))) {
+    fail('Every selected Focusstock image must have a resolved shot', 'placement_compile_failed');
+  }
+
+  // Equivalent to buildShotRuns(..., 2.0): only adjacent same-src shots merge, and the whole
+  // merged run is suppressed if its half-open interval intersects the prepared interval.
+  const runs = [];
+  for (const shot of resolvedShots) {
+    const last = runs[runs.length - 1];
+    if (last && last.src === shot.src
+        && shot.startSec - last.endSec <= FOCUSSTOCK_SHOT_MERGE_GAP_SEC) {
+      last.endSec = shot.endSec;
+      last.sourceShotIndexes.push(shot.sourceIndex);
+    } else {
+      runs.push({
+        src: shot.src,
+        assetRef: shot.assetRef,
+        inputSha256: shot.inputSha256,
+        startSec: shot.startSec,
+        endSec: shot.endSec,
+        sourceShotIndexes: [shot.sourceIndex],
+      });
+    }
+  }
+  const preparedStart = preparedPlan.placement.startSec;
+  const preparedEnd = preparedPlan.placement.endSec;
+  const preparedStartFrame = preparedPlan.placement.startFrame;
+  const preparedEndFrame = preparedPlan.placement.endFrame;
+  if (!Number.isInteger(preparedStartFrame) || !Number.isInteger(preparedEndFrame)
+      || preparedStartFrame < 0 || preparedEndFrame <= preparedStartFrame) {
+    fail('Prepared phone frame interval is invalid', 'placement_compile_failed');
+  }
+  for (const run of runs) {
+    Object.assign(run, focusstockVisualFrameInterval(run.startSec, run.endSec));
+    const overlaps = run.startFrame < preparedEndFrame && run.endFrame > preparedStartFrame;
+    run.disposition = overlaps ? 'suppressed_by_prepared' : 'rendered';
+  }
+  const evidence = {
+    schemaVersion: 1,
+    algorithm: 'focusstock-shot-runs-v1',
+    timelineBasis: 'focusstock-main-v1',
+    mergeGapSec: FOCUSSTOCK_SHOT_MERGE_GAP_SEC,
+    intervalSemantics: 'frame-half-open',
+    preparedInterval: {
+      fps: PREPARED_FPS,
+      startSec: preparedStart,
+      endSec: preparedEnd,
+      startFrame: preparedStartFrame,
+      endFrame: preparedEndFrame,
+    },
+    sources: {
+      shotPlan: { path: FOCUSSTOCK_SHOTS, sha256: shotPlan.sha256 },
+      subtitles: { path: SUBTITLES, sha256: subtitles.sha256 },
+    },
+    inputs: bindings.map((binding) => ({ ...binding })),
+    resolvedShots,
+    runs,
+    counts: {
+      inputs: bindings.length,
+      resolvedShots: resolvedShots.length,
+      runs: runs.length,
+      rendered: runs.filter((run) => run.disposition === 'rendered').length,
+      suppressedByPrepared: runs.filter(
+        (run) => run.disposition === 'suppressed_by_prepared').length,
+    },
+  };
+  return { evidence, sha256: hashJson(evidence) };
+}
+
+function buildFocusstockVisualTimelinePlacements(evidence, evidenceSha256) {
+  if (!evidence || evidence.schemaVersion !== 1
+      || evidence.algorithm !== 'focusstock-shot-runs-v1'
+      || evidence.timelineBasis !== 'focusstock-main-v1'
+      || evidence.intervalSemantics !== 'frame-half-open'
+      || !SHA256_HEX.test(evidenceSha256 || '')
+      || hashJson(evidence) !== evidenceSha256
+      || !Array.isArray(evidence.runs)) {
+    fail('Focusstock visual timeline evidence is invalid', 'placement_compile_failed');
+  }
+  return evidence.runs.map((run) => {
+    if (!run || typeof run.assetRef !== 'string' || !run.assetRef
+        || typeof run.src !== 'string' || !run.src
+        || !SHA256_HEX.test(run.inputSha256 || '')
+        || !['rendered', 'suppressed_by_prepared'].includes(run.disposition)) {
+      fail('Focusstock visual run evidence is invalid', 'placement_compile_failed');
+    }
+    const interval = focusstockVisualFrameInterval(run.startSec, run.endSec);
+    if (run.fps !== interval.fps || run.startFrame !== interval.startFrame
+        || run.endFrame !== interval.endFrame
+        || run.durationInFrames !== interval.durationInFrames) {
+      fail('Focusstock visual run evidence is invalid', 'placement_compile_failed');
+    }
+    return {
+      kind: 'focusstock-shot-run',
+      channel: 'focusstock-shots',
+      assetRef: run.assetRef,
+      inputName: run.src,
+      inputSha256: run.inputSha256,
+      timelineBasis: 'focusstock-main-v1',
+      fps: run.fps,
+      startSec: run.startSec,
+      endSec: run.endSec,
+      startFrame: run.startFrame,
+      endFrame: run.endFrame,
+      durationInFrames: run.durationInFrames,
+      disposition: run.disposition,
+      conflictEvidenceSha256: evidenceSha256,
+    };
+  });
+}
+
+function validateFocusstockVisualTimelinePlacements(job, evidence, evidenceSha256) {
+  const expected = buildFocusstockVisualTimelinePlacements(evidence, evidenceSha256);
+  if (!Array.isArray(job.timelinePlacements))
+    fail('Focusstock visual timeline placements are missing', 'placement_compile_failed');
+  const actual = job.timelinePlacements.filter((item) => item?.kind !== 'prepared-phone-video');
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    fail('Focusstock visual timeline placements drifted', 'placement_compile_failed');
+  return expected;
 }
 
 function inspectPreparedVideo(file) {
@@ -232,17 +586,6 @@ function validateCompiledPreparedPlan({
       || !summary.preparedArtifact || !SHA256_HEX.test(summary.preparedArtifact.sha256 || ''))
     fail('Prepared phone material is not awaiting placement', 'placement_compile_failed');
   const { file: planFile, plan } = readPreparedPlan(workspaceRoot);
-  const focusstockShotsFile = path.join(
-    workspaceRoot, 'src', 'Focusstock', 'focusstock-shots.generated.json');
-  let focusstockShots;
-  try { focusstockShots = JSON.parse(fs.readFileSync(focusstockShotsFile, 'utf8')); }
-  catch (_) {
-    fail('Prepared phone placement requires an explicit empty Focusstock shot plan',
-      'placement_compile_failed');
-  }
-  if (!Array.isArray(focusstockShots) || focusstockShots.length !== 0)
-    fail('Prepared phone placement conflicts with generic Focusstock shots',
-      'placement_compile_failed');
   const placement = plan && plan.placement;
   const source = plan && plan.source;
   const ownership = plan && plan.visualOwnership;
@@ -280,7 +623,10 @@ function validateCompiledPreparedPlan({
   validatePreparedPhonePlacementMath(plan, publicFile);
   if (hashFile(planFile) !== summary.compiledPlanSha256 && summary.compiledPlanSha256)
     fail('Prepared phone placement plan drifted', 'placement_compile_failed');
-  return { plan, planFile, publicFile };
+  const visualEvidence = buildFocusstockVisualConflictEvidence({
+    job, workspaceRoot, preparedPlan: plan, jobDirectory,
+  });
+  return { plan, planFile, publicFile, visualEvidence };
 }
 
 function finalizePreparedPhoneMaterial({
@@ -311,6 +657,8 @@ function finalizePreparedPhoneMaterial({
     fail('Selected Project Asset does not match prepared bytes', 'placement_compile_failed');
   summary.compiledPlanFile = PREPARED_PLAN;
   summary.compiledPlanSha256 = hashFile(validated.planFile);
+  summary.focusstockVisualEvidence = validated.visualEvidence.evidence;
+  summary.focusstockVisualEvidenceSha256 = validated.visualEvidence.sha256;
   summary.placement = validated.plan.placement;
   summary.placementStatus = 'compiled_pending_evidence';
   summary.automaticTimelineUse = false;
@@ -327,6 +675,7 @@ function buildPreparedPhoneTimelinePlacement(job, plan, explicitAssetRef = null)
       || !summary || !['compiled_pending_evidence', 'compiled'].includes(summary.placementStatus)
       || !assetRef
       || !SHA256_HEX.test(summary.compiledPlanSha256 || '')
+      || !SHA256_HEX.test(summary.focusstockVisualEvidenceSha256 || '')
       || plan?.mode !== 'ready-to-place'
       || plan.presentation?.profileId !== job.materialAcquisition.presentation?.profileId
       || !source || source.sha256 !== summary.preparedArtifact.sha256
@@ -357,6 +706,7 @@ function buildPreparedPhoneTimelinePlacement(job, plan, explicitAssetRef = null)
       ((placement.endFrame + FOCUSSTOCK_MAIN_OFFSET_FRAMES) / PREPARED_FPS).toFixed(6)),
     sourceSha256: source.sha256,
     planSha256: summary.compiledPlanSha256,
+    focusstockVisualEvidenceSha256: summary.focusstockVisualEvidenceSha256,
   };
 }
 
@@ -404,7 +754,9 @@ function validatePreparedPhoneProjectAsset({ job, projectStore }) {
       || !assetRef || !job.assetRefs?.includes(assetRef) || placements.length !== 1
       || placements[0].assetRef !== assetRef
       || placements[0].sourceSha256 !== summary.preparedArtifact.sha256
-      || placements[0].planSha256 !== summary.compiledPlanSha256) {
+      || placements[0].planSha256 !== summary.compiledPlanSha256
+      || placements[0].focusstockVisualEvidenceSha256
+        !== summary.focusstockVisualEvidenceSha256) {
     fail('Prepared phone Project Asset selection is incomplete', 'placement_compile_failed');
   }
   const project = projectStore.get(job.projectId);
@@ -675,6 +1027,8 @@ async function prepareJobMaterialAcquisition({
 }
 
 module.exports = {
+  buildFocusstockVisualConflictEvidence,
+  buildFocusstockVisualTimelinePlacements,
   buildPreparedPhoneTimelinePlacement,
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
@@ -686,6 +1040,8 @@ module.exports = {
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
   validateCompiledPreparedPlan,
+  validateFocusstockVisualTimelinePlacements,
   validatePreparedPhonePlacementMath,
+  validatePreparedFocusstockAssetRefs,
   validatePreparedPhoneProjectAsset,
 };
