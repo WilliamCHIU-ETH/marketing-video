@@ -25,12 +25,15 @@ const {
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
   finalizePreparedPhoneMaterial,
+  focusstockVisualFrameInterval,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,
   validateFocusstockVisualTimelinePlacements,
   validatePreparedFocusstockAssetRefs,
   validatePreparedPhoneProjectAsset,
 } = require('../server/material-acquisition-runtime');
+const { halfOpenFrameIntervalsOverlap } = require(
+  '../src/Focusstock/focusstock-half-open');
 const {
   PreparedPhonePlanError,
   compilePreparedPhonePlan,
@@ -679,6 +682,50 @@ test('fractional seconds are suppressed when renderer-rounded frames overlap pre
     durationInFrames: 53,
     disposition: 'suppressed_by_prepared',
   }]);
+});
+
+test('Focusstock custom B-roll uses the same half-open suppression at frame 1616', () => {
+  const priorClip = focusstockVisualFrameInterval(43.8, 53.85);
+  const mainforceGuide = focusstockVisualFrameInterval(53.85, 59.04);
+  const prepared = { startFrame: 1616, endFrame: 1766 };
+  assert.deepEqual(priorClip, {
+    fps: 30,
+    startFrame: 1314,
+    endFrame: 1616,
+    durationInFrames: 302,
+  });
+  assert.deepEqual(mainforceGuide, {
+    fps: 30,
+    startFrame: 1616,
+    endFrame: 1772,
+    durationInFrames: 156,
+  });
+  assert.equal(halfOpenFrameIntervalsOverlap(
+    priorClip.startFrame, priorClip.endFrame, prepared.startFrame, prepared.endFrame), false,
+  'B-roll 06 endpoint only touches prepared start and remains rendered');
+  assert.equal(halfOpenFrameIntervalsOverlap(
+    mainforceGuide.startFrame, mainforceGuide.endFrame,
+    prepared.startFrame, prepared.endFrame), true,
+  '07-mainforce-guide begins at prepared frame 1616 and is suppressed in full');
+
+  const component = fs.readFileSync(path.join(
+    __dirname, '..', 'src', 'Focusstock', 'FocusstockBrollLayer.tsx'), 'utf8');
+  assert.match(component,
+    /!preparedPhoneSuppressesFocusstockVisual\(clip\.startSec, clip\.endSec\)/,
+  'custom B-roll renderer must consume the prepared-phone suppression helper');
+  const composition = fs.readFileSync(path.join(
+    __dirname, '..', 'src', 'Focusstock', 'FocusstockComposition.tsx'), 'utf8');
+  assert.ok(composition.indexOf('<FocusstockBrollLayer />') >= 0);
+  assert.ok(composition.indexOf('<FocusstockBrollLayer />')
+    < composition.indexOf('<PreparedPhoneMaterialLayer />'));
+  const disabledPlan = JSON.parse(fs.readFileSync(path.join(
+    __dirname, '..', 'src', 'Focusstock', 'focusstock-broll.generated.json'), 'utf8'));
+  assert.deepEqual(disabledPlan, {
+    schemaVersion: 1,
+    mode: 'disabled',
+    timelineBasis: 'focusstock-main-v1',
+    clips: [],
+  });
 });
 
 test('Focusstock visual timeline placements are an exact evidence-bound retry contract', (t) => {

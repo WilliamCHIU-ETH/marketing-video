@@ -12,6 +12,8 @@ const {
 } = require('./material-acquisition');
 const FOCUSSTOCK_VISUAL_TIMING = require(
   '../src/Focusstock/focusstock-visual-timing.contract.json');
+const { halfOpenFrameIntervalsOverlap } = require(
+  '../src/Focusstock/focusstock-half-open');
 
 const PREPARED_VIDEO_INPUT = 'prepared-phone-material.mp4';
 const PREPARED_INTENT_INPUT = 'prepared-phone-material.intent.json';
@@ -326,7 +328,8 @@ function buildFocusstockVisualConflictEvidence({
   }
   for (const run of runs) {
     Object.assign(run, focusstockVisualFrameInterval(run.startSec, run.endSec));
-    const overlaps = run.startFrame < preparedEndFrame && run.endFrame > preparedStartFrame;
+    const overlaps = halfOpenFrameIntervalsOverlap(
+      run.startFrame, run.endFrame, preparedStartFrame, preparedEndFrame);
     run.disposition = overlaps ? 'suppressed_by_prepared' : 'rendered';
   }
   const evidence = {
@@ -1036,6 +1039,7 @@ module.exports = {
   PREPARED_PLAN,
   PREPARED_VIDEO_INPUT,
   finalizePreparedPhoneMaterial,
+  focusstockVisualFrameInterval,
   nextShotName,
   prepareJobMaterialAcquisition,
   rollbackPreparedPhoneMaterialSelection,

@@ -8,6 +8,7 @@ import {
 } from 'remotion';
 import generatedPlan from './prepared-phone-material.generated.json';
 import { focusstockVisualFrameInterval } from './focusstock-timeline';
+import { halfOpenFrameIntervalsOverlap } from './focusstock-half-open';
 
 type ReadyPlan = {
   schemaVersion: 1;
@@ -96,8 +97,12 @@ export function preparedPhoneSuppressesFocusstockVisual(startSec: number, endSec
   const plan = readyPlan();
   const interval = focusstockVisualFrameInterval(startSec, endSec);
   return plan !== null
-    && interval.startFrame < plan.placement.endFrame
-    && interval.endFrame > plan.placement.startFrame;
+    && halfOpenFrameIntervalsOverlap(
+      interval.startFrame,
+      interval.endFrame,
+      plan.placement.startFrame,
+      plan.placement.endFrame,
+    );
 }
 
 /**
