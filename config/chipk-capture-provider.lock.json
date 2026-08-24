@@ -6,7 +6,7 @@
   "toolVersion": "0.3.0",
   "release": {
     "tag": "v0.3.0",
-    "commit": null,
-    "status": "pending-provider-release"
+    "commit": "586fbe7414ab0c25d78ae6e462887fe72030e0a7",
+    "status": "released"
   }
 }

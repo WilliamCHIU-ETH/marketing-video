@@ -100,9 +100,9 @@ Project Asset／Revision selection 與 timeline-ready evidence。任何 raw fall
 目前 runtime lock 是 Provider ID `chipk-simulator-capture`、tool version `0.3.0`。舊的
 screenshot／record 仍使用 contract v1；ready-to-place 使用 contract v2，並必須從
 `contractCapabilities` 的 v2 entry 精確選到已支援的 presentation profile 與
-`stockIds: ["3441"]`。`v0.3.0`
-release tag／commit 在 Provider PR 合併與 release-owner review 前仍是 pending；CLI runtime 只驗
-可觀測的 ID／contract／tool version，不宣稱能驗證 Git metadata。
+`stockIds: ["3441"]`。正式 Provider release 為 annotated `v0.3.0`，解參照後固定指向
+`586fbe7414ab0c25d78ae6e462887fe72030e0a7`；CLI runtime 只驗可觀測的
+ID／contract／tool version，不宣稱能在執行時驗證 Git metadata。
 
 ### Agent 預設：把 ChipK 手機畫面放進影片
 

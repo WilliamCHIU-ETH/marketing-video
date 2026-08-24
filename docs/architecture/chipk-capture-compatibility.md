@@ -8,13 +8,13 @@ dependency of this repository.
 
 | Provider ID | Contract | Operations | Tool version | Release identity |
 |---|---:|---|---:|---|
-| `chipk-simulator-capture` | `1` | screenshot, record | `0.3.0` | `v0.3.0` pending |
-| `chipk-simulator-capture` | `2` | prepared-video | `0.3.0` | `v0.3.0` pending |
+| `chipk-simulator-capture` | `1` | screenshot, record | `0.3.0` | `v0.3.0` at `586fbe7414ab0c25d78ae6e462887fe72030e0a7` |
+| `chipk-simulator-capture` | `2` | prepared-video | `0.3.0` | `v0.3.0` at `586fbe7414ab0c25d78ae6e462887fe72030e0a7` |
 
 Top-level capability schema and operations remain v1-compatible. The v2 consumer selects exactly
 one `contractCapabilities` v2 entry and the supported presentation profile, including its closed
-`stockIds: ["3441"]`; it does not infer v2 support from top-level operations. The release tag／commit can be recorded only after the Provider
-release gate; the CLI does not claim to prove Git metadata.
+`stockIds: ["3441"]`; it does not infer v2 support from top-level operations. The lock records the
+immutable Provider release identity after the release gate; the CLI does not claim to prove Git metadata.
 
 `config/chipk-capture-provider.lock.json` is the App-owned runtime lock. A version mismatch is
 handled by the existing policy: `prefer-capture` falls back with
