@@ -89,6 +89,7 @@ const CAPABILITIES = {
     },
   ],
 };
+const PROFILE_CAPABILITY = CAPABILITIES.contractCapabilities[1].presentationProfiles[0];
 
 function preparedIntent(placement = { layoutId: 'focusstock-phone-portrait.v1', startSec: 2 }) {
   return normalizeMaterialAcquisitionIntent({
@@ -113,12 +114,88 @@ function writeBundle(request) {
   }
   const preparedBytes = fs.readFileSync(preparedFile);
   const media = inspectPreparedVideo(preparedFile);
+  const screenshotSha256 = hash(PNG);
+  const capture = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    capturedAt: '2026-08-24T00:00:00.000Z',
+    route: { id: request.target.routeId },
+    parameters: { stockid: request.target.stockId, stockname: request.target.stockName },
+    screenshot: { file: 'screenshot.png', sha256: screenshotSha256 },
+    verification: {
+      expectedTexts: ['主力', request.target.stockId],
+      matchedTexts: ['主力', request.target.stockId],
+      contentTexts: {
+        expected: ['買賣家數差', request.target.stockName],
+        observed: ['買賣家數差', request.target.stockName],
+        missing: [],
+      },
+    },
+    catalogVersion: 'synthetic-ready-to-place-v2',
+  }));
+  const profile = {
+    id: request.presentation.profileId,
+    version: PROFILE_CAPABILITY.version,
+    status: PROFILE_CAPABILITY.status,
+    canonicalSha256: 'a'.repeat(64),
+  };
+  const planValue = {
+    schemaVersion: 1,
+    contractVersion: 2,
+    requestId: request.requestId,
+    operation: 'prepared-video',
+    profile,
+    target: {
+      routeId: request.target.routeId,
+      stockId: request.target.stockId,
+      stockName: request.target.stockName,
+      mode: request.mode,
+    },
+    source: {
+      kind: 'screenshot',
+      file: 'screenshot.png',
+      sha256: screenshotSha256,
+      captureManifest: { file: 'capture-manifest.json', sha256: hash(capture) },
+      width: 1,
+      height: 1,
+    },
+    timeline: { durationSeconds: media.durationSeconds, fps: 30, frameCount: 30 },
+    presentation: { camera: {}, interactions: [] },
+    output: {
+      codec: media.codec, width: media.width, height: media.height,
+      pixelFormat: 'yuv420p', audio: 'none',
+    },
+    canonicalSha256: 'b'.repeat(64),
+  };
+  const plan = Buffer.from(JSON.stringify(planValue));
+  const preparation = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    contractVersion: 2,
+    requestId: request.requestId,
+    status: 'ready_to_place',
+    generatedAt: '2026-08-24T00:00:01.000Z',
+    profile,
+    source: planValue.source,
+    target: planValue.target,
+    presentationPlan: {
+      file: 'presentation-plan.json',
+      sha256: hash(plan),
+      canonicalSha256: planValue.canonicalSha256,
+    },
+    output: {
+      role: 'prepared-video', file: 'prepared.mp4', sha256: hash(preparedBytes),
+      codec: media.codec, width: media.width, height: media.height,
+      durationSeconds: media.durationSeconds, fps: 30,
+      pixelFormat: 'yuv420p', audio: 'none',
+    },
+    tool: { id: 'synthetic', version: '1', ffmpeg: 'synthetic', filterSha256: 'c'.repeat(64) },
+    publication: { strategy: 'staging_directory_atomic_rename', finalDirectory: 'ready-to-place' },
+  }));
   const files = {
     'prepared-video': { name: 'prepared.mp4', bytes: preparedBytes, kind: 'video', mimeType: 'video/mp4', media },
     screenshot: { name: 'screenshot.png', bytes: PNG, kind: 'image', mimeType: 'image/png', media: { width: 1, height: 1 } },
-    'capture-manifest': { name: 'capture-manifest.json', bytes: Buffer.from('{"capture":true}'), kind: 'json', mimeType: 'application/json' },
-    'presentation-plan': { name: 'presentation-plan.json', bytes: Buffer.from('{"profile":"ready"}'), kind: 'json', mimeType: 'application/json' },
-    'preparation-manifest': { name: 'preparation-manifest.json', bytes: Buffer.from('{"prepared":true}'), kind: 'json', mimeType: 'application/json' },
+    'capture-manifest': { name: 'capture-manifest.json', bytes: capture, kind: 'json', mimeType: 'application/json' },
+    'presentation-plan': { name: 'presentation-plan.json', bytes: plan, kind: 'json', mimeType: 'application/json' },
+    'preparation-manifest': { name: 'preparation-manifest.json', bytes: preparation, kind: 'json', mimeType: 'application/json' },
   };
   for (const value of Object.values(files)) {
     const file = path.join(request.outputDirectory, value.name);
@@ -169,6 +246,20 @@ function fixture(t, placement) {
     acquire: async () => result,
   };
   return { root, outputDirectory, intent, request, result, provider };
+}
+
+function mutateJsonArtifact(fx, role, mutate) {
+  const artifact = fx.result.artifacts.find((item) => item.role === role);
+  const file = path.join(fx.outputDirectory, artifact.relativePath);
+  const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  mutate(value);
+  const bytes = Buffer.from(JSON.stringify(value));
+  fs.writeFileSync(file, bytes);
+  return {
+    ...fx.result,
+    artifacts: fx.result.artifacts.map((item) => item.role === role
+      ? { ...item, sha256: hash(bytes) } : item),
+  };
 }
 
 test('v2 request is explicit ready-to-place and never accepts prefer/raw fallback semantics', async (t) => {
@@ -268,7 +359,7 @@ test('canonical phrase resolver maps the phrase start through subtitle time to r
 
 test('v2 validates the exact five-role bundle and rejects raw-video substitution', (t) => {
   const fx = fixture(t);
-  const validated = validateCaptureResult(fx.result, fx.request);
+  const validated = validateCaptureResult(fx.result, fx.request, PROFILE_CAPABILITY);
   assert.deepEqual(validated.artifacts.map((item) => item.role).sort(), [
     'capture-manifest', 'preparation-manifest', 'prepared-video',
     'presentation-plan', 'screenshot',
@@ -278,11 +369,67 @@ test('v2 validates the exact five-role bundle and rejects raw-video substitution
     artifacts: fx.result.artifacts.map((item) => item.role === 'prepared-video'
       ? { ...item, role: 'raw-video' } : item),
   };
-  assert.throws(() => validateCaptureResult(drifted, fx.request),
+  assert.throws(() => validateCaptureResult(drifted, fx.request, PROFILE_CAPABILITY),
     (error) => error.code === 'provider_artifact_invalid');
   assert.throws(() => validateCaptureResult({
     ...fx.result, evidence: { ...fx.result.evidence, synthetic: true },
-  }, fx.request), (error) => error.code === 'provider_evidence_invalid');
+  }, fx.request, PROFILE_CAPABILITY), (error) => error.code === 'provider_evidence_invalid');
+});
+
+test('live prepared-video requires verified VIP readiness before provider acquire', async (t) => {
+  const fx = fixture(t);
+  const request = { ...fx.request, mode: 'live' };
+  let acquireCalls = 0;
+  await assert.rejects(() => acquireOptionalMaterial({
+    policy: 'require-capture',
+    request,
+    provider: {
+      capabilities: async () => CAPABILITIES,
+      acquire: async () => { acquireCalls += 1; return fx.result; },
+    },
+  }), (error) => error.code === 'provider_live_readiness_unverified');
+  assert.equal(acquireCalls, 0);
+});
+
+test('preparation profile version and status match capability, evidence, and plan', async (t) => {
+  const cases = [
+    ['missing version', (profile) => { delete profile.version; }],
+    ['wrong version', (profile) => { profile.version = 2; }],
+    ['missing status', (profile) => { delete profile.status; }],
+    ['wrong status', (profile) => { profile.status = 'draft'; }],
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async (st) => {
+      const fx = fixture(st);
+      const result = mutateJsonArtifact(fx, 'preparation-manifest', (manifest) => {
+        mutate(manifest.profile);
+      });
+      await assert.rejects(() => acquireOptionalMaterial({
+        policy: 'require-capture', request: fx.request,
+        provider: { capabilities: async () => CAPABILITIES, acquire: async () => result },
+      }), (error) => error.code === 'provider_provenance_invalid');
+    });
+  }
+});
+
+test('prepared bundle rejects route, request, and output cross-file drift', async (t) => {
+  const cases = [
+    ['capture route', 'capture-manifest', (manifest) => { manifest.route.id = 'chipk.other'; }],
+    ['plan request', 'presentation-plan', (plan) => { plan.requestId = 'other-request'; }],
+    ['prepared output', 'preparation-manifest', (manifest) => {
+      manifest.output.sha256 = '0'.repeat(64);
+    }],
+  ];
+  for (const [name, role, mutate] of cases) {
+    await t.test(name, async (st) => {
+      const fx = fixture(st);
+      const result = mutateJsonArtifact(fx, role, mutate);
+      await assert.rejects(() => acquireOptionalMaterial({
+        policy: 'require-capture', request: fx.request,
+        provider: { capabilities: async () => CAPABILITIES, acquire: async () => result },
+      }), (error) => error.code === 'provider_provenance_invalid');
+    });
+  }
 });
 
 function runtimeContext(t) {

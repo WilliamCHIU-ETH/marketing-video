@@ -296,7 +296,7 @@ function inspectVideoSpec(file) {
   } catch (_) { return null; }
 }
 
-function validateReadyToPlaceEvidence(evidence, request) {
+function validateReadyToPlaceEvidence(evidence, request, profileCapability) {
   const profile = evidence && evidence.presentationProfile;
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)
       || Object.keys(evidence).length !== READY_EVIDENCE_KEYS.size
@@ -310,10 +310,131 @@ function validateReadyToPlaceEvidence(evidence, request) {
       || Object.keys(profile).length !== READY_PROFILE_EVIDENCE_KEYS.size
       || Object.keys(profile).some((key) => !READY_PROFILE_EVIDENCE_KEYS.has(key))
       || profile.id !== request.presentation?.profileId
-      || profile.version !== 1 || profile.status !== 'ready_to_place'
+      || profile.id !== profileCapability?.id
+      || profile.version !== profileCapability?.version
+      || profile.status !== profileCapability?.status
+      || profile.status !== 'ready_to_place'
       || evidence.publication !== 'atomic_directory_rename') {
     fail('Provider ready-to-place evidence is incomplete or open',
       'provider_evidence_invalid');
+  }
+}
+
+function artifactJson(artifact) {
+  try { return JSON.parse(fs.readFileSync(artifact.absolutePath, 'utf8')); }
+  catch (_) { fail('Provider JSON artifact is invalid', 'provider_mime_mismatch'); }
+}
+
+function validatePreparedBundle(result, request, artifacts, profileCapability) {
+  const roles = Object.fromEntries(artifacts.map((artifact) => [artifact.role, artifact]));
+  const screenshot = roles.screenshot;
+  const video = roles['prepared-video'];
+  const captureArtifact = roles['capture-manifest'];
+  const planArtifact = roles['presentation-plan'];
+  const preparationArtifact = roles['preparation-manifest'];
+  const capture = artifactJson(captureArtifact);
+  const plan = artifactJson(planArtifact);
+  const preparation = artifactJson(preparationArtifact);
+  const evidence = result.evidence;
+  const expectedTexts = capture?.verification?.expectedTexts;
+  const matchedTexts = capture?.verification?.matchedTexts;
+  const contentExpected = capture?.verification?.contentTexts?.expected;
+  const contentObserved = capture?.verification?.contentTexts?.observed;
+  const contentMissing = capture?.verification?.contentTexts?.missing;
+  const screenshotName = path.posix.basename(screenshot.relativePath);
+  const captureName = path.posix.basename(captureArtifact.relativePath);
+  const videoName = path.posix.basename(video.relativePath);
+  const planName = path.posix.basename(planArtifact.relativePath);
+  const profile = evidence.presentationProfile;
+
+  if (capture?.schemaVersion !== 1
+      || capture?.route?.id !== request.target.routeId
+      || String(capture?.parameters?.stockid) !== request.target.stockId
+      || (request.target.stockName !== undefined
+        && capture?.parameters?.stockname !== request.target.stockName)
+      || capture?.screenshot?.file !== screenshotName
+      || capture?.screenshot?.sha256 !== screenshot.sha256
+      || !Array.isArray(expectedTexts) || expectedTexts.length < 1
+      || !Array.isArray(matchedTexts)
+      || expectedTexts.some((text) => !matchedTexts.includes(text))
+      || !Array.isArray(contentExpected) || contentExpected.length < 1
+      || !Array.isArray(contentObserved)
+      || contentExpected.some((text) => !contentObserved.includes(text))
+      || !Array.isArray(contentMissing) || contentMissing.length !== 0
+      || capture?.catalogVersion !== evidence.catalogVersion
+      || plan?.schemaVersion !== 1 || plan?.contractVersion !== request.contractVersion
+      || plan?.requestId !== request.requestId || plan?.operation !== request.operation
+      || plan?.profile?.id !== profileCapability.id
+      || plan?.profile?.id !== profile.id
+      || plan?.profile?.version !== profileCapability.version
+      || plan?.profile?.version !== profile.version
+      || plan?.profile?.status !== profileCapability.status
+      || plan?.profile?.status !== profile.status
+      || !/^[a-f0-9]{64}$/.test(plan?.profile?.canonicalSha256 || '')
+      || plan?.target?.routeId !== request.target.routeId
+      || String(plan?.target?.stockId) !== request.target.stockId
+      || (request.target.stockName !== undefined
+        && plan?.target?.stockName !== request.target.stockName)
+      || plan?.target?.mode !== request.mode
+      || plan?.source?.kind !== 'screenshot'
+      || plan?.source?.file !== screenshotName
+      || plan?.source?.sha256 !== screenshot.sha256
+      || plan?.source?.captureManifest?.file !== captureName
+      || plan?.source?.captureManifest?.sha256 !== captureArtifact.sha256
+      || plan?.source?.width !== screenshot.media.width
+      || plan?.source?.height !== screenshot.media.height
+      || plan?.output?.codec !== video.media.codec
+      || plan?.output?.width !== video.media.width
+      || plan?.output?.height !== video.media.height
+      || plan?.output?.pixelFormat !== 'yuv420p'
+      || plan?.output?.audio !== 'none'
+      || plan?.timeline?.durationSeconds !== video.media.durationSeconds
+      || !Number.isInteger(plan?.timeline?.fps) || plan.timeline.fps < 1
+      || plan?.timeline?.frameCount !== plan.timeline.durationSeconds * plan.timeline.fps
+      || !/^[a-f0-9]{64}$/.test(plan?.canonicalSha256 || '')
+      || preparation?.schemaVersion !== 1
+      || preparation?.contractVersion !== request.contractVersion
+      || preparation?.requestId !== request.requestId
+      || preparation?.status !== 'ready_to_place'
+      || preparation?.profile?.id !== profileCapability.id
+      || preparation?.profile?.id !== profile.id
+      || preparation?.profile?.id !== plan.profile.id
+      || preparation?.profile?.version !== profileCapability.version
+      || preparation?.profile?.version !== profile.version
+      || preparation?.profile?.version !== plan.profile.version
+      || preparation?.profile?.status !== profileCapability.status
+      || preparation?.profile?.status !== profile.status
+      || preparation?.profile?.status !== plan.profile.status
+      || preparation?.profile?.canonicalSha256 !== plan.profile.canonicalSha256
+      || preparation?.source?.kind !== plan.source.kind
+      || preparation?.source?.file !== screenshotName
+      || preparation?.source?.sha256 !== screenshot.sha256
+      || preparation?.source?.captureManifest?.file !== captureName
+      || preparation?.source?.captureManifest?.sha256 !== captureArtifact.sha256
+      || preparation?.source?.width !== plan.source.width
+      || preparation?.source?.height !== plan.source.height
+      || preparation?.target?.routeId !== request.target.routeId
+      || String(preparation?.target?.stockId) !== request.target.stockId
+      || (request.target.stockName !== undefined
+        && preparation?.target?.stockName !== request.target.stockName)
+      || preparation?.target?.mode !== request.mode
+      || preparation?.presentationPlan?.file !== planName
+      || preparation?.presentationPlan?.sha256 !== planArtifact.sha256
+      || preparation?.presentationPlan?.canonicalSha256 !== plan.canonicalSha256
+      || preparation?.output?.role !== 'prepared-video'
+      || preparation?.output?.file !== videoName
+      || preparation?.output?.sha256 !== video.sha256
+      || preparation?.output?.codec !== video.media.codec
+      || preparation?.output?.width !== video.media.width
+      || preparation?.output?.height !== video.media.height
+      || preparation?.output?.durationSeconds !== video.media.durationSeconds
+      || preparation?.output?.fps !== plan.timeline.fps
+      || preparation?.output?.pixelFormat !== plan.output.pixelFormat
+      || preparation?.output?.audio !== plan.output.audio
+      || preparation?.publication?.strategy !== 'staging_directory_atomic_rename'
+      || preparation?.publication?.finalDirectory !== 'ready-to-place') {
+    fail('Provider ready-to-place provenance is inconsistent',
+      'provider_provenance_invalid');
   }
 }
 
@@ -355,7 +476,7 @@ function validateMediaDescriptor(artifact, file) {
     fail('Provider video media spec does not match', 'provider_media_mismatch');
 }
 
-function validateCaptureResult(result, request) {
+function validateCaptureResult(result, request, profileCapability = null) {
   if (!result || typeof result !== 'object' || Array.isArray(result)
       || result.contractVersion !== request.contractVersion || result.requestId !== request.requestId
       || !result.provider || result.provider.id !== PROVIDER_ID
@@ -389,7 +510,7 @@ function validateCaptureResult(result, request) {
     return { result, artifacts: [] };
   }
   if (request.contractVersion === READY_TO_PLACE_CONTRACT_VERSION)
-    validateReadyToPlaceEvidence(result.evidence, request);
+    validateReadyToPlaceEvidence(result.evidence, request, profileCapability);
   const required = REQUIRED_ROLES[request.operation];
   if (!required || result.artifacts.length !== required.length)
     fail('Provider returned the wrong artifact set', 'provider_artifact_set_invalid');
@@ -415,6 +536,8 @@ function validateCaptureResult(result, request) {
   });
   if (required.some((role) => !seen.has(role)))
     fail('Provider artifact set is incomplete', 'provider_artifact_set_invalid');
+  if (request.contractVersion === READY_TO_PLACE_CONTRACT_VERSION)
+    validatePreparedBundle(result, request, artifacts, profileCapability);
   return { result, artifacts };
 }
 
@@ -423,7 +546,10 @@ function findContractCapability(capabilities, request) {
     if (capabilities?.schemaVersion !== LEGACY_CONTRACT_VERSION
         || !Array.isArray(capabilities?.operations)
         || !capabilities.operations.includes(request.operation)) return null;
-    return { contractVersion: LEGACY_CONTRACT_VERSION, operations: capabilities.operations };
+    return {
+      entry: { contractVersion: LEGACY_CONTRACT_VERSION, operations: capabilities.operations },
+      profile: null,
+    };
   }
   if (request.contractVersion !== READY_TO_PLACE_CONTRACT_VERSION
       || !Array.isArray(capabilities?.contractCapabilities)) return null;
@@ -445,7 +571,7 @@ function findContractCapability(capabilities, request) {
       || !profile.routeIds.includes(request.target.routeId)
       || !Array.isArray(profile.stockIds) || profile.stockIds.length !== 1
       || profile.stockIds[0] !== request.target.stockId) return null;
-  return entry;
+  return { entry, profile };
 }
 
 async function fallbackResult(fallback, request, reason, provider = null) {
@@ -485,6 +611,7 @@ async function acquireOptionalMaterial({
   }
   const providerId = capabilities?.providerId || null;
   let readinessCode = null;
+  let contractCapability = null;
   if (capabilities?.schemaVersion !== LEGACY_CONTRACT_VERSION || providerId !== PROVIDER_ID
       || typeof capabilities?.toolVersion !== 'string' || !capabilities.toolVersion.trim())
     readinessCode = 'provider_contract_incompatible';
@@ -492,8 +619,12 @@ async function acquireOptionalMaterial({
     readinessCode = 'provider_version_incompatible';
   else if (capabilities?.productionReady !== true)
     readinessCode = 'provider_not_production_ready';
-  else if (!findContractCapability(capabilities, request))
+  else if (!(contractCapability = findContractCapability(capabilities, request)))
     readinessCode = 'provider_operation_unsupported';
+  else if (request.contractVersion === READY_TO_PLACE_CONTRACT_VERSION
+      && request.mode === 'live'
+      && capabilities?.runReadiness?.vipSession !== 'verified_before_mutation')
+    readinessCode = 'provider_live_readiness_unverified';
   if (readinessCode) {
     if (selectedPolicy === 'require-capture')
       fail('Required material provider is not ready', readinessCode, { providerId });
@@ -501,7 +632,7 @@ async function acquireOptionalMaterial({
   }
   try {
     const rawResult = await provider.acquire(request);
-    const validated = validateCaptureResult(rawResult, request);
+    const validated = validateCaptureResult(rawResult, request, contractCapability.profile);
     if (rawResult.status !== 'completed')
       fail('Material provider did not complete the request',
         rawResult.error?.code || `provider_${rawResult.status}`, { status: rawResult.status });

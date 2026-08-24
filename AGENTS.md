@@ -77,9 +77,10 @@ evidence; it is not an editable raw recording.
 ## Optional ChipK Capture provider
 
 ChipK Simulator acquisition is an optional sibling provider. Its source, skill, route catalog,
-Simulator/session rules, and standalone tests belong in
-`../chipk-simulator-capture/`; read that repository's `AGENTS.md` and Capture skill before changing
-provider behavior. Do not copy provider implementation back into this repository.
+Simulator/session rules, standalone tests, and runtime executable have one canonical location:
+`/Users/chiu/Developer/chipk-simulator-capture`. Read that repository's `AGENTS.md` and
+`.agents/skills/chipk-simulator-capture/SKILL.md` before changing provider behavior. Do not copy
+provider implementation back into this repository.
 
 Marketing Video owns only the `MaterialAcquisitionPort`, CLI/JSON adapter, fallback policy,
 caller-owned job acquisition directory, result verification, Project Asset ingest, and the scene
@@ -101,6 +102,11 @@ that declared slice, including `withAd: true`, fail closed rather than being sil
 A placement should normally use a unique phrase from the current script; the server resolves it with
 the same cleaner as subtitle alignment. Never calculate `startCharIdx` from the raw API body, and use
 `startSec` only when the user explicitly supplies the timing.
+Before any prepared-video acquisition, run the canonical Provider's `capabilities --json` and use
+only advertised profile／route／stock coverage. Provider v0.3.0 does not advertise
+`runReadiness.vipSession=verified_before_mutation`, so live acquire is prohibited and the App must
+fail closed before calling the Provider. Synthetic conformance remains allowed; do not bypass this
+gate or replace an unsupported/live request with screenshot or raw recording.
 A later Revision must reacquire this ready-to-place intent and placement; never carry the previous
 `prepared-phone-video` forward as general B-Roll.
 The current Focusstock slice may also select existing image assets owned by the same Project in the

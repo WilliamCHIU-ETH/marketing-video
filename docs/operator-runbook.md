@@ -104,6 +104,11 @@ screenshot／record 仍使用 contract v1；ready-to-place 使用 contract v2，
 `586fbe7414ab0c25d78ae6e462887fe72030e0a7`；CLI runtime 只驗可觀測的
 ID／contract／tool version，不宣稱能在執行時驗證 Git metadata。
 
+v0.3.0 尚未廣告 `runReadiness.vipSession=verified_before_mutation`。因此目前只允許
+capabilities／preflight／synthetic conformance；`mode=live` prepared-video 會在呼叫 Provider
+acquire 前以 `provider_live_readiness_unverified` fail closed。不得把 active
+`CHIPK_CAPTURE_BIN` 指向此版本執行 live acquire，也不得降級成 screenshot／raw recording。
+
 ### Agent 預設：把 ChipK 手機畫面放進影片
 
 使用者只描述「把 ChipK 的某個手機畫面放進影片」時，Agent 預設要形成
@@ -112,7 +117,8 @@ B-Roll 再人工剪輯。這條路徑一律 `require-capture`；Provider／profi
 任一條件不成立就停止，不 fallback 成 raw 或既有圖片。
 
 第一個已支援的垂直切片是 Focusstock workflow 的「聯一光 3441 主力頁」。
-Agent 呼叫 `POST /api/jobs` 時使用下列 shape（標題與講稿仍由當次影片提供）：
+以下是 live cutover gate 未來解除後的正式 shape（標題與講稿仍由當次影片提供）；目前
+v0.3.0 不得送出此 live acquisition：
 
 ```json
 {
