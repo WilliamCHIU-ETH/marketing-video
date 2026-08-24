@@ -990,6 +990,73 @@ test('compaction rollback preserves nested binary artifacts with the same basena
     ctx.jobDirectory, 'acquisition', '.compacted-binary')), false);
 });
 
+test('interrupted compaction restores staged binaries before a safe retry', async (t) => {
+  for (const movedCount of [1, 2]) {
+    await t.test(`${movedCount} staged binary artifact(s)`, async (st) => {
+      const ctx = runtimeContext(st);
+      const summary = await prepareJobMaterialAcquisition(ctx.options);
+      const compiled = compileRuntimePlan(ctx);
+      const selected = finalizePreparedPhoneMaterial({
+        job: ctx.job,
+        jobDirectory: ctx.jobDirectory,
+        workspaceRoot: compiled.workspaceRoot,
+        publicDirectory: compiled.publicDirectory,
+        projectStore: ctx.projectStore,
+      });
+      ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
+        job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+      })];
+      ctx.job.status = 'done';
+      ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
+      ctx.job.renderEvidence = {
+        schemaVersion: 1,
+        renderInputManifestSha256: ctx.job.renderInputManifestSha256,
+      };
+
+      const before = JSON.parse(JSON.stringify(summary.artifacts));
+      const binaries = before.filter(({ role }) =>
+        role === 'prepared-video' || role === 'screenshot');
+      const trash = path.join(ctx.jobDirectory, 'acquisition', '.compacted-binary');
+      fs.mkdirSync(trash, { mode: 0o700 });
+      for (const artifact of binaries.slice(0, movedCount)) {
+        fs.renameSync(
+          path.join(ctx.jobDirectory, artifact.evidenceFile),
+          path.join(trash, `${artifact.role}-${artifact.sha256}`));
+      }
+
+      let saveAttempts = 0;
+      assert.throws(() => compactPreparedPhoneAcquisition({
+        job: ctx.job,
+        jobDirectory: ctx.jobDirectory,
+        projectStore: ctx.projectStore,
+        saveJob: () => {
+          saveAttempts += 1;
+          throw new Error('synthetic persistence failure after recovery');
+        },
+        nowISO: () => '2026-08-24T00:00:02.000Z',
+      }), /synthetic persistence failure after recovery/);
+      assert.equal(saveAttempts, 1, 'recovered evidence must reach a fresh durable save attempt');
+      assert.deepEqual(summary.artifacts, before);
+      for (const artifact of binaries) {
+        const restored = path.join(ctx.jobDirectory, artifact.evidenceFile);
+        assert.equal(fs.existsSync(restored), true, `${artifact.role} must be restored`);
+        assert.equal(hash(fs.readFileSync(restored)), artifact.sha256);
+      }
+      assert.equal(fs.existsSync(trash), false);
+
+      const compacted = compactPreparedPhoneAcquisition({
+        job: ctx.job,
+        jobDirectory: ctx.jobDirectory,
+        projectStore: ctx.projectStore,
+        saveJob: ctx.options.saveJob,
+        nowISO: () => '2026-08-24T00:00:03.000Z',
+      });
+      assert.equal(compacted.compacted, true);
+      assert.equal(summary.acquisitionRetention.status, 'sidecars_only');
+    });
+  }
+});
+
 test('hash drift after compile fails closed before Project Asset ingest', async (t) => {
   const ctx = runtimeContext(t);
   await prepareJobMaterialAcquisition(ctx.options);

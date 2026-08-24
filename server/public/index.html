@@ -1652,6 +1652,9 @@ function preparedPhoneEvidenceCard(job) {
       + `（主段 ${placement.startSec.toFixed(2)}s–${placement.endSec.toFixed(2)}s）`
       + `・${placement.durationInFrames} frames・1x・靜音・contain`
     : `目前狀態：${result?.placementStatus || result?.status || '等待 Capture'}`;
+  const processing = evidence
+    ? 'Capture 已完成；Marketing Video 只放置，不重剪'
+    : '等待 Capture／placement 證據；Marketing Video 尚未放置';
   return el('div', { class: 'card' },
     el('div', { class: 'asset-section-head' },
       el('h2', {}, '手機畫面 placement'),
@@ -1663,7 +1666,7 @@ function preparedPhoneEvidenceCard(job) {
       el('div', { class: 'composition-item' }, el('b', {}, 'Timeline placement'),
         el('span', {}, detail)),
       el('div', { class: 'composition-item' }, el('b', {}, '手機內容處理'),
-        el('span', {}, 'Capture 已完成；Marketing Video 只放置，不重剪'))),
+        el('span', {}, processing))),
     evidence ? el('details', { class: 'technical-details' },
       el('summary', {}, '查看 source／plan／render linkage'),
       el('code', {}, `source ${evidence.sourceSha256}\nplan ${evidence.planSha256}`

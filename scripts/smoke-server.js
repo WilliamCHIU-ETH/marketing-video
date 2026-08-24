@@ -738,6 +738,32 @@ async function main() {
       '不完整或不相符的 prepared evidence 不得宣稱已配置 timeline');
   }
 
+  const preparedCardStart = preparedGateEnd + 1;
+  const preparedCardEnd = html.indexOf('\nfunction automationStageCard(job)', preparedCardStart);
+  assert.ok(preparedCardEnd > preparedCardStart,
+    '必須能獨立驗證 ready-to-place evidence card wording');
+  const preparedPhoneEvidenceCard = new Function(
+    'verifiedPreparedPhoneTimelineEvidence', 'el',
+    `${html.slice(preparedCardStart, preparedCardEnd)}\nreturn preparedPhoneEvidenceCard;`)(
+    verifiedPreparedPhoneTimelineEvidence,
+    (tag, props, ...children) => ({ tag, props, children }));
+  const verifiedPreparedCard = JSON.stringify(preparedPhoneEvidenceCard(preparedFixture));
+  assert.match(verifiedPreparedCard, /Capture 已完成/,
+    '只有完整 verified evidence 可以宣稱 Capture 已完成');
+  for (const mutate of [
+    (fixture) => { delete fixture.materialAcquisitionResult; },
+    (fixture) => { fixture.materialAcquisitionResult = { status: 'failed' }; },
+    (fixture) => { fixture.materialAcquisitionResult.placementStatus = 'pending_compile'; },
+  ]) {
+    const unverifiedPreparedFixture = JSON.parse(JSON.stringify(preparedFixture));
+    mutate(unverifiedPreparedFixture);
+    const unverifiedPreparedCard = JSON.stringify(
+      preparedPhoneEvidenceCard(unverifiedPreparedFixture));
+    assert.doesNotMatch(unverifiedPreparedCard, /Capture 已完成/,
+      'draft／acquisition failure／compile failure 不得宣稱 Capture 已完成');
+    assert.match(unverifiedPreparedCard, /等待 Capture／placement 證據/);
+  }
+
   const invalidWorkflow = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -802,6 +802,121 @@ function validatePreparedPhoneProjectAsset({ job, projectStore }) {
   return { asset, assetFile, placement: placements[0] };
 }
 
+function acquisitionLedgerPath(jobRoot, relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath.startsWith('acquisition/')
+      || relativePath.includes('\\') || path.posix.normalize(relativePath) !== relativePath) {
+    fail('Prepared acquisition evidence path is unsafe', 'acquisition_compaction_failed');
+  }
+  const absolute = path.resolve(jobRoot, ...relativePath.split('/'));
+  const relative = path.relative(jobRoot, absolute);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`))
+    fail('Prepared acquisition evidence path is unsafe', 'acquisition_compaction_failed');
+  return absolute;
+}
+
+function verifyCompactionArtifactFile(file, artifact, acquisitionRoot, label) {
+  let stat;
+  let real;
+  try {
+    stat = fs.lstatSync(file);
+    real = fs.realpathSync(file);
+  } catch (_) {}
+  const relative = real && path.relative(acquisitionRoot, real);
+  if (!stat?.isFile() || stat.isSymbolicLink() || !real || relative === '..'
+      || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+      || stat.size !== artifact.size || hashFile(file) !== artifact.sha256) {
+    fail(`${label} is missing, unsafe, or changed`, 'acquisition_compaction_failed');
+  }
+  return stat;
+}
+
+function recoverInterruptedPreparedPhoneCompaction({
+  artifacts,
+  jobRoot,
+  acquisitionRoot,
+  trash,
+}) {
+  if (!fs.existsSync(trash)) return false;
+  let trashStat;
+  try { trashStat = fs.lstatSync(trash); } catch (_) {}
+  if (!trashStat?.isDirectory() || trashStat.isSymbolicLink()
+      || fs.realpathSync(trash) !== trash) {
+    fail('Prepared acquisition compaction staging is unsafe',
+      'acquisition_compaction_failed');
+  }
+
+  const binaries = artifacts.filter(({ role }) =>
+    role === 'prepared-video' || role === 'screenshot');
+  const stagedByName = new Map();
+  for (const artifact of binaries) {
+    if (!Number.isSafeInteger(artifact.size) || artifact.size < 1
+        || !SHA256_HEX.test(artifact.sha256 || '')) {
+      fail('Prepared acquisition binary ledger is invalid',
+        'acquisition_compaction_failed');
+    }
+    stagedByName.set(`${artifact.role}-${artifact.sha256}`, artifact);
+  }
+  const entries = fs.readdirSync(trash, { withFileTypes: true });
+  if (entries.some((entry) => !stagedByName.has(entry.name)
+      || !entry.isFile() || entry.isSymbolicLink())) {
+    fail('Prepared acquisition compaction staging is ambiguous',
+      'acquisition_compaction_failed');
+  }
+
+  for (const artifact of binaries) {
+    const original = acquisitionLedgerPath(jobRoot, artifact.evidenceFile);
+    const staged = path.join(trash, `${artifact.role}-${artifact.sha256}`);
+    let originalStat;
+    let stagedStat;
+    try { originalStat = fs.lstatSync(original); } catch (_) {}
+    try { stagedStat = fs.lstatSync(staged); } catch (_) {}
+    if (originalStat && stagedStat) {
+      fail('Prepared acquisition compaction recovery found duplicate evidence',
+        'acquisition_compaction_failed');
+    }
+    if (!originalStat && !stagedStat) {
+      fail('Prepared acquisition compaction recovery evidence is missing',
+        'acquisition_compaction_failed');
+    }
+    if (originalStat) {
+      verifyCompactionArtifactFile(original, artifact, acquisitionRoot,
+        'Prepared acquisition evidence file');
+      continue;
+    }
+    verifyCompactionArtifactFile(staged, artifact, acquisitionRoot,
+      'Prepared acquisition staged evidence file');
+    const parent = path.dirname(original);
+    let parentStat;
+    let realParent;
+    try {
+      parentStat = fs.lstatSync(parent);
+      realParent = fs.realpathSync(parent);
+    } catch (_) {}
+    const relativeParent = realParent && path.relative(acquisitionRoot, realParent);
+    if (!parentStat?.isDirectory() || parentStat.isSymbolicLink() || !realParent
+        || relativeParent === '..' || relativeParent.startsWith(`..${path.sep}`)
+        || path.isAbsolute(relativeParent)) {
+      fail('Prepared acquisition evidence directory is unsafe',
+        'acquisition_compaction_failed');
+    }
+    try { fs.renameSync(staged, original); }
+    catch (_) {
+      fail('Prepared acquisition compaction recovery could not restore evidence',
+        'acquisition_compaction_failed');
+    }
+  }
+  if (fs.readdirSync(trash).length !== 0) {
+    fail('Prepared acquisition compaction recovery left ambiguous evidence',
+      'acquisition_compaction_failed');
+  }
+  try { fs.rmdirSync(trash); }
+  catch (_) {
+    fail('Prepared acquisition compaction recovery could not clear staging',
+      'acquisition_compaction_failed');
+  }
+  return true;
+}
+
 function compactPreparedPhoneAcquisition({
   job,
   jobDirectory,
@@ -848,16 +963,18 @@ function compactPreparedPhoneAcquisition({
   const acquisitionRoot = fs.realpathSync(path.join(jobDirectory, 'acquisition'));
   if (path.relative(jobRoot, acquisitionRoot).startsWith('..'))
     fail('Prepared acquisition directory escaped its Run', 'acquisition_compaction_failed');
+  const trash = path.join(acquisitionRoot, '.compacted-binary');
+  recoverInterruptedPreparedPhoneCompaction({
+    artifacts: summary.artifacts,
+    jobRoot,
+    acquisitionRoot,
+    trash,
+  });
   const resolveEvidence = (relativePath) => {
-    if (typeof relativePath !== 'string' || !relativePath.startsWith('acquisition/')
-        || relativePath.includes('\\') || path.posix.normalize(relativePath) !== relativePath)
-      fail('Prepared acquisition evidence path is unsafe', 'acquisition_compaction_failed');
-    const absolute = path.resolve(jobRoot, ...relativePath.split('/'));
-    const relative = path.relative(jobRoot, absolute);
+    const absolute = acquisitionLedgerPath(jobRoot, relativePath);
     let stat;
     try { stat = fs.lstatSync(absolute); } catch (_) {}
-    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`)
-        || !stat?.isFile() || stat.isSymbolicLink())
+    if (!stat?.isFile() || stat.isSymbolicLink())
       fail('Prepared acquisition evidence file is unavailable', 'acquisition_compaction_failed');
     return { absolute, stat };
   };
@@ -877,7 +994,6 @@ function compactPreparedPhoneAcquisition({
 
   const binary = evidenceLedger.filter(({ artifact }) =>
     artifact.role === 'prepared-video' || artifact.role === 'screenshot');
-  const trash = path.join(acquisitionRoot, '.compacted-binary');
   if (fs.existsSync(trash))
     fail('Prepared acquisition compaction staging already exists', 'acquisition_compaction_failed');
   fs.mkdirSync(trash, { mode: 0o700 });

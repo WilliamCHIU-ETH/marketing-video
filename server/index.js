@@ -2376,11 +2376,16 @@ async function doRender(job) {
   job.stage = 'rendering';
   saveJob(job);
 
-  restoreWorkspace(job);
   if (job.pendingEdits && job.pendingEdits.length) {
     applyPlanEdits(job, job.pendingEdits);
+    // The review UI edits the immutable Run snapshot. Rebuild every derived placement and render
+    // input identity from those reviewed bytes before restoring them into the shared renderer.
+    // Otherwise the supported pause-before-render flow compares a new plan to its old manifest and
+    // fails closed even though the edit itself was valid.
+    captureAutomationEvidence(job);
     appendLog(job, `\n✏️  已套用 ${job.corrections ? job.corrections.length : 0} 項人工修正\n`);
   }
+  restoreWorkspace(job);
   verifyRestoredRenderInput(job);
   if (job.cancelRequestedAt) throw cancelledRunError(job);
 
