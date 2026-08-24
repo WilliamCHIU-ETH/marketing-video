@@ -1705,6 +1705,17 @@ async function main() {
       skipGenerate: true,
     }),
   });
+  const reviewHandoff = await request(base, '/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock',
+      owner: 'smoke-review-handoff',
+      title: 'Review target restart handoff',
+      body: 'Journal 已清理、render intent 尚未建立時必須仍可重啟。',
+      skipGenerate: true,
+    }),
+  });
 
   await stopTestServer(child);
   const recoverySentinel = '2001-01-01T00:00:00.000Z';
@@ -1738,6 +1749,27 @@ async function main() {
   recoveryRevisionJson.updatedAt = recoverySentinel;
   fs.writeFileSync(recoveryRevisionFile, JSON.stringify(recoveryRevisionJson, null, 2));
 
+  // Exact crash point after a committed review target removes its marker, but before runPipeline
+  // persists the rendering token. The durable handoff must remain approved, never generic-failed.
+  const handoffJobFile = path.join(DATA_DIR, 'jobs', reviewHandoff.job.id, 'job.json');
+  const handoffJobJson = JSON.parse(fs.readFileSync(handoffJobFile, 'utf8'));
+  Object.assign(handoffJobJson, {
+    status: 'approved', stage: 'ready-to-render', pendingEdits: [], error: null,
+  });
+  fs.writeFileSync(handoffJobFile, JSON.stringify(handoffJobJson, null, 2));
+  assert.equal(fs.existsSync(path.join(
+    path.dirname(handoffJobFile), 'review-edit-transaction.json')), false);
+  const handoffProjectFile = path.join(
+    DATA_DIR, 'projects', reviewHandoff.job.projectId, 'project.json');
+  const handoffProjectJson = JSON.parse(fs.readFileSync(handoffProjectFile, 'utf8'));
+  handoffProjectJson.revisions[0].status = 'approved';
+  fs.writeFileSync(handoffProjectFile, JSON.stringify(handoffProjectJson, null, 2));
+  const handoffRevisionFile = path.join(DATA_DIR, 'projects', reviewHandoff.job.projectId,
+    'revisions', `${reviewHandoff.job.revisionId}.json`);
+  const handoffRevisionJson = JSON.parse(fs.readFileSync(handoffRevisionFile, 'utf8'));
+  Object.assign(handoffRevisionJson, { status: 'approved', stage: 'ready-to-render' });
+  fs.writeFileSync(handoffRevisionFile, JSON.stringify(handoffRevisionJson, null, 2));
+
   child = startTestServer();
   const restartReady = await waitForReady(child);
   base = `http://127.0.0.1:${restartReady.port}`;
@@ -1759,6 +1791,12 @@ async function main() {
   assert.equal(recoveredProject.project.revisions[0].status, 'failed');
   assert.notEqual(recoveredProject.project.updatedAt, recoverySentinel);
   assert.equal(recoveredProject.project.updatedAt, recoveredProject.revision.updatedAt);
+  const restartedHandoff = await request(base, `/api/jobs/${reviewHandoff.job.id}`);
+  const restartedHandoffProject = await request(base,
+    `/api/projects/${reviewHandoff.job.projectId}?revision=${reviewHandoff.job.revisionId}`);
+  assert.equal(restartedHandoff.job.status, 'approved');
+  assert.equal(restartedHandoff.job.stage, 'ready-to-render');
+  assert.equal(restartedHandoffProject.revision.status, 'approved');
   const recoveredTimestamps = timestampState(recoveredProject);
 
   // Recovery 只發生一次；第二次一般 restart 不得再刷新 Project／Revision 時間。

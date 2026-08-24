@@ -19,15 +19,21 @@ const {
   PREPARED_INTENT_INPUT,
   PREPARED_PLAN,
   PREPARED_VIDEO_INPUT,
+  REVIEW_EDIT_TRANSACTION,
+  beginPreparedPhoneReviewEditTransaction,
   buildFocusstockVisualConflictEvidence,
   buildFocusstockVisualTimelinePlacements,
   buildPreparedPhoneTimelinePlacement,
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
+  compileReviewedFocusstockVisualEvidence,
   finalizePreparedPhoneMaterial,
+  finalizePreparedPhoneReviewEditTransaction,
   focusstockVisualFrameInterval,
   mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
+  recordPreparedPhoneReviewEditCommitIntent,
+  recoverPreparedPhoneReviewEditTransaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
@@ -378,7 +384,8 @@ function completeCompactionEvidence(ctx) {
 
 function bindReusableFocusstockImage(ctx, compiled, inputName = 'shot1.png') {
   const source = path.join(ctx.root, `${inputName}.source.png`);
-  fs.writeFileSync(source, PNG);
+  const bytes = inputName === 'shot1.png' ? PNG : ALT_PNG;
+  fs.writeFileSync(source, bytes);
   const asset = ctx.projectStore.ingestAsset(ctx.project.id, source, {
     originalName: inputName,
     kind: 'image',
@@ -388,7 +395,7 @@ function bindReusableFocusstockImage(ctx, compiled, inputName = 'shot1.png') {
   fs.copyFileSync(path.join(ctx.jobDirectory, 'input', inputName),
     path.join(compiled.publicDirectory, inputName));
   ctx.job.assetRefs.push(asset.id);
-  ctx.job.focusstockVisualInputs = [{
+  ctx.job.focusstockVisualInputs = [...(ctx.job.focusstockVisualInputs || []), {
     kind: 'image',
     assetRef: asset.id,
     inputName,
@@ -452,6 +459,204 @@ function conflictEvidenceFixture(t, { images, shots, charTimes, placement }) {
     },
   }).evidence;
 }
+
+function reviewEditTransactionFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'prepared-review-transaction-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const jobDirectory = path.join(root, 'job-review');
+  const planFile = path.join(
+    jobDirectory, 'state', 'src', 'Focusstock', 'focusstock-shots.generated.json');
+  fs.mkdirSync(path.dirname(planFile), { recursive: true });
+  const baselinePlan = Buffer.from('[{"src":"shot1.png","startCharIdx":0,"endCharIdx":1}]\n');
+  fs.writeFileSync(planFile, baselinePlan);
+  const job = {
+    id: 'job-review',
+    assetRefs: ['asset-image', 'asset-speaker', 'asset-prepared'],
+    focusstockVisualInputs: [{
+      kind: 'image', assetRef: 'asset-image', inputName: 'shot1.png',
+      sha256: 'a'.repeat(64), size: 10, mediaType: 'image/png',
+    }],
+    materialAcquisitionResult: {
+      placementStatus: 'compiled', automaticTimelineUse: true,
+      preparedArtifact: { assetRef: 'asset-prepared', sha256: 'b'.repeat(64), size: 20 },
+      placement: { startFrame: 60, endFrame: 90 },
+      focusstockVisualEvidence: { version: 'baseline' },
+      focusstockVisualEvidenceSha256: 'c'.repeat(64),
+    },
+    graphicBroll: { mode: 'disabled', planSha256: 'd'.repeat(64) },
+    timelinePlacements: [{ kind: 'focusstock-shot-run', version: 'baseline' }],
+    renderInputManifest: { schemaVersion: 1, version: 'baseline' },
+    renderInputManifestSha256: 'e'.repeat(64),
+    outputs: [],
+    renderEvidence: null,
+    pendingEdits: [{ i: 0, src: 'shot2.png' }],
+  };
+  const revision = {
+    projectId: 'project-review', jobId: job.id, runId: job.id,
+    ...JSON.parse(JSON.stringify(job)),
+  };
+  delete revision.pendingEdits;
+  const writeJob = () => fs.writeFileSync(
+    path.join(jobDirectory, 'job.json'), `${JSON.stringify(job, null, 2)}\n`);
+  const syncRevision = () => {
+    for (const key of [
+      'assetRefs', 'focusstockVisualInputs', 'materialAcquisitionResult', 'graphicBroll',
+      'timelinePlacements', 'renderInputManifest', 'renderInputManifestSha256',
+      'outputs', 'renderEvidence',
+    ]) revision[key] = JSON.parse(JSON.stringify(job[key]));
+  };
+  const applyTarget = () => {
+    fs.writeFileSync(planFile,
+      '[{"src":"shot2.png","startCharIdx":4,"endCharIdx":5}]\n');
+    job.materialAcquisitionResult.focusstockVisualEvidence = { version: 'target' };
+    job.materialAcquisitionResult.focusstockVisualEvidenceSha256 = 'f'.repeat(64);
+    job.timelinePlacements = [{ kind: 'focusstock-shot-run', version: 'target' }];
+    job.renderInputManifest = { schemaVersion: 1, version: 'target' };
+    job.renderInputManifestSha256 = '1'.repeat(64);
+  };
+  writeJob();
+  return {
+    root, jobDirectory, planFile, baselinePlan, job, revision,
+    writeJob, syncRevision, applyTarget,
+  };
+}
+
+test('review edit crash before commit restores exact plan and the same Run can retry', (t) => {
+  const ctx = reviewEditTransactionFixture(t);
+  const first = beginPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  const marker = path.join(ctx.jobDirectory, REVIEW_EDIT_TRANSACTION);
+  assert.equal(fs.existsSync(marker), true);
+  assert.equal(path.dirname(marker), ctx.jobDirectory,
+    'transaction journal stays outside the render state snapshot');
+
+  fs.writeFileSync(ctx.planFile, '{"partially-written":');
+  const recovered = recoverPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  assert.deepEqual(recovered, {
+    action: 'baseline_restored', transactionId: first.transactionId,
+  });
+  assert.deepEqual(fs.readFileSync(ctx.planFile), ctx.baselinePlan);
+  assert.deepEqual(ctx.job.pendingEdits, [{ i: 0, src: 'shot2.png' }]);
+  ctx.writeJob();
+  ctx.syncRevision();
+  assert.equal(finalizePreparedPhoneReviewEditTransaction({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    revision: ctx.revision,
+    transactionId: first.transactionId,
+    expected: 'baseline',
+  }), true);
+  assert.equal(fs.existsSync(marker), false);
+
+  const retry = beginPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  assert.notEqual(retry.transactionId, first.transactionId);
+  ctx.applyTarget();
+  ctx.job.outputs = [{ name: 'unexpected-output.mp4' }];
+  assert.throws(() => recordPreparedPhoneReviewEditCommitIntent({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, transactionId: retry.transactionId,
+  }), (error) => error.code === 'review_edit_transaction_invalid');
+  assert.deepEqual(ctx.job.pendingEdits, [{ i: 0, src: 'shot2.png' }],
+    'failed commit-intent validation restores the baseline edits');
+  ctx.job.outputs = [];
+  recordPreparedPhoneReviewEditCommitIntent({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, transactionId: retry.transactionId,
+  });
+  assert.deepEqual(ctx.job.pendingEdits, [],
+    'pending edits clear only when commit intent becomes durable');
+  ctx.writeJob();
+  ctx.syncRevision();
+  assert.equal(finalizePreparedPhoneReviewEditTransaction({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    revision: ctx.revision,
+    transactionId: retry.transactionId,
+    expected: 'target',
+  }), true, 'the same Run can durably commit a later retry');
+});
+
+test('job-first save failure rolls mixed durable evidence back to the baseline', (t) => {
+  const ctx = reviewEditTransactionFixture(t);
+  const transaction = beginPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  ctx.applyTarget();
+  recordPreparedPhoneReviewEditCommitIntent({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, transactionId: transaction.transactionId,
+  });
+  const injectedSave = () => {
+    ctx.writeJob();
+    throw new Error('injected Revision save failure');
+  };
+  assert.throws(injectedSave, /injected Revision save failure/);
+  const recovered = recoverPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  assert.equal(recovered.action, 'baseline_restored');
+  assert.deepEqual(fs.readFileSync(ctx.planFile), ctx.baselinePlan);
+  assert.equal(ctx.job.renderInputManifest.version, 'baseline');
+  assert.deepEqual(ctx.job.pendingEdits, [{ i: 0, src: 'shot2.png' }]);
+  ctx.writeJob();
+  ctx.syncRevision();
+  assert.equal(finalizePreparedPhoneReviewEditTransaction({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    revision: ctx.revision,
+    transactionId: transaction.transactionId,
+    expected: 'baseline',
+  }), true);
+});
+
+test('crash recovery confirms only an exact fully durable review edit commit', (t) => {
+  const ctx = reviewEditTransactionFixture(t);
+  const transaction = beginPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  });
+  ctx.applyTarget();
+  recordPreparedPhoneReviewEditCommitIntent({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, transactionId: transaction.transactionId,
+  });
+  ctx.writeJob();
+  ctx.syncRevision();
+  assert.deepEqual(recoverPreparedPhoneReviewEditTransaction({
+    job: ctx.job, jobDirectory: ctx.jobDirectory, revision: ctx.revision,
+  }), { action: 'commit_confirmed', transactionId: transaction.transactionId });
+  assert.equal(ctx.job.renderInputManifest.version, 'target');
+  assert.equal(finalizePreparedPhoneReviewEditTransaction({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    revision: ctx.revision,
+    transactionId: transaction.transactionId,
+    expected: 'target',
+  }), true);
+
+  const ambiguous = reviewEditTransactionFixture(t);
+  const ambiguousTransaction = beginPreparedPhoneReviewEditTransaction({
+    job: ambiguous.job,
+    jobDirectory: ambiguous.jobDirectory,
+    revision: ambiguous.revision,
+  });
+  ambiguous.applyTarget();
+  recordPreparedPhoneReviewEditCommitIntent({
+    job: ambiguous.job,
+    jobDirectory: ambiguous.jobDirectory,
+    transactionId: ambiguousTransaction.transactionId,
+  });
+  ambiguous.job.renderInputManifest = { schemaVersion: 1, version: 'unknown-third-state' };
+  ambiguous.writeJob();
+  assert.throws(() => recoverPreparedPhoneReviewEditTransaction({
+    job: ambiguous.job,
+    jobDirectory: ambiguous.jobDirectory,
+    revision: ambiguous.revision,
+  }), (error) => error.code === 'review_edit_transaction_ambiguous');
+  assert.equal(fs.existsSync(path.join(
+    ambiguous.jobDirectory, REVIEW_EDIT_TRANSACTION)), true,
+  'ambiguous evidence keeps the journal and never guesses cleanup');
+});
 
 test('Project Asset and Revision selection happen only after placement compiles', async (t) => {
   const ctx = runtimeContext(t);
@@ -588,6 +793,103 @@ test('resolved same-Project image runs are accepted and whole overlapping runs a
   assert.equal(validatePreparedPhoneProjectAsset({
     job: ctx.job, projectStore: ctx.projectStore,
   }).asset.id, selected.asset.id);
+});
+
+test('reviewed image, timing, and deletion edits compile new exact visual evidence', async (t) => {
+  const ctx = runtimeContext(t);
+  await prepareJobMaterialAcquisition(ctx.options);
+  const compiled = compileRuntimePlan(ctx);
+  const firstImage = bindReusableFocusstockImage(ctx, compiled, 'shot1.png');
+  const secondImage = bindReusableFocusstockImage(ctx, compiled, 'shot2.png');
+  const speaker = bindSpeakerVideo(ctx, compiled);
+  const charTimes = [
+    { start: 0, end: 0.2 }, { start: 0.3, end: 0.5 },
+    { start: 1, end: 1.2 }, { start: 1.3, end: 1.5 },
+    { start: 2, end: 2.2 }, { start: 2.3, end: 2.5 },
+    { start: 4, end: 4.2 }, { start: 4.3, end: 4.5 },
+  ];
+  writeFocusstockShotEvidence(compiled, [
+    { src: 'shot1.png', startCharIdx: 0, endCharIdx: 1 },
+    { src: 'shot2.png', startCharIdx: 4, endCharIdx: 5 },
+  ], charTimes);
+  const selected = finalizePreparedPhoneMaterial({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    workspaceRoot: compiled.workspaceRoot,
+    publicDirectory: compiled.publicDirectory,
+    projectStore: ctx.projectStore,
+  });
+  const initialEvidence = ctx.job.materialAcquisitionResult.focusstockVisualEvidence;
+  const initialEvidenceSha256 = ctx.job.materialAcquisitionResult.focusstockVisualEvidenceSha256;
+  const initialPreparedPlacement = commitPreparedPhoneMaterialSelection({
+    job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+  });
+  const initialVisualPlacements = buildFocusstockVisualTimelinePlacements(
+    initialEvidence, initialEvidenceSha256);
+  ctx.job.timelinePlacements = [...initialVisualPlacements, initialPreparedPlacement];
+  assert.doesNotThrow(() => validatePreparedFocusstockAssetRefs({
+    job: ctx.job, projectStore: ctx.projectStore, workspaceRoot: compiled.workspaceRoot,
+  }));
+
+  // One reviewed transaction changes shot1 -> shot2, moves its subtitle range, and deletes the
+  // prior shot2 segment. Both selected images remain exact inputs even though shot1 is now unused.
+  writeFocusstockShotEvidence(compiled,
+    [{ src: 'shot2.png', startCharIdx: 6, endCharIdx: 7 }], charTimes);
+  const recompiled = compileReviewedFocusstockVisualEvidence({
+    job: ctx.job, workspaceRoot: compiled.workspaceRoot, preparedPlan: selected.plan,
+  });
+  assert.notEqual(recompiled.sha256, initialEvidenceSha256);
+  assert.equal(recompiled.evidence.counts.inputs, 2);
+  assert.equal(recompiled.evidence.counts.resolvedShots, 1);
+  assert.deepEqual(recompiled.evidence.runs.map((run) => ({
+    src: run.src,
+    assetRef: run.assetRef,
+    startSec: run.startSec,
+    endSec: run.endSec,
+    disposition: run.disposition,
+  })), [{
+    src: 'shot2.png',
+    assetRef: secondImage.id,
+    startSec: 4,
+    endSec: 4.5,
+    disposition: 'rendered',
+  }]);
+  ctx.job.materialAcquisitionResult.focusstockVisualEvidence = recompiled.evidence;
+  ctx.job.materialAcquisitionResult.focusstockVisualEvidenceSha256 = recompiled.sha256;
+  const reviewedVisualPlacements = buildFocusstockVisualTimelinePlacements(
+    recompiled.evidence, recompiled.sha256);
+  const reviewedPreparedPlacement = buildPreparedPhoneTimelinePlacement(ctx.job, selected.plan);
+  ctx.job.timelinePlacements = [...reviewedVisualPlacements, reviewedPreparedPlacement];
+  assert.deepEqual(validateFocusstockVisualTimelinePlacements(
+    ctx.job, recompiled.evidence, recompiled.sha256), reviewedVisualPlacements);
+  assert.equal(validatePreparedPhoneProjectAsset({
+    job: ctx.job, projectStore: ctx.projectStore,
+  }).asset.id, selected.asset.id);
+  assert.deepEqual(new Set(ctx.job.assetRefs),
+    new Set([firstImage.id, secondImage.id, speaker.id, selected.asset.id]));
+  assert.throws(() => validateFocusstockVisualTimelinePlacements(
+    { timelinePlacements: [...initialVisualPlacements, reviewedPreparedPlacement] },
+    recompiled.evidence,
+    recompiled.sha256,
+  ), (error) => error.code === 'placement_compile_failed',
+  'the pre-review timeline is stale after evidence recompiles');
+
+  const authenticEvidence = ctx.job.materialAcquisitionResult.focusstockVisualEvidence;
+  ctx.job.materialAcquisitionResult.focusstockVisualEvidence = {
+    ...authenticEvidence,
+    counts: { ...authenticEvidence.counts, runs: authenticEvidence.counts.runs + 1 },
+  };
+  assert.throws(() => compileReviewedFocusstockVisualEvidence({
+    job: ctx.job, workspaceRoot: compiled.workspaceRoot, preparedPlan: selected.plan,
+  }), (error) => error.code === 'placement_compile_failed',
+  'tampered recorded evidence cannot become a recompile baseline');
+  ctx.job.materialAcquisitionResult.focusstockVisualEvidence = authenticEvidence;
+
+  fs.appendFileSync(path.join(compiled.publicDirectory, 'shot1.png'), Buffer.from('drift'));
+  assert.throws(() => compileReviewedFocusstockVisualEvidence({
+    job: ctx.job, workspaceRoot: compiled.workspaceRoot, preparedPlan: selected.plan,
+  }), (error) => error.code === 'placement_compile_failed',
+  'even an unused selected image keeps exact byte identity');
 });
 
 test('ready-to-place assetRefs allow only bound images, exact speaker, and current prepared asset', async (t) => {
@@ -853,17 +1155,12 @@ test('Focusstock visual timeline placements are an exact evidence-bound retry co
   }
 });
 
-test('unknown, unselected, unresolved or stale Focusstock image plans fail closed', async (t) => {
+test('unknown, unresolved or stale Focusstock image plans fail closed', async (t) => {
   const scenarios = [
     {
       name: 'unknown source',
       shots: [{ src: 'shot2.png', startCharIdx: 0, endCharIdx: 0 }],
       times: [{ start: 0, end: 0.5 }],
-    },
-    {
-      name: 'selected image is unplaced',
-      shots: [],
-      times: [],
     },
     {
       name: 'unresolved char index',
@@ -893,6 +1190,21 @@ test('unknown, unselected, unresolved or stale Focusstock image plans fail close
       }), (error) => error.code === 'placement_compile_failed');
     });
   }
+
+  await t.test('initially selected image is unplaced', async (st) => {
+    const ctx = runtimeContext(st);
+    await prepareJobMaterialAcquisition(ctx.options);
+    const compiled = compileRuntimePlan(ctx);
+    bindReusableFocusstockImage(ctx, compiled);
+    writeFocusstockShotEvidence(compiled, [], []);
+    assert.throws(() => finalizePreparedPhoneMaterial({
+      job: ctx.job,
+      jobDirectory: ctx.jobDirectory,
+      workspaceRoot: compiled.workspaceRoot,
+      publicDirectory: compiled.publicDirectory,
+      projectStore: ctx.projectStore,
+    }), (error) => error.code === 'placement_compile_failed');
+  });
 
   await t.test('bound bytes drift', async (st) => {
     const ctx = runtimeContext(st);

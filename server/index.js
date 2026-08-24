@@ -44,14 +44,20 @@ const {
 } = require('./material-acquisition');
 const {
   PREPARED_PLAN,
+  REVIEW_EDIT_TRANSACTION,
+  beginPreparedPhoneReviewEditTransaction,
   buildFocusstockVisualConflictEvidence,
   buildFocusstockVisualTimelinePlacements,
   buildPreparedPhoneTimelinePlacement,
+  compileReviewedFocusstockVisualEvidence,
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
   finalizePreparedPhoneMaterial,
+  finalizePreparedPhoneReviewEditTransaction,
   mergePreparedPhoneTimelineChannels,
   prepareJobMaterialAcquisition,
+  recordPreparedPhoneReviewEditCommitIntent,
+  recoverPreparedPhoneReviewEditTransaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
@@ -446,6 +452,18 @@ function revisionOptionsFromJob(job) {
   };
 }
 
+function preparedReviewRevision(job) {
+  const revision = job.projectId && job.revisionId
+    ? PROJECT_STORE.getRevision(job.projectId, job.revisionId) : null;
+  if (!revision || revision.projectId !== job.projectId
+      || revision.jobId !== job.id || revision.runId !== job.id) {
+    const error = new Error('review edit 的 Project／Revision ownership 不一致');
+    error.code = 'review_edit_transaction_ambiguous';
+    throw error;
+  }
+  return revision;
+}
+
 function revisionNeedsJobSync(job) {
   if (!job.projectId || !job.revisionId) return false;
   if (!['draft', 'queued', 'review', 'done', 'failed', 'cancelled', 'detached-done']
@@ -504,6 +522,7 @@ function revisionNeedsJobSync(job) {
 function loadJobs() {
   const out = [];
   const recovered = [];
+  const reviewTransactions = [];
   for (const entry of fs.readdirSync(JOBS_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
     const id = entry.name;
@@ -511,6 +530,40 @@ function loadJobs() {
       const j = JSON.parse(fs.readFileSync(jobFile(id), 'utf-8'));
       if (j.id !== id) continue;
       let recoveryChanged = false;
+      try {
+        if (fs.existsSync(path.join(jobDir(j.id), REVIEW_EDIT_TRANSACTION))) {
+          const outcome = recoverPreparedPhoneReviewEditTransaction({
+            job: j,
+            jobDirectory: jobDir(j.id),
+            revision: preparedReviewRevision(j),
+          });
+          const committed = outcome.action === 'commit_confirmed';
+          j.status = committed ? 'approved' : 'review';
+          j.stage = committed ? 'ready-to-render' : 'awaiting-audit';
+          j.error = committed ? null
+            : '上次人工修改在提交完成前中止；已恢復修改前版本，可用同一 Run 重新確認。';
+          j.failedStage = null;
+          reviewTransactions.push({
+            job: j,
+            transactionId: outcome.transactionId,
+            expected: committed ? 'target' : 'baseline',
+          });
+          recoveryChanged = true;
+        }
+      } catch (error) {
+        if (String(error.code || '').startsWith('review_edit_transaction_')) {
+          // Unknown plan/evidence bytes are intentionally not synchronized to the Revision. Keep
+          // the marker and expose a fail-closed in-memory state for explicit recovery.
+          j.status = 'failed';
+          j.stage = 'rendering';
+          j.failedStage = 'rendering';
+          j.error = `人工修改 transaction 無法安全判定：${error.message}`;
+          j.reviewEditRecoveryBlocked = true;
+          out.push(j);
+          continue;
+        }
+        throw error;
+      }
       // 伺服器上次是在跑到一半被關掉的。
       // run.js 是 detached 的，所以它很可能還活著 —— 那就不是「中斷」，
       // 是「在背景繼續跑」。標成失敗會讓人以為 HeyGen 點數白花了（其實沒有）。
@@ -546,6 +599,7 @@ function loadJobs() {
   return {
     jobs: out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
     recovered,
+    reviewTransactions,
   };
 }
 
@@ -554,6 +608,15 @@ let JOBS = startupJobs.jobs;
 // 一般 restart 不刷新 Project；只有 detached recovery 改變狀態，或偵測到 job-first
 // 半完成 transition 時，才同步回 Revision／Project summary。
 startupJobs.recovered.forEach(saveJob);
+startupJobs.reviewTransactions.forEach(({ job, transactionId, expected }) => {
+  finalizePreparedPhoneReviewEditTransaction({
+    job,
+    jobDirectory: jobDir(job.id),
+    revision: preparedReviewRevision(job),
+    transactionId,
+    expected,
+  });
+});
 
 function saveJob(j) {
   writeJobRecord(j);
@@ -1294,7 +1357,7 @@ function validateGraphicBrollPlanForJob(job, baseDir) {
   return { plan, planSha256: fileSha256(file) };
 }
 
-function validatePreparedPhonePlanForJob(job, baseDir) {
+function validatePreparedPhonePlanIdentityForJob(job, baseDir) {
   const file = path.join(baseDir, ...PREPARED_PLAN.split('/'));
   let plan;
   try { plan = JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -1342,8 +1405,15 @@ function validatePreparedPhonePlanForJob(job, baseDir) {
   if (!fs.existsSync(video) || fileSha256(video) !== source.sha256)
     throw new Error('prepared phone plan 指向的 MP4 bytes 已改變');
   validatePreparedPhonePlacementMath(plan, video);
+  return { plan, planSha256: fileSha256(file) };
+}
+
+function validatePreparedPhonePlanForJob(job, baseDir) {
+  const prepared = validatePreparedPhonePlanIdentityForJob(job, baseDir);
+  if (prepared.plan.mode !== 'ready-to-place') return prepared;
+  const result = job.materialAcquisitionResult;
   const visualEvidence = buildFocusstockVisualConflictEvidence({
-    job, workspaceRoot: baseDir, preparedPlan: plan,
+    job, workspaceRoot: baseDir, preparedPlan: prepared.plan,
   });
   if (!SHA256_HEX.test(result.focusstockVisualEvidenceSha256 || '')
       || visualEvidence.sha256 !== result.focusstockVisualEvidenceSha256
@@ -1352,8 +1422,7 @@ function validatePreparedPhonePlanForJob(job, baseDir) {
     throw new Error('ready-to-place Focusstock visual conflict evidence 已改變');
   }
   return {
-    plan,
-    planSha256: fileSha256(file),
+    ...prepared,
     visualEvidence: visualEvidence.evidence,
     visualEvidenceSha256: visualEvidence.sha256,
   };
@@ -1375,49 +1444,9 @@ function buildJobRenderInput(job, artifactRoot) {
   });
 }
 
-function captureAutomationEvidence(job, preparedCandidate = null) {
-  const state = path.join(jobDir(job.id), 'state');
-  const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
-  const generatedGraphicBroll = {
-    schemaVersion: plan.schemaVersion,
-    mode: plan.mode,
-    style: plan.style,
-    sourceScriptSha256: plan.sourceScriptSha256,
-    planSha256,
-    cards: plan.cards,
-  };
-  let timelinePlacements = plan.cards.map((card) => ({
-    cardId: card.id,
-    startCharIdx: card.startCharIdx,
-    endCharIdx: card.endCharIdx,
-    startSec: card.resolvedPlacement.startSec,
-    endSec: card.resolvedPlacement.endSec,
-  }));
-  const prepared = validatePreparedPhonePlanForJob(job, state);
-  if (prepared.plan.mode === 'ready-to-place') {
-    validatePreparedFocusstockAssetRefs({
-      job, projectStore: PROJECT_STORE, workspaceRoot: state,
-    });
-    const assetRef = preparedCandidate?.asset?.id
-      || job.materialAcquisitionResult?.preparedArtifact?.assetRef;
-    if (!assetRef) throw new Error('prepared phone Project Asset 尚未通過候選 ingest');
-    timelinePlacements = mergePreparedPhoneTimelineChannels({
-      existingPlacements: job.timelinePlacements || [],
-      focusstockVisualPlacements: buildFocusstockVisualTimelinePlacements(
-        prepared.visualEvidence, prepared.visualEvidenceSha256),
-      preparedPlacement: buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef),
-    });
-  }
-  const graphicBroll = prepared.plan.mode === 'ready-to-place'
-    ? selectPreparedPhoneGraphicBroll(job.graphicBroll, generatedGraphicBroll)
-    : generatedGraphicBroll;
-  let renderInputManifest = null;
-  let renderInputManifestSha256 = null;
-  if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {
-    const renderInput = buildJobRenderInput(job, state);
-    renderInputManifest = renderInput.manifest;
-    renderInputManifestSha256 = renderInput.sha256;
-  }
+function captureAutomationEvidence(job, preparedCandidate = null, options = {}) {
+  const recompileReviewedVisualEvidence = options.recompileReviewedVisualEvidence === true;
+  const reviewEditTransaction = options.reviewEditTransaction || null;
   const previous = {
     assetRefs: [...(job.assetRefs || [])],
     materialAcquisitionResult: JSON.parse(JSON.stringify(job.materialAcquisitionResult || null)),
@@ -1425,8 +1454,71 @@ function captureAutomationEvidence(job, preparedCandidate = null) {
     timelinePlacements: job.timelinePlacements,
     renderInputManifest: job.renderInputManifest,
     renderInputManifestSha256: job.renderInputManifestSha256,
+    pendingEdits: job.pendingEdits,
   };
   try {
+    if ((recompileReviewedVisualEvidence && preparedCandidate)
+        || Boolean(reviewEditTransaction) !== recompileReviewedVisualEvidence) {
+      throw new Error('reviewed visual evidence transaction contract 不完整');
+    }
+    const state = path.join(jobDir(job.id), 'state');
+    const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
+    const generatedGraphicBroll = {
+      schemaVersion: plan.schemaVersion,
+      mode: plan.mode,
+      style: plan.style,
+      sourceScriptSha256: plan.sourceScriptSha256,
+      planSha256,
+      cards: plan.cards,
+    };
+    let timelinePlacements = plan.cards.map((card) => ({
+      cardId: card.id,
+      startCharIdx: card.startCharIdx,
+      endCharIdx: card.endCharIdx,
+      startSec: card.resolvedPlacement.startSec,
+      endSec: card.resolvedPlacement.endSec,
+    }));
+    let prepared = recompileReviewedVisualEvidence
+      ? validatePreparedPhonePlanIdentityForJob(job, state)
+      : validatePreparedPhonePlanForJob(job, state);
+    if (recompileReviewedVisualEvidence && prepared.plan.mode !== 'ready-to-place')
+      throw new Error('只有 ready-to-place review 可重新編譯 visual evidence');
+    if (prepared.plan.mode === 'ready-to-place') {
+      validatePreparedFocusstockAssetRefs({
+        job, projectStore: PROJECT_STORE, workspaceRoot: state,
+      });
+      if (recompileReviewedVisualEvidence) {
+        const visualEvidence = compileReviewedFocusstockVisualEvidence({
+          job, workspaceRoot: state, preparedPlan: prepared.plan,
+        });
+        job.materialAcquisitionResult.focusstockVisualEvidence = visualEvidence.evidence;
+        job.materialAcquisitionResult.focusstockVisualEvidenceSha256 = visualEvidence.sha256;
+        prepared = {
+          ...prepared,
+          visualEvidence: visualEvidence.evidence,
+          visualEvidenceSha256: visualEvidence.sha256,
+        };
+      }
+      const assetRef = preparedCandidate?.asset?.id
+        || job.materialAcquisitionResult?.preparedArtifact?.assetRef;
+      if (!assetRef) throw new Error('prepared phone Project Asset 尚未通過候選 ingest');
+      timelinePlacements = mergePreparedPhoneTimelineChannels({
+        existingPlacements: job.timelinePlacements || [],
+        focusstockVisualPlacements: buildFocusstockVisualTimelinePlacements(
+          prepared.visualEvidence, prepared.visualEvidenceSha256),
+        preparedPlacement: buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef),
+      });
+    }
+    const graphicBroll = prepared.plan.mode === 'ready-to-place'
+      ? selectPreparedPhoneGraphicBroll(job.graphicBroll, generatedGraphicBroll)
+      : generatedGraphicBroll;
+    let renderInputManifest = null;
+    let renderInputManifestSha256 = null;
+    if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {
+      const renderInput = buildJobRenderInput(job, state);
+      renderInputManifest = renderInput.manifest;
+      renderInputManifestSha256 = renderInput.sha256;
+    }
     job.graphicBroll = graphicBroll;
     job.timelinePlacements = timelinePlacements;
     job.renderInputManifest = renderInputManifest;
@@ -1437,16 +1529,86 @@ function captureAutomationEvidence(job, preparedCandidate = null) {
       });
       job.timelinePlacements[job.timelinePlacements.length - 1] = committedPlacement;
     }
+    if (reviewEditTransaction) {
+      recordPreparedPhoneReviewEditCommitIntent({
+        job,
+        jobDirectory: jobDir(job.id),
+        transactionId: reviewEditTransaction.transactionId,
+      });
+    }
     saveJob(job);
   } catch (error) {
-    rollbackPreparedPhoneMaterialSelection(job);
+    if (preparedCandidate?.asset) rollbackPreparedPhoneMaterialSelection(job);
     job.assetRefs = previous.assetRefs;
     job.materialAcquisitionResult = previous.materialAcquisitionResult;
     job.graphicBroll = previous.graphicBroll;
     job.timelinePlacements = previous.timelinePlacements;
     job.renderInputManifest = previous.renderInputManifest;
     job.renderInputManifestSha256 = previous.renderInputManifestSha256;
+    job.pendingEdits = previous.pendingEdits;
     try { saveJob(job); } catch (_) {}
+    throw error;
+  }
+}
+
+function validateReviewedPreparedPlanBaseline(job, state) {
+  validatePreparedFocusstockAssetRefs({
+    job, projectStore: PROJECT_STORE, workspaceRoot: state,
+  });
+  validatePreparedPhoneProjectAsset({ job, projectStore: PROJECT_STORE });
+  if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
+    throw new Error('這個 Run 缺少可追溯的 render input manifest');
+  const { planSha256 } = validateGraphicBrollPlanForJob(job, state);
+  if (planSha256 !== job.graphicBroll?.planSha256)
+    throw new Error('review 前的 graphic B-Roll plan evidence 已改變');
+  const prepared = validatePreparedPhonePlanForJob(job, state);
+  validateFocusstockVisualTimelinePlacements(
+    job, prepared.visualEvidence, prepared.visualEvidenceSha256);
+  const current = buildJobRenderInput(job, state);
+  if (current.sha256 !== job.renderInputManifestSha256
+      || JSON.stringify(current.manifest) !== JSON.stringify(job.renderInputManifest)) {
+    throw new Error('review 前的 render inputs 與 manifest 不一致');
+  }
+  return prepared;
+}
+
+function settlePreparedReviewEditFailure(job, transaction, originalError) {
+  try {
+    const outcome = recoverPreparedPhoneReviewEditTransaction({
+      job,
+      jobDirectory: jobDir(job.id),
+      revision: preparedReviewRevision(job),
+    });
+    if (!outcome || outcome.transactionId !== transaction.transactionId)
+      throw new Error('找不到原 review edit transaction');
+    if (outcome.action === 'commit_confirmed') {
+      finalizePreparedPhoneReviewEditTransaction({
+        job,
+        jobDirectory: jobDir(job.id),
+        revision: preparedReviewRevision(job),
+        transactionId: transaction.transactionId,
+        expected: 'target',
+      });
+      return 'commit_confirmed';
+    }
+    job.status = 'review';
+    job.stage = 'awaiting-audit';
+    job.failedStage = null;
+    job.error = `人工修改未套用，已恢復修改前版本：${originalError.message}`;
+    saveJob(job);
+    finalizePreparedPhoneReviewEditTransaction({
+      job,
+      jobDirectory: jobDir(job.id),
+      revision: preparedReviewRevision(job),
+      transactionId: transaction.transactionId,
+      expected: 'baseline',
+    });
+    appendLogBestEffort(job, `\n⚠️ ${job.error}\n`);
+    return 'baseline_restored';
+  } catch (recoveryError) {
+    const error = new Error(`人工修改 transaction 尚未安全收斂：${originalError.message}`
+      + `；recovery：${recoveryError.message}`);
+    error.code = 'REVIEW_EDIT_RECOVERY_REQUIRED';
     throw error;
   }
 }
@@ -1825,7 +1987,7 @@ function runPipeline(job, args) {
     const pipelineEntry = TEST_PIPELINE_ENTRY || 'run.js';
     // Persist the job-specific token before spawn. It is only intent until run.js writes the same
     // token into the workspace-owner marker after acquiring .run.lock.
-    writeJobRecord(job);
+    saveJob(job);
     appendLog(job, `\n$ node ${path.basename(pipelineEntry)} ${args.join(' ')}\n`);
     const logPath = path.join(jobDir(job.id), 'log.txt');
     ensureDir(path.dirname(logPath));
@@ -2269,6 +2431,17 @@ function tick() {
         }
         return;
       }
+      if (e.code === 'REVIEW_EDIT_RECOVERY_REQUIRED') {
+        // Do not guess which evidence is durable and do not synchronize either side. The journal
+        // remains the only authority for the next restart/retry recovery pass.
+        job.status = 'failed';
+        job.stage = 'rendering';
+        job.failedStage = 'rendering';
+        job.error = e.message;
+        job.reviewEditRecoveryBlocked = true;
+        appendLogBestEffort(job, `\n❌ ${job.error}\n`);
+        return;
+      }
       const failedStage = job.status === 'rendering' ? 'rendering' : 'preparing';
       job.status = 'failed';
       job.stage = failedStage;
@@ -2375,15 +2548,51 @@ async function doPrepare(job) {
 async function doRender(job) {
   job.status = 'rendering';
   job.stage = 'rendering';
-  saveJob(job);
 
   if (job.pendingEdits && job.pendingEdits.length) {
-    applyPlanEdits(job, job.pendingEdits);
-    // The review UI edits the immutable Run snapshot. Rebuild every derived placement and render
-    // input identity from those reviewed bytes before restoring them into the shared renderer.
-    // Otherwise the supported pause-before-render flow compares a new plan to its old manifest and
-    // fails closed even though the edit itself was valid.
-    captureAutomationEvidence(job);
+    const recompileReviewedVisualEvidence = preparedPhoneMode(job) === 'ready-to-place';
+    let reviewEditTransaction = null;
+    if (recompileReviewedVisualEvidence) {
+      // Prove that the immutable snapshot and every recorded identity were still canonical before
+      // applying the user's explicit review edits. Only the synchronously edited visual plan may
+      // then receive replacement derived evidence.
+      validateReviewedPreparedPlanBaseline(job, path.join(jobDir(job.id), 'state'));
+      reviewEditTransaction = beginPreparedPhoneReviewEditTransaction({
+        job,
+        jobDirectory: jobDir(job.id),
+        revision: preparedReviewRevision(job),
+      });
+    }
+    try {
+      applyPlanEdits(job, job.pendingEdits);
+      // The review UI edits the immutable Run snapshot. Rebuild every derived placement and render
+      // input identity from those reviewed bytes before restoring them into the shared renderer.
+      // Otherwise the supported pause-before-render flow compares a new plan to its old manifest and
+      // fails closed even though the edit itself was valid.
+      captureAutomationEvidence(job, null, {
+        recompileReviewedVisualEvidence,
+        reviewEditTransaction,
+      });
+      if (reviewEditTransaction) {
+        // Once the target evidence is durable, leave a restartable handoff before removing the
+        // journal. The next durable rendering state is written by runPipeline together with its
+        // workspace intent token.
+        job.status = 'approved';
+        job.stage = 'ready-to-render';
+        saveJob(job);
+        finalizePreparedPhoneReviewEditTransaction({
+          job,
+          jobDirectory: jobDir(job.id),
+          revision: preparedReviewRevision(job),
+          transactionId: reviewEditTransaction.transactionId,
+          expected: 'target',
+        });
+      }
+    } catch (error) {
+      if (!reviewEditTransaction) throw error;
+      const outcome = settlePreparedReviewEditFailure(job, reviewEditTransaction, error);
+      if (outcome === 'baseline_restored') return;
+    }
     appendLog(job, `\n✏️  已套用 ${job.corrections ? job.corrections.length : 0} 項人工修正\n`);
   }
   restoreWorkspace(job);
@@ -2396,6 +2605,8 @@ async function doRender(job) {
   if (job.withAd) args.push('--with-ad');
   let evidence;
   try {
+    job.status = 'rendering';
+    job.stage = 'rendering';
     evidence = await runPipeline(job, args);
   } catch (error) {
     if (error.code === 'RUN_CANCELLED' && error.pipelineEvidence) {
@@ -3322,6 +3533,8 @@ const server = http.createServer(async (req, res) => {
         return send(res, 409, { error: 'failed-stage retry 目前只開放 automation-first Run' });
       if (job.status !== 'failed' || !['preparing', 'rendering'].includes(job.failedStage))
         return send(res, 409, { error: '這個 Run 沒有可重試的失敗 stage' });
+      if (job.reviewEditRecoveryBlocked)
+        return send(res, 409, { error: '人工修改 transaction 狀態不明，不能自動重試' });
       if (job.cancelRequestedAt)
         return send(res, 409, { error: '已要求停止的 Run 不可重試' });
       if (job.failedStage === 'rendering') {
@@ -3459,6 +3672,7 @@ function pruneOldJobs() {
           || typeof j.id !== 'string' || !RUN_ID.test(j.id)
           || !terminalStatuses.has(j.status) || !ownedJobDir(j.id)
           || (j.outputs !== undefined && !Array.isArray(j.outputs))) return;
+      if (fs.existsSync(path.join(jobDir(j.id), REVIEW_EDIT_TRANSACTION))) return;
       const outputs = Array.isArray(j.outputs) ? j.outputs : [];
       if (outputs.some((output) => !output || typeof output !== 'object' || Array.isArray(output)
           || typeof output.name !== 'string' || !output.name

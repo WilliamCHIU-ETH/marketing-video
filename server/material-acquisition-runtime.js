@@ -26,6 +26,8 @@ const FOCUSSTOCK_SHOT_MERGE_GAP_SEC = FOCUSSTOCK_VISUAL_TIMING.mergeGapSec;
 const FOCUSSTOCK_SHOTS = path.posix.join(
   'src', 'Focusstock', 'focusstock-shots.generated.json');
 const SUBTITLES = path.posix.join('src', 'subtitles.json');
+const REVIEW_EDIT_TRANSACTION = 'review-edit-transaction.json';
+const REVIEW_EDIT_PLAN = path.posix.join('state', FOCUSSTOCK_SHOTS);
 
 function fail(message, code, details) {
   throw new MaterialAcquisitionError(message, code, details);
@@ -69,6 +71,300 @@ function hashFile(file) {
 
 function hashJson(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+const REVIEW_EDIT_EVIDENCE_FIELDS = [
+  'assetRefs', 'focusstockVisualInputs', 'materialAcquisitionResult', 'graphicBroll',
+  'timelinePlacements', 'renderInputManifest', 'renderInputManifestSha256',
+  'outputs', 'renderEvidence',
+];
+
+function reviewEditEvidence(record, includePendingEdits = false) {
+  const snapshot = {};
+  for (const key of REVIEW_EDIT_EVIDENCE_FIELDS) snapshot[key] = cloneJson(record?.[key] ?? null);
+  if (includePendingEdits) snapshot.pendingEdits = cloneJson(record?.pendingEdits || []);
+  return snapshot;
+}
+
+function applyReviewEditJobEvidence(job, snapshot) {
+  for (const [key, value] of Object.entries(snapshot)) job[key] = cloneJson(value);
+}
+
+function fsyncDirectory(directory) {
+  const fd = fs.openSync(directory, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+function atomicWriteDurable(file, bytes) {
+  const directory = path.dirname(file);
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, bytes, { flag: 'wx', mode: 0o600 });
+    const fd = fs.openSync(temp, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, file);
+    fsyncDirectory(directory);
+  } finally {
+    try { fs.unlinkSync(temp); } catch (_) {}
+  }
+}
+
+function reviewEditFiles(jobDirectory) {
+  let root;
+  try {
+    const stat = fs.lstatSync(jobDirectory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe Run directory');
+    root = fs.realpathSync(jobDirectory);
+  } catch (_) {
+    fail('Review edit Run directory is unsafe', 'review_edit_transaction_invalid');
+  }
+  const plan = path.join(root, ...REVIEW_EDIT_PLAN.split('/'));
+  return {
+    root,
+    plan,
+    jobFile: path.join(root, 'job.json'),
+    marker: path.join(root, REVIEW_EDIT_TRANSACTION),
+  };
+}
+
+function requireSafeReviewEditPlanParent(files) {
+  let cursor = files.root;
+  for (const component of path.dirname(REVIEW_EDIT_PLAN).split('/')) {
+    cursor = path.join(cursor, component);
+    let stat;
+    try { stat = fs.lstatSync(cursor); } catch (_) {}
+    if (!stat?.isDirectory() || stat.isSymbolicLink())
+      fail('Review edit plan directory is unsafe', 'review_edit_transaction_invalid');
+  }
+}
+
+function requireRegularReviewEditPlan(file) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) {}
+  if (!stat?.isFile() || stat.isSymbolicLink())
+    fail('Review edit plan is missing or unsafe', 'review_edit_transaction_invalid');
+  return stat;
+}
+
+function readRegularJsonFile(file, label) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) {}
+  if (!stat?.isFile() || stat.isSymbolicLink())
+    fail(`${label} is missing or unsafe`, 'review_edit_transaction_invalid');
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (_) { fail(`${label} is invalid`, 'review_edit_transaction_invalid'); }
+}
+
+function validateReviewEditStage(stage, needsBytes) {
+  const plan = stage?.plan;
+  if (!plan || !Number.isSafeInteger(plan.size) || plan.size < 1
+      || !SHA256_HEX.test(plan.sha256 || '') || !stage.evidence
+      || !SHA256_HEX.test(stage.evidenceSha256 || '')
+      || hashJson(stage.evidence) !== stage.evidenceSha256) {
+    fail('Review edit transaction snapshot is invalid', 'review_edit_transaction_invalid');
+  }
+  if (!needsBytes) return null;
+  const bytes = Buffer.from(plan.bytesBase64 || '', 'base64');
+  if (!plan.bytesBase64 || bytes.toString('base64') !== plan.bytesBase64
+      || bytes.length !== plan.size
+      || crypto.createHash('sha256').update(bytes).digest('hex') !== plan.sha256) {
+    fail('Review edit baseline bytes are invalid', 'review_edit_transaction_invalid');
+  }
+  return bytes;
+}
+
+function readPreparedPhoneReviewEditTransaction({ job, jobDirectory }) {
+  const files = reviewEditFiles(jobDirectory);
+  if (!fs.existsSync(files.marker)) return null;
+  requireSafeReviewEditPlanParent(files);
+  const journal = readRegularJsonFile(files.marker, 'Review edit transaction marker');
+  if (!journal || journal.schemaVersion !== 1
+      || journal.kind !== 'prepared-phone-review-edit-v1'
+      || !/^[0-9a-f-]{36}$/i.test(journal.transactionId || '')
+      || journal.jobId !== job?.id || journal.planRelativePath !== REVIEW_EDIT_PLAN
+      || !['prepared', 'commit_intent'].includes(journal.phase)) {
+    fail('Review edit transaction marker identity is invalid',
+      'review_edit_transaction_invalid');
+  }
+  validateReviewEditStage(journal.baseline, true);
+  if (journal.phase === 'commit_intent') {
+    validateReviewEditStage(journal.target, false);
+  } else if (journal.target !== null) {
+    fail('Prepared review edit transaction cannot have a target',
+      'review_edit_transaction_invalid');
+  }
+  return { files, journal };
+}
+
+function beginPreparedPhoneReviewEditTransaction({ job, jobDirectory, revision }) {
+  const files = reviewEditFiles(jobDirectory);
+  if (fs.existsSync(files.marker))
+    fail('A review edit transaction already exists', 'review_edit_transaction_pending');
+  requireSafeReviewEditPlanParent(files);
+  requireRegularReviewEditPlan(files.plan);
+  const diskJob = readRegularJsonFile(files.jobFile, 'Review edit Job record');
+  const evidence = reviewEditEvidence(job, true);
+  if (diskJob.id !== job.id || revision?.jobId !== job.id || revision?.runId !== job.id
+      || JSON.stringify(reviewEditEvidence(diskJob, true)) !== JSON.stringify(evidence)
+      || JSON.stringify(reviewEditEvidence(revision))
+        !== JSON.stringify(reviewEditEvidence(job))) {
+    fail('Review edit baseline is not durable in both Job and Revision',
+      'review_edit_transaction_invalid');
+  }
+  const planBytes = fs.readFileSync(files.plan);
+  const journal = {
+    schemaVersion: 1,
+    kind: 'prepared-phone-review-edit-v1',
+    transactionId: crypto.randomUUID(),
+    jobId: job.id,
+    planRelativePath: REVIEW_EDIT_PLAN,
+    phase: 'prepared',
+    baseline: {
+      plan: {
+        size: planBytes.length,
+        sha256: crypto.createHash('sha256').update(planBytes).digest('hex'),
+        bytesBase64: planBytes.toString('base64'),
+      },
+      evidence,
+      evidenceSha256: hashJson(evidence),
+    },
+    target: null,
+  };
+  atomicWriteDurable(files.marker, `${JSON.stringify(journal, null, 2)}\n`);
+  return journal;
+}
+
+function immutableReviewIdentity(snapshot) {
+  const result = cloneJson(snapshot.materialAcquisitionResult);
+  if (result) {
+    delete result.focusstockVisualEvidence;
+    delete result.focusstockVisualEvidenceSha256;
+  }
+  return {
+    assetRefs: snapshot.assetRefs,
+    focusstockVisualInputs: snapshot.focusstockVisualInputs,
+    materialAcquisitionResult: result,
+    outputs: snapshot.outputs,
+    renderEvidence: snapshot.renderEvidence,
+  };
+}
+
+function recordPreparedPhoneReviewEditCommitIntent({
+  job,
+  jobDirectory,
+  transactionId,
+}) {
+  const current = readPreparedPhoneReviewEditTransaction({ job, jobDirectory });
+  if (!current || current.journal.transactionId !== transactionId
+      || current.journal.phase !== 'prepared') {
+    fail('Review edit transaction is not ready for commit intent',
+      'review_edit_transaction_invalid');
+  }
+  const pendingEdits = job.pendingEdits;
+  job.pendingEdits = [];
+  try {
+    const evidence = reviewEditEvidence(job, true);
+    if (JSON.stringify(immutableReviewIdentity(evidence))
+        !== JSON.stringify(immutableReviewIdentity(current.journal.baseline.evidence))) {
+      fail('Review edit changed immutable prepared/output identity',
+        'review_edit_transaction_invalid');
+    }
+    const planStat = requireRegularReviewEditPlan(current.files.plan);
+    const target = {
+      plan: { size: planStat.size, sha256: hashFile(current.files.plan) },
+      evidence,
+      evidenceSha256: hashJson(evidence),
+    };
+    const journal = { ...current.journal, phase: 'commit_intent', target };
+    atomicWriteDurable(current.files.marker, `${JSON.stringify(journal, null, 2)}\n`);
+    return journal;
+  } catch (error) {
+    job.pendingEdits = pendingEdits;
+    throw error;
+  }
+}
+
+function planMatches(file, snapshot) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) {}
+  return !!stat?.isFile() && !stat.isSymbolicLink() && stat.size === snapshot.size
+    && hashFile(file) === snapshot.sha256;
+}
+
+const snapshotMatches = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+
+function recoverPreparedPhoneReviewEditTransaction({ job, jobDirectory, revision }) {
+  const current = readPreparedPhoneReviewEditTransaction({ job, jobDirectory });
+  if (!current) return null;
+  const { files, journal } = current;
+  const diskJob = readRegularJsonFile(files.jobFile, 'Review edit Job record');
+  if (diskJob.id !== job.id || revision?.jobId !== job.id || revision?.runId !== job.id)
+    fail('Review edit recovery ownership is ambiguous', 'review_edit_transaction_ambiguous');
+  const diskEvidence = reviewEditEvidence(diskJob, true);
+  const revisionEvidence = reviewEditEvidence(revision);
+  const baseline = journal.baseline.evidence;
+  if (journal.phase === 'commit_intent') {
+    const target = journal.target.evidence;
+    if (planMatches(files.plan, journal.target.plan)
+        && snapshotMatches(diskEvidence, target)
+        && snapshotMatches(revisionEvidence, reviewEditEvidence(target))) {
+      applyReviewEditJobEvidence(job, target);
+      return { action: 'commit_confirmed', transactionId: journal.transactionId };
+    }
+    const jobKnown = snapshotMatches(diskEvidence, baseline)
+      || snapshotMatches(diskEvidence, target);
+    const revisionKnown = [baseline, target].some((candidate) =>
+      snapshotMatches(revisionEvidence, reviewEditEvidence(candidate)));
+    const planKnown = planMatches(files.plan, journal.baseline.plan)
+      || planMatches(files.plan, journal.target.plan);
+    if (!jobKnown || !revisionKnown || !planKnown)
+      fail('Review edit recovery found unknown committed state',
+        'review_edit_transaction_ambiguous');
+  } else if (!snapshotMatches(diskEvidence, baseline)
+      || !snapshotMatches(revisionEvidence, reviewEditEvidence(baseline))) {
+    fail('Prepared review edit transaction changed durable evidence unexpectedly',
+      'review_edit_transaction_ambiguous');
+  }
+  const baselineBytes = validateReviewEditStage(journal.baseline, true);
+  atomicWriteDurable(files.plan, baselineBytes);
+  applyReviewEditJobEvidence(job, baseline);
+  return { action: 'baseline_restored', transactionId: journal.transactionId };
+}
+
+function finalizePreparedPhoneReviewEditTransaction({
+  job,
+  jobDirectory,
+  revision,
+  transactionId,
+  expected,
+}) {
+  const current = readPreparedPhoneReviewEditTransaction({ job, jobDirectory });
+  if (!current || current.journal.transactionId !== transactionId
+      || !['baseline', 'target'].includes(expected)) {
+    fail('Review edit transaction cleanup identity is invalid',
+      'review_edit_transaction_invalid');
+  }
+  const selected = expected === 'target'
+    ? current.journal.target : current.journal.baseline;
+  if (!selected || !planMatches(current.files.plan, selected.plan))
+    fail('Review edit transaction plan is not durably settled',
+      'review_edit_transaction_invalid');
+  const diskJob = readRegularJsonFile(current.files.jobFile, 'Review edit Job record');
+  if (!snapshotMatches(reviewEditEvidence(diskJob, true), selected.evidence)
+      || !snapshotMatches(reviewEditEvidence(revision), reviewEditEvidence(selected.evidence))) {
+    fail('Review edit Job/Revision evidence is not durably settled',
+      'review_edit_transaction_invalid');
+  }
+  const markerStat = fs.lstatSync(current.files.marker);
+  if (!markerStat.isFile() || markerStat.isSymbolicLink())
+    fail('Review edit transaction marker is unsafe', 'review_edit_transaction_invalid');
+  fs.unlinkSync(current.files.marker);
+  fsyncDirectory(current.files.root);
+  return true;
 }
 
 function focusstockVisualFrameInterval(startSec, endSec) {
@@ -265,7 +561,6 @@ function buildFocusstockVisualConflictEvidence({
   if (!Array.isArray(charTimes))
     fail('Focusstock subtitles timeline has no script char times', 'placement_compile_failed');
 
-  const referencedNames = new Set();
   const resolvedShots = shotPlan.value.map((shot, sourceIndex) => {
     const binding = shot && bindingByName.get(shot.src);
     if (!shot || !binding || !Number.isInteger(shot.startCharIdx)
@@ -281,7 +576,6 @@ function buildFocusstockVisualConflictEvidence({
         || startSec < 0 || endSec <= startSec) {
       fail('Focusstock shot has an unresolved subtitle interval', 'placement_compile_failed');
     }
-    referencedNames.add(shot.src);
     return {
       sourceIndex,
       src: shot.src,
@@ -293,10 +587,9 @@ function buildFocusstockVisualConflictEvidence({
       endSec,
     };
   }).sort((a, b) => a.startSec - b.startSec);
-  if (referencedNames.size !== bindingByName.size
-      || boundNames.some((name) => !referencedNames.has(name))) {
-    fail('Every selected Focusstock image must have a resolved shot', 'placement_compile_failed');
-  }
+  // A reviewed plan may intentionally delete the final placement that used an image. Keep every
+  // selected input bound and byte-verified above, but do not require the renderer to use it. Shots
+  // still fail closed unless they resolve to one of those exact bindings.
 
   // Equivalent to buildShotRuns(..., 2.0): only adjacent same-src shots merge, and the whole
   // merged run is suppressed if its half-open interval intersects the prepared interval.
@@ -362,6 +655,33 @@ function buildFocusstockVisualConflictEvidence({
     },
   };
   return { evidence, sha256: hashJson(evidence) };
+}
+
+/**
+ * Compile a replacement visual evidence object for one already-verified review transaction.
+ *
+ * The caller must first verify the recorded snapshot before applying the user's edits. This helper
+ * then protects the immutable prepared-video contract while allowing only the derived Focusstock
+ * shot/timing evidence to change. The recorded evidence must also still be internally authentic;
+ * arbitrary stale/tampered job metadata is never accepted as a recompile baseline.
+ */
+function compileReviewedFocusstockVisualEvidence({ job, workspaceRoot, preparedPlan }) {
+  const summary = job?.materialAcquisitionResult;
+  const recordedEvidence = summary?.focusstockVisualEvidence;
+  const recordedSha256 = summary?.focusstockVisualEvidenceSha256;
+  if (job?.materialAcquisition?.operation !== 'prepared-video'
+      || summary?.placementStatus !== 'compiled' || summary.automaticTimelineUse !== true
+      || !summary.preparedArtifact?.assetRef
+      || !SHA256_HEX.test(summary.compiledPlanSha256 || '')
+      || !recordedEvidence || !SHA256_HEX.test(recordedSha256 || '')
+      || hashJson(recordedEvidence) !== recordedSha256
+      || preparedPlan?.mode !== 'ready-to-place'
+      || preparedPlan.source?.sha256 !== summary.preparedArtifact.sha256
+      || preparedPlan.source?.size !== summary.preparedArtifact.size
+      || JSON.stringify(preparedPlan.placement) !== JSON.stringify(summary.placement)) {
+    fail('Reviewed Focusstock visual evidence baseline is invalid', 'placement_compile_failed');
+  }
+  return buildFocusstockVisualConflictEvidence({ job, workspaceRoot, preparedPlan });
 }
 
 function buildFocusstockVisualTimelinePlacements(evidence, evidenceSha256) {
@@ -653,6 +973,13 @@ function validateCompiledPreparedPlan({
   const visualEvidence = buildFocusstockVisualConflictEvidence({
     job, workspaceRoot, preparedPlan: plan, jobDirectory,
   });
+  const resolvedInputNames = new Set(
+    visualEvidence.evidence.resolvedShots.map((shot) => shot.src));
+  if (visualEvidence.evidence.inputs.some(
+    (binding) => !resolvedInputNames.has(binding.inputName))) {
+    fail('Every initially selected Focusstock image must have a resolved shot',
+      'placement_compile_failed');
+  }
   return { plan, planFile, publicFile, visualEvidence };
 }
 
@@ -1366,9 +1693,12 @@ async function prepareJobMaterialAcquisition({
 }
 
 module.exports = {
+  REVIEW_EDIT_TRANSACTION,
+  beginPreparedPhoneReviewEditTransaction,
   buildFocusstockVisualConflictEvidence,
   buildFocusstockVisualTimelinePlacements,
   buildPreparedPhoneTimelinePlacement,
+  compileReviewedFocusstockVisualEvidence,
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,
   PREPARED_INTENT_INPUT,
@@ -1379,8 +1709,11 @@ module.exports = {
   mergePreparedPhoneTimelineChannels,
   nextShotName,
   prepareJobMaterialAcquisition,
+  recordPreparedPhoneReviewEditCommitIntent,
+  recoverPreparedPhoneReviewEditTransaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
+  finalizePreparedPhoneReviewEditTransaction,
   validateCompiledPreparedPlan,
   validateFocusstockVisualTimelinePlacements,
   validatePreparedPhonePlacementMath,
