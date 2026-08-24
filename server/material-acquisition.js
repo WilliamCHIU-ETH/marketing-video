@@ -5,13 +5,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { inspectMediaFile } = require('./project-store');
+const {
+  applyVoiceRulesForward,
+  cleanBodyWithIndex,
+  getBodyAfterVoice,
+  parseVoiceRules,
+} = require('../scripts/script-utils');
 const PROVIDER_LOCK = Object.freeze(require('../config/chipk-capture-provider.lock.json'));
 
 const PROVIDER_ID = PROVIDER_LOCK.providerId;
-const CONTRACT_VERSION = PROVIDER_LOCK.contractVersion;
+const LEGACY_CONTRACT_VERSION = PROVIDER_LOCK.contractVersion;
+const READY_TO_PLACE_CONTRACT_VERSION = PROVIDER_LOCK.readyToPlaceContractVersion;
+const READY_TO_PLACE_PROFILE_ID = PROVIDER_LOCK.readyToPlaceProfileId;
 const POLICIES = new Set(['prefer-capture', 'require-capture', 'disable-capture']);
-const OPERATIONS = new Set(['screenshot', 'record']);
+const OPERATIONS = new Set(['screenshot', 'record', 'prepared-video']);
 const MODES = new Set(['live', 'test']);
+const READY_TO_PLACE_ROUTE = 'chipk.stock.main-force';
+const READY_TO_PLACE_STOCK = Object.freeze({ id: '3441', name: '聯一光' });
+const READY_TO_PLACE_LAYOUT = 'focusstock-phone-portrait.v1';
 const RESULT_STATUSES = new Set(['completed', 'rejected', 'failed', 'human_action_required']);
 const ARTIFACT_SPEC = Object.freeze({
   screenshot: { kind: 'image', mimeType: 'image/png' },
@@ -19,10 +30,17 @@ const ARTIFACT_SPEC = Object.freeze({
   'raw-video': { kind: 'video', mimeType: 'video/mp4' },
   actions: { kind: 'json', mimeType: 'application/json' },
   'recording-manifest': { kind: 'json', mimeType: 'application/json' },
+  'prepared-video': { kind: 'video', mimeType: 'video/mp4' },
+  'presentation-plan': { kind: 'json', mimeType: 'application/json' },
+  'preparation-manifest': { kind: 'json', mimeType: 'application/json' },
 });
 const REQUIRED_ROLES = Object.freeze({
   screenshot: ['screenshot', 'capture-manifest'],
   record: ['raw-video', 'actions', 'recording-manifest'],
+  'prepared-video': [
+    'prepared-video', 'screenshot', 'capture-manifest',
+    'presentation-plan', 'preparation-manifest',
+  ],
 });
 const RESULT_KEYS = new Set([
   'contractVersion', 'requestId', 'provider', 'status', 'artifacts', 'evidence', 'error',
@@ -30,6 +48,11 @@ const RESULT_KEYS = new Set([
 const PROVIDER_KEYS = new Set(['id', 'toolVersion']);
 const ERROR_KEYS = new Set(['code', 'message', 'retryable']);
 const ARTIFACT_KEYS = new Set(['role', 'kind', 'relativePath', 'sha256', 'mimeType', 'media']);
+const READY_EVIDENCE_KEYS = new Set([
+  'routeSelection', 'navigation', 'material', 'catalogVersion',
+  'presentationProfile', 'publication',
+]);
+const READY_PROFILE_EVIDENCE_KEYS = new Set(['id', 'version', 'status']);
 
 class MaterialAcquisitionError extends Error {
   constructor(message, code, details = undefined) {
@@ -66,11 +89,89 @@ function boundedText(value, label, pattern, maxLength) {
   return text;
 }
 
+function boundedNumber(value, label, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max)
+    fail(`${label} is invalid`, 'invalid_material_intent');
+  return number;
+}
+
+function normalizePresentation(value) {
+  const source = objectWithOnly(value, ['profileId'], 'presentation');
+  const profileId = boundedText(
+    source.profileId, 'presentation.profileId', /^[a-zA-Z0-9._-]+$/, 160);
+  if (profileId !== READY_TO_PLACE_PROFILE_ID)
+    fail('presentation.profileId is unsupported', 'invalid_material_intent');
+  return { profileId };
+}
+
+function normalizePlacement(value) {
+  const source = objectWithOnly(value, ['layoutId', 'startSec', 'anchor'], 'placement');
+  const layoutId = boundedText(
+    source.layoutId, 'placement.layoutId', /^[a-zA-Z0-9._-]+$/, 160);
+  if (layoutId !== READY_TO_PLACE_LAYOUT)
+    fail('placement.layoutId is unsupported', 'invalid_material_intent');
+  const hasStart = source.startSec != null;
+  const hasAnchor = source.anchor != null;
+  if (hasStart === hasAnchor)
+    fail('placement requires exactly one startSec or anchor', 'invalid_material_intent');
+  if (hasStart) {
+    return {
+      layoutId,
+      startSec: boundedNumber(source.startSec, 'placement.startSec', { min: 0, max: 3600 }),
+    };
+  }
+  const anchor = objectWithOnly(source.anchor, ['startCharIdx', 'phrase'], 'placement.anchor');
+  const hasIndex = anchor.startCharIdx != null;
+  const hasPhrase = anchor.phrase != null;
+  if (hasIndex === hasPhrase)
+    fail('placement.anchor requires exactly one startCharIdx or phrase', 'invalid_material_intent');
+  if (hasIndex) {
+    const startCharIdx = boundedNumber(
+      anchor.startCharIdx, 'placement.anchor.startCharIdx', { min: 0, max: 1_000_000 });
+    if (!Number.isInteger(startCharIdx))
+      fail('placement.anchor.startCharIdx is invalid', 'invalid_material_intent');
+    return { layoutId, anchor: { startCharIdx } };
+  }
+  return {
+    layoutId,
+    anchor: { phrase: boundedText(anchor.phrase, 'placement.anchor.phrase', null, 240) },
+  };
+}
+
+function resolvePreparedVideoPlacement(intent, scriptRaw) {
+  const phrase = intent?.operation === 'prepared-video' && intent.placement?.anchor?.phrase;
+  if (!phrase) return intent;
+  if (typeof scriptRaw !== 'string' || !scriptRaw.trim())
+    fail('placement.anchor.phrase requires the current script', 'invalid_material_intent');
+  const body = cleanBodyWithIndex(getBodyAfterVoice(scriptRaw)).map(({ char }) => char).join('');
+  const voicedPhrase = applyVoiceRulesForward(phrase, parseVoiceRules(scriptRaw));
+  const needle = cleanBodyWithIndex(voicedPhrase).map(({ char }) => char).join('');
+  if (!needle)
+    fail('placement.anchor.phrase is empty after script cleaning', 'invalid_material_intent');
+  const matches = [];
+  for (let index = body.indexOf(needle); index >= 0; index = body.indexOf(needle, index + 1)) {
+    matches.push(index);
+    if (matches.length > 1) break;
+  }
+  if (matches.length !== 1)
+    fail(matches.length ? 'placement.anchor.phrase is ambiguous in the cleaned script'
+      : 'placement.anchor.phrase was not found in the cleaned script', 'invalid_material_intent');
+  return {
+    ...intent,
+    placement: {
+      layoutId: intent.placement.layoutId,
+      anchor: { phrase, startCharIdx: matches[0] },
+    },
+  };
+}
+
 function normalizeMaterialAcquisitionIntent(value) {
   const intent = objectWithOnly(value,
-    ['policy', 'operation', 'mode', 'route', 'stock', 'recipe'], 'materialAcquisition');
+    ['policy', 'operation', 'mode', 'route', 'stock', 'recipe', 'presentation', 'placement'],
+    'materialAcquisition');
   const policy = normalizePolicy(intent.policy);
-  const operation = boundedText(intent.operation, 'operation', /^[a-z]+$/, 20);
+  const operation = boundedText(intent.operation, 'operation', /^[a-z-]+$/, 20);
   if (!OPERATIONS.has(operation)) fail('operation is unsupported', 'invalid_material_intent');
   const mode = boundedText(intent.mode, 'mode', /^[a-z]+$/, 12);
   if (!MODES.has(mode)) fail('mode is unsupported', 'invalid_material_intent');
@@ -89,6 +190,24 @@ function normalizeMaterialAcquisitionIntent(value) {
     : boundedText(intent.recipe, 'recipe', /^[a-zA-Z0-9._-]+$/, 160);
   if (operation === 'record' && !recipe)
     fail('record operation requires recipe', 'invalid_material_intent');
+  if (operation !== 'record' && recipe)
+    fail(`${operation} operation does not accept recipe`, 'invalid_material_intent');
+  if (operation === 'prepared-video') {
+    if (policy !== 'require-capture')
+      fail('prepared-video requires require-capture policy', 'invalid_material_intent');
+    if (route !== READY_TO_PLACE_ROUTE || stock?.id !== READY_TO_PLACE_STOCK.id
+        || stock?.name !== READY_TO_PLACE_STOCK.name)
+      fail('prepared-video target is outside the supported vertical slice',
+        'invalid_material_intent');
+    return {
+      policy, operation, mode, route, stock, recipe: null,
+      presentation: normalizePresentation(intent.presentation),
+      placement: normalizePlacement(intent.placement),
+    };
+  }
+  if (intent.presentation != null || intent.placement != null)
+    fail(`${operation} operation does not accept presentation or placement`,
+      'invalid_material_intent');
   return { policy, operation, mode, route, stock, recipe };
 }
 
@@ -97,14 +216,17 @@ function buildCaptureRequest(intent, { requestId, outputDirectory }) {
   if (intent.stock?.id) target.stockId = intent.stock.id;
   if (intent.stock?.name) target.stockName = intent.stock.name;
   if (intent.recipe) target.recipeId = intent.recipe;
-  return {
-    contractVersion: CONTRACT_VERSION,
+  const request = {
+    contractVersion: intent.operation === 'prepared-video'
+      ? READY_TO_PLACE_CONTRACT_VERSION : LEGACY_CONTRACT_VERSION,
     requestId,
     operation: intent.operation,
     mode: intent.mode,
     target,
     outputDirectory: path.resolve(outputDirectory),
   };
+  if (intent.operation === 'prepared-video') request.presentation = { ...intent.presentation };
+  return request;
 }
 
 function errorCode(error, fallback) {
@@ -191,6 +313,27 @@ function inspectVideoSpec(file) {
   } catch (_) { return null; }
 }
 
+function validateReadyToPlaceEvidence(evidence, request) {
+  const profile = evidence && evidence.presentationProfile;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)
+      || Object.keys(evidence).length !== READY_EVIDENCE_KEYS.size
+      || Object.keys(evidence).some((key) => !READY_EVIDENCE_KEYS.has(key))
+      || evidence.routeSelection !== 'catalog_exact_match'
+      || evidence.navigation !== 'expected_texts_verified'
+      || evidence.material !== 'ready_to_place'
+      || typeof evidence.catalogVersion !== 'string' || !evidence.catalogVersion.trim()
+      || /[\u0000-\u001f\u007f]/.test(evidence.catalogVersion)
+      || !profile || typeof profile !== 'object' || Array.isArray(profile)
+      || Object.keys(profile).length !== READY_PROFILE_EVIDENCE_KEYS.size
+      || Object.keys(profile).some((key) => !READY_PROFILE_EVIDENCE_KEYS.has(key))
+      || profile.id !== request.presentation?.profileId
+      || profile.version !== 1 || profile.status !== 'ready_to_place'
+      || evidence.publication !== 'atomic_directory_rename') {
+    fail('Provider ready-to-place evidence is incomplete or open',
+      'provider_evidence_invalid');
+  }
+}
+
 function validateMediaDescriptor(artifact, file) {
   const media = artifact.media;
   if (artifact.kind === 'json') {
@@ -231,7 +374,7 @@ function validateMediaDescriptor(artifact, file) {
 
 function validateCaptureResult(result, request) {
   if (!result || typeof result !== 'object' || Array.isArray(result)
-      || result.contractVersion !== CONTRACT_VERSION || result.requestId !== request.requestId
+      || result.contractVersion !== request.contractVersion || result.requestId !== request.requestId
       || !result.provider || result.provider.id !== PROVIDER_ID
       || typeof result.provider.toolVersion !== 'string' || !result.provider.toolVersion.trim()
       || !RESULT_STATUSES.has(result.status))
@@ -262,6 +405,8 @@ function validateCaptureResult(result, request) {
       fail('Incomplete provider result must not contain artifacts', 'provider_result_incompatible');
     return { result, artifacts: [] };
   }
+  if (request.contractVersion === READY_TO_PLACE_CONTRACT_VERSION)
+    validateReadyToPlaceEvidence(result.evidence, request);
   const required = REQUIRED_ROLES[request.operation];
   if (!required || result.artifacts.length !== required.length)
     fail('Provider returned the wrong artifact set', 'provider_artifact_set_invalid');
@@ -288,6 +433,36 @@ function validateCaptureResult(result, request) {
   if (required.some((role) => !seen.has(role)))
     fail('Provider artifact set is incomplete', 'provider_artifact_set_invalid');
   return { result, artifacts };
+}
+
+function findContractCapability(capabilities, request) {
+  if (request.contractVersion === LEGACY_CONTRACT_VERSION) {
+    if (capabilities?.schemaVersion !== LEGACY_CONTRACT_VERSION
+        || !Array.isArray(capabilities?.operations)
+        || !capabilities.operations.includes(request.operation)) return null;
+    return { contractVersion: LEGACY_CONTRACT_VERSION, operations: capabilities.operations };
+  }
+  if (request.contractVersion !== READY_TO_PLACE_CONTRACT_VERSION
+      || !Array.isArray(capabilities?.contractCapabilities)) return null;
+  const matches = capabilities.contractCapabilities.filter(
+    (entry) => entry && entry.contractVersion === READY_TO_PLACE_CONTRACT_VERSION);
+  if (matches.length !== 1) return null;
+  const entry = matches[0];
+  if (!Array.isArray(entry.operations) || entry.operations.length !== 1
+      || entry.operations[0] !== request.operation
+      || typeof entry.requestSchema !== 'string' || !entry.requestSchema
+      || typeof entry.resultSchema !== 'string' || !entry.resultSchema
+      || !Array.isArray(entry.presentationProfiles)) return null;
+  const profiles = entry.presentationProfiles.filter(
+    (item) => item && item.id === request.presentation?.profileId);
+  const profile = profiles.length === 1 ? profiles[0] : null;
+  if (!profile || profile.version !== 1 || profile.status !== 'ready_to_place'
+      || profile.sourceKind !== 'screenshot' || profile.artifactRole !== 'prepared-video'
+      || !Array.isArray(profile.routeIds)
+      || !profile.routeIds.includes(request.target.routeId)
+      || !Array.isArray(profile.stockIds) || profile.stockIds.length !== 1
+      || profile.stockIds[0] !== request.target.stockId) return null;
+  return entry;
 }
 
 async function fallbackResult(fallback, request, reason, provider = null) {
@@ -327,15 +502,14 @@ async function acquireOptionalMaterial({
   }
   const providerId = capabilities?.providerId || null;
   let readinessCode = null;
-  if (capabilities?.schemaVersion !== CONTRACT_VERSION || providerId !== PROVIDER_ID
+  if (capabilities?.schemaVersion !== LEGACY_CONTRACT_VERSION || providerId !== PROVIDER_ID
       || typeof capabilities?.toolVersion !== 'string' || !capabilities.toolVersion.trim())
     readinessCode = 'provider_contract_incompatible';
   else if (capabilities.toolVersion !== PROVIDER_LOCK.toolVersion)
     readinessCode = 'provider_version_incompatible';
   else if (capabilities?.productionReady !== true)
     readinessCode = 'provider_not_production_ready';
-  else if (!Array.isArray(capabilities.operations)
-      || !capabilities.operations.includes(request.operation))
+  else if (!findContractCapability(capabilities, request))
     readinessCode = 'provider_operation_unsupported';
   if (readinessCode) {
     if (selectedPolicy === 'require-capture')
@@ -366,10 +540,15 @@ async function acquireOptionalMaterial({
 }
 
 module.exports = {
+  LEGACY_CONTRACT_VERSION,
   MaterialAcquisitionError,
+  READY_TO_PLACE_CONTRACT_VERSION,
+  READY_TO_PLACE_LAYOUT,
+  READY_TO_PLACE_PROFILE_ID,
   acquireOptionalMaterial,
   buildCaptureRequest,
   normalizeMaterialAcquisitionIntent,
   normalizePolicy,
+  resolvePreparedVideoPlacement,
   validateCaptureResult,
 };

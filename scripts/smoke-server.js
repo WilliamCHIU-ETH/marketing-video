@@ -514,6 +514,10 @@ async function main() {
   assert.match(html, /成品已保存於這台 Mac/);
   assert.match(html, /技術資訊與執行記錄/);
   assert.match(html, /素材資料暫時無法載入/);
+  assert.match(html, /已完成手機畫面 placement/);
+  assert.match(html, /source／plan／render linkage/);
+  assert.match(html, /compositionStartSec/);
+  assert.match(html, /（主段 /);
   assert.match(html, /暫存工作/);
   assert.match(html, /跨影片專案/);
   assert.doesNotMatch(html, /也存進成品庫了/);
@@ -576,6 +580,81 @@ async function main() {
       '不完整或不相符的 evidence 不得顯示成片實際畫面');
   }
 
+  const preparedGateStart = html.indexOf('function verifiedPreparedPhoneTimelineEvidence(job)');
+  const preparedGateEnd = html.indexOf('\nfunction preparedPhoneEvidenceCard(job)', preparedGateStart);
+  assert.ok(preparedGateStart > 0 && preparedGateEnd > preparedGateStart,
+    '必須能獨立驗證 ready-to-place timeline/render evidence gate');
+  const verifiedPreparedPhoneTimelineEvidence = new Function(
+    `${html.slice(preparedGateStart, preparedGateEnd)}\nreturn verifiedPreparedPhoneTimelineEvidence;`)();
+  const preparedFixture = {
+    materialAcquisition: {
+      policy: 'require-capture', operation: 'prepared-video', route: 'chipk.stock.main-force',
+      stock: { id: '3441', name: '聯一光' },
+      presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+      placement: { layoutId: 'focusstock-phone-portrait.v1', anchor: { startCharIdx: 3 } },
+    },
+    materialAcquisitionResult: {
+      status: 'acquired', contractVersion: 2, provider: 'chipk-simulator-capture',
+      providerVersion: '0.3.0', placementStatus: 'compiled', automaticTimelineUse: true,
+      presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+      compiledPlanSha256: 'd'.repeat(64),
+      preparedArtifact: {
+        role: 'prepared-video', assetRef: 'asset-prepared', sha256: 'c'.repeat(64),
+        size: 123, media: { durationSeconds: 1 },
+      },
+      placement: {
+        layoutId: 'focusstock-phone-portrait.v1', fps: 30,
+        startFrame: 60, endFrame: 90, durationInFrames: 30, startSec: 2, endSec: 3,
+        playbackRate: 1, muted: true, objectFit: 'contain', crop: 'none', trim: 'none', loop: false,
+      },
+    },
+    timelinePlacements: [{
+      kind: 'prepared-phone-video', assetRef: 'asset-prepared',
+      profileId: 'chipk.stock-main-force-portrait.v1',
+      layoutId: 'focusstock-phone-portrait.v1', timelineBasis: 'focusstock-main-v1',
+      visualOwner: 'prepared-phone-video',
+      conflictPolicy: 'suppress-entire-overlapping-placement',
+      fps: 30, startFrame: 60, endFrame: 90, durationInFrames: 30, startSec: 2, endSec: 3,
+      compositionTimeline: 'Focusstock', compositionOffsetFrames: 30,
+      compositionStartFrame: 90, compositionEndFrame: 120,
+      compositionStartSec: 3, compositionEndSec: 4,
+      sourceSha256: 'c'.repeat(64), planSha256: 'd'.repeat(64),
+    }],
+    renderInputManifestSha256: 'e'.repeat(64),
+    renderInputManifest: {
+      schemaVersion: 1, template: 'focusstock', compositionId: 'Focusstock',
+      options: { preparedPhoneMode: 'ready-to-place', withAd: false },
+      artifactInputs: [
+        { path: 'public/prepared-phone-material.mp4', size: 123, sha256: 'c'.repeat(64) },
+        { path: 'src/Focusstock/prepared-phone-material.generated.json', size: 456, sha256: 'd'.repeat(64) },
+      ],
+    },
+    renderEvidence: { schemaVersion: 1, renderInputManifestSha256: 'e'.repeat(64) },
+  };
+  const preparedFixtureBefore = JSON.stringify(preparedFixture);
+  const preparedEvidence = verifiedPreparedPhoneTimelineEvidence(preparedFixture);
+  assert.equal(preparedEvidence.renderVerified, true);
+  assert.equal(preparedEvidence.placement.compositionStartSec, 3);
+  assert.equal(JSON.stringify(preparedFixture), preparedFixtureBefore,
+    'ready-to-place evidence gate 必須唯讀');
+  for (const mutate of [
+    (fixture) => { fixture.materialAcquisitionResult.placementStatus = 'compiled_pending_evidence'; },
+    (fixture) => { fixture.materialAcquisitionResult.automaticTimelineUse = false; },
+    (fixture) => { fixture.timelinePlacements[0].durationInFrames = 1; },
+    (fixture) => { fixture.timelinePlacements[0].compositionStartFrame = 60; },
+    (fixture) => { fixture.timelinePlacements[0].sourceSha256 = 'f'.repeat(64); },
+    (fixture) => { fixture.timelinePlacements[0].planSha256 = 'f'.repeat(64); },
+    (fixture) => { fixture.renderInputManifest.options.withAd = true; },
+    (fixture) => { fixture.renderInputManifest.artifactInputs[0].sha256 = 'f'.repeat(64); },
+    (fixture) => { fixture.renderInputManifestSha256 = 'invalid'; },
+    (fixture) => { fixture.timelinePlacements.push({ ...fixture.timelinePlacements[0] }); },
+  ]) {
+    const fixture = JSON.parse(JSON.stringify(preparedFixture));
+    mutate(fixture);
+    assert.equal(verifiedPreparedPhoneTimelineEvidence(fixture), null,
+      '不完整或不相符的 prepared evidence 不得宣稱已配置 timeline');
+  }
+
   const invalidWorkflow = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -592,6 +671,66 @@ async function main() {
     }),
   });
   assert.equal(invalidAutoTemplate.status, 400);
+  const invalidPreparedWithAd = await fetch(base + '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock', title: 'invalid prepared ad', body: 'prepared ad must fail closed',
+      withAd: true,
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: { layoutId: 'focusstock-phone-portrait.v1', startSec: 2 },
+      },
+    }),
+  });
+  assert.equal(invalidPreparedWithAd.status, 400);
+  assert.match((await invalidPreparedWithAd.json()).error, /不支援 Focusstock 廣告版/);
+
+  const preparedPhraseDraft = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock', withAd: false, title: '聯一光主力觀察',
+      body: '今天看聯一光的主力動向，接著說明籌碼變化。',
+      workflowMode: 'manual-assets', controlPolicy: 'auto',
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: {
+          layoutId: 'focusstock-phone-portrait.v1', anchor: { phrase: '聯一光的主力動向' },
+        },
+      },
+    }),
+  });
+  assert.equal(preparedPhraseDraft.job.status, 'draft');
+  assert.equal(preparedPhraseDraft.job.materialAcquisition.placement.anchor.phrase,
+    '聯一光的主力動向');
+  assert.equal(preparedPhraseDraft.job.materialAcquisition.placement.anchor.startCharIdx, 3);
+  const preparedShotUpload = await fetch(
+    base + `/api/jobs/${preparedPhraseDraft.job.id}/upload?name=shot1.png`, {
+      method: 'POST', body: PNG_FIXTURE,
+    });
+  assert.equal(preparedShotUpload.status, 409);
+  assert.match((await preparedShotUpload.json()).error, /不可再混入/);
+  await request(base, `/api/jobs/${preparedPhraseDraft.job.id}/abort`, { method: 'POST' });
+
+  const ambiguousPreparedPhrase = await fetch(base + '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock', title: '重複 anchor', body: '主力動向，稍後再看主力動向。',
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: {
+          layoutId: 'focusstock-phone-portrait.v1', anchor: { phrase: '主力動向' },
+        },
+      },
+    }),
+  });
+  assert.equal(ambiguousPreparedPhrase.status, 400);
+  assert.match((await ambiguousPreparedPhrase.json()).error, /ambiguous/);
 
   const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
   const renderDoneBlock = serverSource.match(
@@ -1189,6 +1328,36 @@ async function main() {
   assert.equal(secondRevision.revision.parentRevisionId, created.job.revisionId);
   assert.equal(secondRevision.revisionSummaries.find((item) => item.id === iterated.job.revisionId)
     .source.parentRevisionId, created.job.revisionId);
+
+  const preparedCarrySource = path.join(DATA_DIR, 'prepared-carry-source.mp4');
+  fs.writeFileSync(preparedCarrySource, MP4_FIXTURE);
+  const carryStore = createProjectStore({
+    dataDir: DATA_DIR,
+    nowISO: () => '2026-08-24T00:00:00.000Z',
+    idFactory: () => 'unused-carry-id',
+  });
+  const preparedCarryAsset = carryStore.ingestAsset(
+    created.job.projectId, preparedCarrySource, {
+      originalName: 'prior-ready-to-place.mp4',
+      kind: 'video',
+      role: 'prepared-phone-video',
+      origin: 'chipk-simulator-capture',
+    });
+  const preparedCarryDraft = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: created.job.projectId,
+      parentRevisionId: iterated.job.revisionId,
+      reuseAssetIds: [preparedCarryAsset.id],
+      template: 'focusstock',
+      title: 'Prepared clip 不沿用',
+      body: '下一版必須重新取得 ready-to-place placement。',
+    }),
+  });
+  assert.deepEqual(preparedCarryDraft.job.assetRefs, []);
+  assert.equal(fs.existsSync(path.join(
+    DATA_DIR, 'jobs', preparedCarryDraft.job.id, 'input', 'broll1.mp4')), false);
+  await request(base, `/api/jobs/${preparedCarryDraft.job.id}/abort`, { method: 'POST' });
 
   const repeatedSubmit = await fetch(base + `/api/jobs/${id}/submit`, { method: 'POST' });
   assert.equal(repeatedSubmit.status, 409);

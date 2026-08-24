@@ -819,7 +819,8 @@ function drawProjectAssetLibrary() {
   }
   const selected = new Set(reusedAssets.map((asset) => String(asset.id)));
   const available = (activeProject.assets || []).filter((asset) =>
-    ['image', 'video'].includes(asset.kind) && !selected.has(String(asset.id)));
+    ['image', 'video'].includes(asset.kind) && asset.role !== 'prepared-phone-video'
+      && !selected.has(String(asset.id)));
   wrap.hidden = false;
   let loaded = false;
   const body = el('div', { class: 'asset-library-body' },
@@ -1298,6 +1299,10 @@ function projectAssetCard(projectDetail, job) {
     if (asset.kind === 'speaker-video') return {
       category: 'avatar', role: '講者 Avatar', origin: '來源未記錄',
     };
+    if (asset.kind === 'video' && asset.role === 'prepared-phone-video') return {
+      category: 'prepared', role: '已完成手機畫面',
+      origin: asset.origin === 'chipk-simulator-capture' ? 'ChipK Capture' : '來源未記錄',
+    };
     if (asset.kind === 'image') return {
       category: 'broll', role: 'B-roll 圖片', origin: '來源未記錄',
     };
@@ -1365,7 +1370,9 @@ function projectAssetCard(projectDetail, job) {
     }, thumb, el('span', { class: 'asset-browser-copy' },
       el('b', {}, asset.originalName || '未命名素材'),
       el('span', {}, `${info.role}・${info.origin}・${fileSize(asset.size)}`),
-      el('span', { class: 'asset-status' }, refs.has(String(asset.id)) ? '本版有引用' : 'Project 可重用')));
+      el('span', { class: 'asset-status' }, refs.has(String(asset.id))
+        ? '本版有引用'
+        : (info.category === 'prepared' ? '只能由 Capture placement 選用' : 'Project 可重用'))));
   };
 
   const unresolvedRefCard = (id) => el('div', { class: 'note' },
@@ -1383,6 +1390,8 @@ function projectAssetCard(projectDetail, job) {
       el('span', {}, compositionValue('source', '無'))),
     el('div', { class: 'composition-item' }, el('b', {}, '講者 Avatar'),
       el('span', {}, compositionValue('avatar', '無直接引用'))),
+    el('div', { class: 'composition-item' }, el('b', {}, '已完成手機畫面'),
+      el('span', {}, compositionValue('prepared', '無'))),
     el('div', { class: 'composition-item' }, el('b', {}, '素材型 B-roll'),
       el('span', {}, compositionValue('broll', '無'))));
 
@@ -1403,7 +1412,7 @@ function projectAssetCard(projectDetail, job) {
     let libraryLoaded = false;
     const libraryBody = el('div', { class: 'asset-library-body' },
       el('div', { class: 'asset-section-note' },
-        '這些素材保留在 Project 中；建立下一版時可以重新選擇。'));
+        '一般素材可在下一版重新選擇；已完成手機畫面只能由新的 Capture placement 選用。'));
     const loadLibrary = () => {
       if (libraryLoaded) return;
       libraryLoaded = true;
@@ -1434,6 +1443,118 @@ function projectAssetCard(projectDetail, job) {
     ? byId.get(String(browserState.previewAssetId)) : null;
   if (restoredAsset || selectedAssets.length) showPreview(restoredAsset || selectedAssets[0]);
   return root;
+}
+
+function verifiedPreparedPhoneTimelineEvidence(job) {
+  const isSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  const intent = job && job.materialAcquisition;
+  const result = job && job.materialAcquisitionResult;
+  if (!intent || intent.operation !== 'prepared-video' || intent.policy !== 'require-capture'
+      || intent.route !== 'chipk.stock.main-force'
+      || intent.stock?.id !== '3441'
+      || intent.presentation?.profileId !== 'chipk.stock-main-force-portrait.v1'
+      || intent.placement?.layoutId !== 'focusstock-phone-portrait.v1'
+      || !result || result.status !== 'acquired' || result.contractVersion !== 2
+      || result.provider !== 'chipk-simulator-capture' || result.providerVersion !== '0.3.0'
+      || result.placementStatus !== 'compiled' || result.automaticTimelineUse !== true
+      || result.presentation?.profileId !== intent.presentation.profileId
+      || !result.preparedArtifact || result.preparedArtifact.role !== 'prepared-video'
+      || !result.preparedArtifact.assetRef || !isSha256(result.preparedArtifact.sha256)
+      || !isSha256(result.compiledPlanSha256)) return null;
+
+  const placements = (job.timelinePlacements || []).filter((item) =>
+    item && item.kind === 'prepared-phone-video');
+  if (placements.length !== 1) return null;
+  const placement = placements[0];
+  const compiled = result.placement;
+  const expectedFrames = Math.ceil(Number(result.preparedArtifact.media?.durationSeconds) * 30);
+  if (placement.assetRef !== result.preparedArtifact.assetRef
+      || placement.profileId !== intent.presentation.profileId
+      || placement.layoutId !== intent.placement.layoutId
+      || placement.visualOwner !== 'prepared-phone-video'
+      || placement.conflictPolicy !== 'suppress-entire-overlapping-placement'
+      || placement.sourceSha256 !== result.preparedArtifact.sha256
+      || placement.planSha256 !== result.compiledPlanSha256
+      || placement.timelineBasis !== 'focusstock-main-v1'
+      || placement.fps !== 30
+      || !Number.isInteger(placement.startFrame) || placement.startFrame < 0
+      || !Number.isInteger(placement.endFrame) || placement.endFrame <= placement.startFrame
+      || !Number.isInteger(placement.durationInFrames) || placement.durationInFrames !== expectedFrames
+      || placement.endFrame - placement.startFrame !== placement.durationInFrames
+      || placement.startSec !== Number((placement.startFrame / 30).toFixed(6))
+      || placement.endSec !== Number((placement.endFrame / 30).toFixed(6))
+      || placement.compositionTimeline !== 'Focusstock'
+      || placement.compositionOffsetFrames !== 30
+      || placement.compositionStartFrame !== placement.startFrame + 30
+      || placement.compositionEndFrame !== placement.endFrame + 30
+      || placement.compositionStartSec !== Number((placement.compositionStartFrame / 30).toFixed(6))
+      || placement.compositionEndSec !== Number((placement.compositionEndFrame / 30).toFixed(6))
+      || !compiled || compiled.fps !== placement.fps
+      || compiled.startFrame !== placement.startFrame || compiled.endFrame !== placement.endFrame
+      || compiled.durationInFrames !== placement.durationInFrames
+      || compiled.startSec !== placement.startSec || compiled.endSec !== placement.endSec
+      || compiled.playbackRate !== 1 || compiled.muted !== true
+      || compiled.objectFit !== 'contain' || compiled.crop !== 'none'
+      || compiled.trim !== 'none' || compiled.loop !== false) return null;
+
+  const manifest = job.renderInputManifest;
+  if (!manifest || manifest.schemaVersion !== 1 || manifest.template !== 'focusstock'
+      || manifest.compositionId !== 'Focusstock'
+      || manifest.options?.preparedPhoneMode !== 'ready-to-place'
+      || manifest.options?.withAd !== false
+      || !isSha256(job.renderInputManifestSha256)
+      || !Array.isArray(manifest.artifactInputs)) return null;
+  const sourceInputs = manifest.artifactInputs.filter((input) =>
+    input && input.path === 'public/prepared-phone-material.mp4');
+  const planInputs = manifest.artifactInputs.filter((input) =>
+    input && input.path === 'src/Focusstock/prepared-phone-material.generated.json');
+  if (sourceInputs.length !== 1 || planInputs.length !== 1
+      || sourceInputs[0].sha256 !== result.preparedArtifact.sha256
+      || sourceInputs[0].size !== result.preparedArtifact.size
+      || planInputs[0].sha256 !== result.compiledPlanSha256) return null;
+
+  return {
+    profileId: placement.profileId,
+    placement,
+    sourceSha256: placement.sourceSha256,
+    planSha256: placement.planSha256,
+    renderInputManifestSha256: job.renderInputManifestSha256,
+    renderVerified: job.renderEvidence?.schemaVersion === 1
+      && job.renderEvidence.renderInputManifestSha256 === job.renderInputManifestSha256,
+  };
+}
+
+function preparedPhoneEvidenceCard(job) {
+  if (job.materialAcquisition?.operation !== 'prepared-video') return null;
+  const evidence = verifiedPreparedPhoneTimelineEvidence(job);
+  const result = job.materialAcquisitionResult;
+  const requestedProfile = job.materialAcquisition.presentation?.profileId || '未記錄';
+  const placement = evidence?.placement || result?.placement || null;
+  const status = evidence
+    ? (evidence.renderVerified ? '已配置並連結驗證 Render' : '已配置，Render input 已鎖定')
+    : '尚未通過 timeline／render-input 證據 gate';
+  const detail = evidence
+    ? `成片 ${placement.compositionStartSec.toFixed(2)}s–${placement.compositionEndSec.toFixed(2)}s`
+      + `（主段 ${placement.startSec.toFixed(2)}s–${placement.endSec.toFixed(2)}s）`
+      + `・${placement.durationInFrames} frames・1x・靜音・contain`
+    : `目前狀態：${result?.placementStatus || result?.status || '等待 Capture'}`;
+  return el('div', { class: 'card' },
+    el('div', { class: 'asset-section-head' },
+      el('h2', {}, '已完成手機畫面 placement'),
+      el('span', { class: 'asset-readonly' }, evidence ? '✓ 證據一致' : '尚未配置')),
+    el('div', { class: evidence ? 'asset-section-note' : 'note' }, status),
+    el('div', { class: 'composition-summary' },
+      el('div', { class: 'composition-item' }, el('b', {}, 'Presentation profile'),
+        el('span', {}, requestedProfile)),
+      el('div', { class: 'composition-item' }, el('b', {}, 'Timeline placement'),
+        el('span', {}, detail)),
+      el('div', { class: 'composition-item' }, el('b', {}, '手機內容處理'),
+        el('span', {}, 'Capture 已完成；Marketing Video 只放置，不重剪'))),
+    evidence ? el('details', { class: 'technical-details' },
+      el('summary', {}, '查看 source／plan／render linkage'),
+      el('code', {}, `source ${evidence.sourceSha256}\nplan ${evidence.planSha256}`
+        + `\nrender input ${evidence.renderInputManifestSha256}`
+        + `\nrender verified ${evidence.renderVerified ? 'yes' : 'pending'}`)) : '');
 }
 
 function automationStageCard(job) {
@@ -1704,6 +1825,7 @@ async function loadJob() {
   const sig = [job.id, job.status, job.queuePosition ?? '', (job.outputs || []).length, job.error || '',
     job.stage || '', job.cancelRequestedAt || '', job.cancelledAt || '', job.failedStage || '',
     job.renderInputManifestSha256 || '', JSON.stringify(job.timelinePlacements || []),
+    JSON.stringify(job.materialAcquisitionResult || null),
     job.graphicBroll && job.graphicBroll.planSha256 || '', graphicPlanInput && graphicPlanInput.sha256 || '',
     outputSig, renderEvidenceSig,
     projectDetailError ? projectDetailError.message : '', revisionRefs.join(','), projectAssetSig,
@@ -1760,6 +1882,9 @@ async function loadJob() {
     parts.push(revisionHistoryCard(projectDetail, job));
     parts.push(projectAssetCard(projectDetail, job));
   }
+
+  const preparedEvidence = preparedPhoneEvidenceCard(job);
+  if (preparedEvidence) parts.push(preparedEvidence);
 
   if (job.workflowMode === 'auto-broll' && job.graphicBroll && job.status !== 'review') {
     const evidenceCard = graphicBrollEvidenceCard(job);
@@ -1930,7 +2055,8 @@ async function iterateProject(job) {
     const selectedAssetRefs = (revision && revision.assetRefs) || [];
     const selectedAssetIds = new Set(selectedAssetRefs);
     reusedAssets = (project.assets || []).filter((asset) =>
-      ['image', 'video'].includes(asset.kind) && selectedAssetIds.has(asset.id));
+      ['image', 'video'].includes(asset.kind) && asset.role !== 'prepared-phone-video'
+        && selectedAssetIds.has(asset.id));
     // 同一版若歷史上留下多支 speaker asset，以最後寫入 Revision 的那支為準。
     const speakerAsset = selectedAssetRefs.slice().reverse().map((assetId) =>
       (project.assets || []).find((asset) => asset.id === assetId))
