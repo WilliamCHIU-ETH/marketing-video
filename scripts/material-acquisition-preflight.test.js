@@ -20,7 +20,7 @@ const PNG = Buffer.from(
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.2.0',
+  toolVersion: '0.2.1',
   productionReady: true,
   operations: ['screenshot', 'record'],
 };
@@ -48,7 +48,7 @@ function fixture(t) {
   const result = {
     contractVersion: 1,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
     status: 'completed',
     artifacts: [
       {
@@ -157,7 +157,7 @@ test('capability version mismatch falls back or fails closed before acquire', as
   const { request, result } = fixture(t);
   let acquireCalls = 0;
   const mismatched = {
-    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.1' }),
+    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.0' }),
     acquire: async () => { acquireCalls += 1; return result; },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: mismatched });
@@ -179,7 +179,7 @@ test('completed screenshot bundle becomes fresh only after full validation', asy
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
-  assert.equal(value.providerVersion, '0.2.0');
+  assert.equal(value.providerVersion, '0.2.1');
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
 });
@@ -188,7 +188,7 @@ test('result version drift follows prefer fallback and require fail-closed polic
   const { request, result } = fixture(t);
   const drifted = {
     ...result,
-    provider: { ...result.provider, toolVersion: '0.2.1' },
+    provider: { ...result.provider, toolVersion: '0.2.0' },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: provider(drifted) });
   assert.equal(preferred.status, 'fallback');
@@ -206,7 +206,7 @@ test('result envelope is closed and bound to request/provider/status/error invar
   const { request, result } = fixture(t);
   const badValues = [
     { ...result, requestId: 'other' },
-    { ...result, provider: { id: 'other', toolVersion: '0.2.0' } },
+    { ...result, provider: { id: 'other', toolVersion: '0.2.1' } },
     { ...result, evidence: [] },
     { ...result, error: { code: 'x', message: 'x', retryable: false } },
     { ...result, extra: true },

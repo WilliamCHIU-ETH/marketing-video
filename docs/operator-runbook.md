@@ -68,7 +68,7 @@ Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo r
 | `MINIMAX_API_KEY` | MiniMax fallback | 否 |
 | `MINIMAX_GROUP_ID` | MiniMax fallback | 否 |
 | `OPENAI_API_KEY` | 選用的 AI 生圖／判圖腳本 | 否 |
-| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.2.0` executable 絕對路徑 | 否 |
+| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.2.1` executable 絕對路徑 | 否 |
 | `WHISPER_MODEL_PATH` | 本機 whisper.cpp 模型；預設 `.cache/whisper/ggml-base-q5_1.bin` | 僅 ASR |
 | `WHISPER_MODEL_SHA256` | 模型校驗碼；換自訂模型時必須同步設定 | 僅 ASR |
 | `WHISPER_THREADS` | CPU thread 數；預設 `4` | 僅 ASR |
@@ -93,8 +93,8 @@ npm run test:chipk-provider-compat -- \
 ```
 
 目前 runtime lock 是 Provider ID `chipk-simulator-capture`、contract `1`、tool version
-`0.2.0`；已驗證 release identity 是 tag `v0.2.0`、commit
-`87c033bed59fd53242b1679bc71b39fb20a11832`。CLI runtime 只驗可觀測的 ID／contract／tool
+`0.2.1`；release candidate identity 是 tag `v0.2.1`、commit
+`b19f264aa1576bd6f1a24b2f20dbffef59f7ebb0`。正式 tag 前仍需 release-owner review；CLI runtime 只驗可觀測的 ID／contract／tool
 version，不宣稱能驗證 Git metadata。
 
 ## 歷史資料盤點
