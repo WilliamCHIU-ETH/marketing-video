@@ -29,6 +29,7 @@ import {
   PreparedPhoneMaterialLayer,
   preparedPhoneSuppressesFocusstockVisual,
 } from './PreparedPhoneMaterialLayer';
+import { FocusstockBrollLayer } from './FocusstockBrollLayer';
 
 /**
  * 焦點股日報 composition（直式 1080×1920）。
@@ -146,6 +147,9 @@ export const FocusstockComposition: React.FC = () => {
             </Sequence>
           );
         })}
+
+        {/* Producer-owned carried plan; suppressed cards never mount. */}
+        <FocusstockBrollLayer />
 
         {/* Capture 已完成手機內部的焦點、縮放與呈現；這裡只負責 scene container 與 placement。 */}
         <PreparedPhoneMaterialLayer />

@@ -125,6 +125,28 @@ if (PREPARED_PHONE_MODE === "ready-to-place" && TEMPLATE !== "focusstock") {
   console.error("❌ ready-to-place phone material 目前只支援 focusstock 版型");
   process.exit(1);
 }
+const FOCUSSTOCK_BROLL_ARG = process.argv.find((arg) =>
+  arg.startsWith("--focusstock-broll="));
+const FOCUSSTOCK_BROLL_MODE = FOCUSSTOCK_BROLL_ARG
+  ? FOCUSSTOCK_BROLL_ARG.slice("--focusstock-broll=".length)
+  : "disabled";
+if (!["disabled", "deferred", "carried-v1"].includes(FOCUSSTOCK_BROLL_MODE)) {
+  console.error(`❌ 不認得的 Focusstock B-roll mode：${FOCUSSTOCK_BROLL_MODE}`);
+  process.exit(1);
+}
+if (FOCUSSTOCK_BROLL_MODE !== "disabled"
+    && (TEMPLATE !== "focusstock" || PREPARED_PHONE_MODE !== "ready-to-place")) {
+  console.error("❌ carried Focusstock B-roll 只支援 ready-to-place Focusstock");
+  process.exit(1);
+}
+if (FOCUSSTOCK_BROLL_MODE === "deferred" && !STOP_BEFORE_RENDER) {
+  console.error("❌ deferred Focusstock B-roll 只能在 stop-before-render 準備階段使用");
+  process.exit(1);
+}
+if (FOCUSSTOCK_BROLL_MODE === "carried-v1" && !RENDER_ONLY) {
+  console.error("❌ carried-v1 只能 render 已由 server 鎖定的 canonical plan");
+  process.exit(1);
+}
 
 const WORKSPACE_STAGE_FILE = process.env.WORKSPACE_STAGE_FILE || null;
 const WORKSPACE_CANCEL_FILE = process.env.WORKSPACE_CANCEL_FILE || null;
@@ -1223,6 +1245,12 @@ async function main() {
         "--out=src/Focusstock/prepared-phone-material.generated.json",
       ], { cwd: PROJECT_DIR, stdio: "inherit" });
     }
+    execFileSync(process.execPath, [
+      "scripts/focusstock-broll-plan.js",
+      `--mode=${FOCUSSTOCK_BROLL_MODE}`,
+      ...(FOCUSSTOCK_BROLL_MODE === "carried-v1" ? ["--check"] : []),
+      "--out=src/Focusstock/focusstock-broll.generated.json",
+    ], { cwd: PROJECT_DIR, stdio: "inherit" });
     log("▶️  --render-only：沿用現有 public/ 與配圖計畫，直接 render");
     renderTemplate();
     return;
@@ -1430,6 +1458,13 @@ function prepareShots() {
     "--subtitles=src/subtitles.json",
     "--video-meta=src/video-meta.json",
     "--out=src/Focusstock/prepared-phone-material.generated.json",
+  ], { cwd: PROJECT_DIR, stdio: "inherit" });
+  // The final carry plan depends on the prepared clip's compiled frame interval. Clear stale
+  // workspace state now; a managed deferred Run writes the verified final plan before snapshot.
+  execFileSync(process.execPath, [
+    "scripts/focusstock-broll-plan.js",
+    "--mode=disabled",
+    "--out=src/Focusstock/focusstock-broll.generated.json",
   ], { cwd: PROJECT_DIR, stdio: "inherit" });
   reportStage("prepared");
 }
