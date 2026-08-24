@@ -61,9 +61,14 @@ function screenshotProvider(onCall = () => {}) {
     capabilities: async () => ({
       schemaVersion: 1,
       providerId: 'chipk-simulator-capture',
-      toolVersion: '0.2.1',
+      toolVersion: '0.3.0',
       productionReady: true,
       operations: ['screenshot', 'record'],
+      contractCapabilities: [{
+        contractVersion: 1, operations: ['screenshot', 'record'],
+        requestSchema: 'contracts/capture-request.schema.json',
+        resultSchema: 'contracts/capture-result.schema.json',
+      }],
     }),
     acquire: async (request) => {
       onCall(request);
@@ -73,7 +78,7 @@ function screenshotProvider(onCall = () => {}) {
       return {
         contractVersion: 1,
         requestId: request.requestId,
-        provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+        provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
         status: 'completed',
         artifacts: [
           {
@@ -101,7 +106,7 @@ test('validated screenshot is ingested and materialized into actual job input', 
   });
   assert.equal(summary.status, 'acquired');
   assert.equal(summary.contractVersion, 1);
-  assert.equal(summary.providerVersion, '0.2.1');
+  assert.equal(summary.providerVersion, '0.3.0');
   assert.equal(summary.artifact.inputName, 'shot1.png');
   assert.ok(ctx.job.assetRefs.includes(summary.artifact.assetRef));
   assert.deepEqual(fs.readFileSync(path.join(ctx.jobDirectory, 'input', 'shot1.png')), PNG);
@@ -126,7 +131,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
 if (args.join(' ') === 'capabilities --json') {
-  process.stdout.write(JSON.stringify({schemaVersion:1,providerId:'chipk-simulator-capture',toolVersion:'0.2.1',productionReady:true,operations:['screenshot','record']}));
+  process.stdout.write(JSON.stringify({schemaVersion:1,providerId:'chipk-simulator-capture',toolVersion:'0.3.0',productionReady:true,operations:['screenshot','record'],contractCapabilities:[{contractVersion:1,operations:['screenshot','record'],requestSchema:'contracts/capture-request.schema.json',resultSchema:'contracts/capture-result.schema.json'},{contractVersion:2,operations:['prepared-video'],requestSchema:'contracts/capture-request-v2.schema.json',resultSchema:'contracts/capture-result-v2.schema.json',presentationProfiles:[{id:'chipk.stock-main-force-portrait.v1',version:1,status:'ready_to_place',sourceKind:'screenshot',routeIds:['chipk.stock.main-force'],stockIds:['3441'],artifactRole:'prepared-video'}]}]}));
   process.exit(0);
 }
 if (args[0] !== 'acquire' || args[1] !== '--request' || args[3] !== '--json') process.exit(2);
@@ -138,7 +143,7 @@ fs.writeFileSync(path.join(request.outputDirectory, 'capture-manifest.json'), ma
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 process.stdout.write(JSON.stringify({
   contractVersion:1,requestId:request.requestId,
-  provider:{id:'chipk-simulator-capture',toolVersion:'0.2.1'},status:'completed',
+  provider:{id:'chipk-simulator-capture',toolVersion:'0.3.0'},status:'completed',
   artifacts:[
     {role:'screenshot',kind:'image',relativePath:'screenshot.png',sha256:sha(png),mimeType:'image/png',media:{width:1,height:1}},
     {role:'capture-manifest',kind:'json',relativePath:'capture-manifest.json',sha256:sha(manifest),mimeType:'application/json'}

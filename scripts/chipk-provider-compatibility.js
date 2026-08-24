@@ -79,11 +79,57 @@ async function runConnectedScreenshot(providerBin, root) {
   });
   const savedProject = projectStore.get(project.id);
   assert.equal(summary.status, 'acquired');
-  assert.equal(summary.contractVersion, PROVIDER_LOCK.contractVersion);
+  assert.equal(summary.contractVersion, 1);
   assert.equal(summary.providerVersion, PROVIDER_LOCK.toolVersion);
   assert.equal(savedProject.assets.some((asset) => asset.id === summary.artifact.assetRef), true);
   assert.equal(job.assetRefs.includes(summary.artifact.assetRef), true);
   assert.equal(fs.existsSync(path.join(jobDirectory, 'input', summary.artifact.inputName)), true);
+}
+
+async function runConnectedPreparedVideo(providerBin, root) {
+  let id = 100;
+  const dataDir = path.join(root, 'prepared-data');
+  const projectStore = createProjectStore({
+    dataDir,
+    nowISO: () => '2026-08-21T00:00:00.000Z',
+    idFactory: () => `compat-${++id}`,
+  });
+  const project = projectStore.create({
+    name: 'ChipK v2 compatibility', template: 'default', owner: 'compatibility-test',
+  });
+  const jobDirectory = path.join(dataDir, 'jobs', 'prepared-job');
+  fs.mkdirSync(path.join(jobDirectory, 'input'), { recursive: true });
+  const job = {
+    id: 'prepared-job', projectId: project.id, assetRefs: [],
+    materialAcquisition: normalizeMaterialAcquisitionIntent({
+      policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+      route: 'chipk.stock.main-force', stock: { id: '3441' },
+      presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+    }),
+  };
+  const summary = await prepareJobMaterialAcquisition({
+    job,
+    jobDirectory,
+    projectStore,
+    requestIdFactory: () => 'compat-request-v2-1',
+    nowISO: () => '2026-08-21T00:00:01.000Z',
+    saveJob: () => {},
+    provider: createChipKCaptureCliAdapter({ command: providerBin }),
+  });
+  const savedProject = projectStore.get(project.id);
+  const asset = savedProject.assets.find((item) => item.id === summary.artifact.assetRef);
+  assert.equal(summary.status, 'acquired');
+  assert.equal(summary.contractVersion, 2);
+  assert.equal(summary.providerVersion, PROVIDER_LOCK.toolVersion);
+  assert.equal(summary.artifact.role, 'prepared-video');
+  assert.equal(summary.presentation.profileId, 'chipk.stock-main-force-portrait.v1');
+  assert.equal(summary.automaticTimelineUse, false);
+  assert.equal(summary.artifacts.length, 5);
+  assert.equal(asset.kind, 'video');
+  assert.equal(asset.sha256, summary.artifact.sha256);
+  assert.equal(job.assetRefs.includes(asset.id), true);
+  assert.equal(fs.readdirSync(path.join(jobDirectory, 'input')).length, 0);
+  assert.equal(fs.existsSync(path.join(jobDirectory, summary.evidenceFile)), true);
 }
 
 async function main() {
@@ -93,18 +139,21 @@ async function main() {
     const capabilities = await probeChipKCaptureCli({ command: providerBin });
     assertVersionMismatch(capabilities);
     await runConnectedScreenshot(providerBin, root);
+    await runConnectedPreparedVideo(providerBin, root);
     process.stdout.write(`${JSON.stringify({
       ok: true,
       provider: {
         id: PROVIDER_LOCK.providerId,
-        contractVersion: PROVIDER_LOCK.contractVersion,
+        contractVersions: Object.keys(PROVIDER_LOCK.contracts).map(Number),
         toolVersion: PROVIDER_LOCK.toolVersion,
       },
       checks: {
         realCliJsonBoundary: true,
         exactVersionMismatchRejected: true,
         screenshotResultValidated: true,
-        projectAssetIngested: true,
+        preparedVideoResultValidated: true,
+        projectAssetsIngested: true,
+        timelinePlacementClaimed: false,
       },
       runtime: 'synthetic-conformance',
       simulatorUsed: false,

@@ -14,9 +14,25 @@ const {
 const capabilities = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.2.1',
+  toolVersion: '0.3.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
+  contractCapabilities: [
+    {
+      contractVersion: 1, operations: ['screenshot', 'record'],
+      requestSchema: 'contracts/capture-request.schema.json',
+      resultSchema: 'contracts/capture-result.schema.json',
+    },
+    {
+      contractVersion: 2, operations: ['prepared-video'],
+      requestSchema: 'contracts/capture-request-v2.schema.json',
+      resultSchema: 'contracts/capture-result-v2.schema.json',
+      presentationProfiles: [{
+        id: 'profile', version: 1, status: 'ready_to_place', sourceKind: 'screenshot',
+        routeIds: ['chipk.route'], stockIds: ['1'], artifactRole: 'prepared-video',
+      }],
+    },
+  ],
 };
 
 function outputDir(t) {
@@ -60,7 +76,7 @@ test('acquire writes a private request file and invokes the locked CLI shape', a
     return callback(null, JSON.stringify({
       contractVersion: 1,
       requestId: request.requestId,
-      provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+      provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
       status: 'completed',
       artifacts: [],
     }), '');
@@ -77,7 +93,7 @@ test('typed non-completed result on provider exit 3 is returned to the Port', as
   const runner = (_command, _args, _options, callback) => callback(error, JSON.stringify({
     contractVersion: 1,
     requestId: 'req-human',
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
     status: 'human_action_required',
     artifacts: [],
     error: { code: 'vip_session_required' },
@@ -154,9 +170,29 @@ test('capability version mismatch is rejected by the exact consumer lock', async
   await assert.rejects(
     () => probeChipKCaptureCli({
       runner: (_c, _a, _o, cb) => cb(null,
-        JSON.stringify({ ...capabilities, toolVersion: '0.2.0' }), ''),
+        JSON.stringify({ ...capabilities, toolVersion: '0.2.9' }), ''),
     }),
     (error) => error instanceof CaptureCliAdapterError
       && error.code === 'provider_version_incompatible',
   );
+});
+
+test('capability discovery requires independent valid v1 and v2 documents', async () => {
+  const invalidValues = [
+    { ...capabilities, contractCapabilities: capabilities.contractCapabilities.slice(0, 1) },
+    {
+      ...capabilities,
+      contractCapabilities: capabilities.contractCapabilities.map((item) => item.contractVersion === 2
+        ? { ...item, presentationProfiles: [] } : item),
+    },
+  ];
+  for (const value of invalidValues) {
+    await assert.rejects(
+      () => probeChipKCaptureCli({
+        runner: (_c, _a, _o, cb) => cb(null, JSON.stringify(value), ''),
+      }),
+      (error) => error instanceof CaptureCliAdapterError
+        && error.code === 'provider_contract_incompatible',
+    );
+  }
 });

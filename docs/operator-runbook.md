@@ -68,7 +68,7 @@ Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo r
 | `MINIMAX_API_KEY` | MiniMax fallback | 否 |
 | `MINIMAX_GROUP_ID` | MiniMax fallback | 否 |
 | `OPENAI_API_KEY` | 選用的 AI 生圖／判圖腳本 | 否 |
-| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.2.1` executable 絕對路徑 | 否 |
+| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.3.0` executable 絕對路徑 | 否 |
 | `WHISPER_MODEL_PATH` | 本機 whisper.cpp 模型；預設 `.cache/whisper/ggml-base-q5_1.bin` | 僅 ASR |
 | `WHISPER_MODEL_SHA256` | 模型校驗碼；換自訂模型時必須同步設定 | 僅 ASR |
 | `WHISPER_THREADS` | CPU thread 數；預設 `4` | 僅 ASR |
@@ -92,10 +92,36 @@ npm run test:chipk-provider-compat -- \
   --provider-bin /absolute/path/to/chipk-simulator-capture/test/conformance-cli.js
 ```
 
-目前 runtime lock 是 Provider ID `chipk-simulator-capture`、contract `1`、tool version
-`0.2.1`；release candidate identity 是 tag `v0.2.1`、commit
-`b19f264aa1576bd6f1a24b2f20dbffef59f7ebb0`。正式 tag 前仍需 release-owner review；CLI runtime 只驗可觀測的 ID／contract／tool
-version，不宣稱能驗證 Git metadata。
+目前 runtime lock 是 Provider ID `chipk-simulator-capture`、獨立 contracts `1` 與 `2`、
+tool version `0.3.0`；release identity 是 tag `v0.3.0`、commit
+`586fbe7414ab0c25d78ae6e462887fe72030e0a7`。CLI runtime 驗可觀測的 ID、capability schema、
+各 contract capability／schema path 與 tool version，不宣稱能驗證 Git metadata。
+
+Contract v1 保留 screenshot／record。影片 workflow 可明確提交 Contract v2：
+
+```json
+{
+  "materialAcquisition": {
+    "policy": "require-capture",
+    "operation": "prepared-video",
+    "mode": "test",
+    "route": "chipk.stock.main-force",
+    "stock": { "id": "3441" },
+    "presentation": { "profileId": "chipk.stock-main-force-portrait.v1" }
+  }
+}
+```
+
+App 只會送出 Provider capability 明列支援的 profile／route／stock；coverage gap 會明確記成
+`provider_coverage_gap`，不會降級呼叫 screenshot 或 raw record。成功的五件式 bundle 全數
+驗證後，`prepared.mp4` 以該 Project 的一般 `video` Asset 保存，並由 Revision 的
+`assetRefs`／`materialAcquisitionResult` 保留 provenance。這不代表 timeline placement 或
+final render 使用。
+
+`v0.3.0` 尚未廣告 `runReadiness.vipSession=verified_before_mutation`，因此 App 只接受
+synthetic／`mode=test` compatibility，`mode=live` prepared-video 會在 acquire 前以
+`provider_live_readiness_unverified` fail closed。這是 live cutover blocker；不得切換 active
+`CHIPK_CAPTURE_BIN` 或繞過 gate。
 
 ## 歷史資料盤點
 

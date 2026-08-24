@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 const {
   MaterialAcquisitionError,
@@ -20,9 +21,27 @@ const PNG = Buffer.from(
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.2.1',
+  toolVersion: '0.3.0',
   productionReady: true,
   operations: ['screenshot', 'record'],
+  contractCapabilities: [
+    {
+      contractVersion: 1, operations: ['screenshot', 'record'],
+      requestSchema: 'contracts/capture-request.schema.json',
+      resultSchema: 'contracts/capture-result.schema.json',
+    },
+    {
+      contractVersion: 2, operations: ['prepared-video'],
+      requestSchema: 'contracts/capture-request-v2.schema.json',
+      resultSchema: 'contracts/capture-result-v2.schema.json',
+      presentationProfiles: [{
+        id: 'chipk.stock-main-force-portrait.v1', version: 1,
+        status: 'ready_to_place', sourceKind: 'screenshot',
+        routeIds: ['chipk.stock.main-force'], stockIds: ['3441'],
+        artifactRole: 'prepared-video',
+      }],
+    },
+  ],
 };
 
 function sha256(value) {
@@ -48,7 +67,7 @@ function fixture(t) {
   const result = {
     contractVersion: 1,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.2.1' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
     status: 'completed',
     artifacts: [
       {
@@ -80,6 +99,94 @@ function provider(result, capabilities = CAPABILITIES) {
   };
 }
 
+function preparedFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'material-port-v2-'));
+  const outputDirectory = path.join(root, 'output');
+  const bundle = path.join(outputDirectory, 'ready-to-place');
+  fs.mkdirSync(bundle, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const request = buildCaptureRequest(normalizeMaterialAcquisitionIntent({
+    policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+    route: 'chipk.stock.main-force', stock: { id: '3441' },
+    presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+  }), { requestId: 'request-v2-3441', outputDirectory });
+  const screenshot = path.join(bundle, 'screenshot.png');
+  fs.writeFileSync(screenshot, PNG);
+  const video = path.join(bundle, 'prepared.mp4');
+  execFileSync('ffmpeg', [
+    '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=16x32:r=30:d=1',
+    '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', video,
+  ]);
+  const capture = Buffer.from(JSON.stringify({
+    schemaVersion: 1, route: { id: request.target.routeId },
+    parameters: { stockid: request.target.stockId },
+    screenshot: { file: 'screenshot.png', sha256: sha256(PNG) },
+    verification: {
+      expectedTexts: ['主力', '3441'], matchedTexts: ['主力', '3441'],
+      contentTexts: { expected: ['買賣家數差'], observed: ['買賣家數差'], missing: [] },
+    },
+    catalogVersion: 'catalog-v2-test',
+  }));
+  fs.writeFileSync(path.join(bundle, 'capture-manifest.json'), capture);
+  const videoBytes = fs.readFileSync(video);
+  const planValue = {
+    schemaVersion: 1, contractVersion: 2, requestId: request.requestId,
+    operation: 'prepared-video',
+    profile: { id: request.presentation.profileId, version: 1, status: 'ready_to_place' },
+    target: { routeId: request.target.routeId, stockId: request.target.stockId, mode: request.mode },
+    source: {
+      kind: 'screenshot', file: 'screenshot.png', sha256: sha256(PNG),
+      captureManifest: { file: 'capture-manifest.json', sha256: sha256(capture) },
+    },
+    timeline: { durationSeconds: 1, fps: 30, frameCount: 30 },
+    output: { codec: 'h264', width: 16, height: 32 },
+  };
+  const plan = Buffer.from(JSON.stringify(planValue));
+  fs.writeFileSync(path.join(bundle, 'presentation-plan.json'), plan);
+  const preparation = Buffer.from(JSON.stringify({
+    schemaVersion: 1, contractVersion: 2, requestId: request.requestId,
+    status: 'ready_to_place', profile: planValue.profile, source: planValue.source,
+    presentationPlan: { file: 'presentation-plan.json', sha256: sha256(plan) },
+    output: {
+      role: 'prepared-video', file: 'prepared.mp4', sha256: sha256(videoBytes),
+      codec: 'h264', width: 16, height: 32, durationSeconds: 1,
+    },
+    publication: { strategy: 'staging_directory_atomic_rename', finalDirectory: 'ready-to-place' },
+  }));
+  fs.writeFileSync(path.join(bundle, 'preparation-manifest.json'), preparation);
+  const jsonArtifact = (role, name, bytes) => ({
+    role, kind: 'json', relativePath: `ready-to-place/${name}`,
+    sha256: sha256(bytes), mimeType: 'application/json',
+  });
+  const result = {
+    contractVersion: 2, requestId: request.requestId,
+    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+    status: 'completed',
+    artifacts: [
+      {
+        role: 'prepared-video', kind: 'video', relativePath: 'ready-to-place/prepared.mp4',
+        sha256: sha256(videoBytes), mimeType: 'video/mp4',
+        media: { codec: 'h264', width: 16, height: 32, durationSeconds: 1 },
+      },
+      {
+        role: 'screenshot', kind: 'image', relativePath: 'ready-to-place/screenshot.png',
+        sha256: sha256(PNG), mimeType: 'image/png', media: { width: 1, height: 1 },
+      },
+      jsonArtifact('capture-manifest', 'capture-manifest.json', capture),
+      jsonArtifact('presentation-plan', 'presentation-plan.json', plan),
+      jsonArtifact('preparation-manifest', 'preparation-manifest.json', preparation),
+    ],
+    evidence: {
+      routeSelection: 'catalog_exact_match', navigation: 'expected_texts_verified',
+      material: 'ready_to_place', catalogVersion: 'catalog-v2-test',
+      presentationProfile: { id: request.presentation.profileId, version: 1, status: 'ready_to_place' },
+      publication: 'atomic_directory_rename',
+    },
+    error: null,
+  };
+  return { root, outputDirectory, request, result };
+}
+
 test('closed intent accepts only policy/operation/mode/route/stock/recipe', () => {
   const normalized = normalizeMaterialAcquisitionIntent({
     policy: 'require-capture',
@@ -106,6 +213,26 @@ test('closed intent accepts only policy/operation/mode/route/stock/recipe', () =
     }),
     (error) => error.code === 'invalid_material_intent',
   );
+});
+
+test('prepared-video intent produces a closed Contract v2 request with presentation profile', (t) => {
+  const outputDirectory = fixture(t).outputDirectory;
+  const intent = normalizeMaterialAcquisitionIntent({
+    policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+    route: 'chipk.stock.main-force', stock: { id: '3441' },
+    presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+  });
+  const request = buildCaptureRequest(intent, { requestId: 'request-v2', outputDirectory });
+  assert.deepEqual(request, {
+    contractVersion: 2, requestId: 'request-v2', operation: 'prepared-video', mode: 'test',
+    target: { routeId: 'chipk.stock.main-force', stockId: '3441' },
+    presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+    outputDirectory: path.resolve(outputDirectory),
+  });
+  assert.throws(() => normalizeMaterialAcquisitionIntent({
+    operation: 'prepared-video', mode: 'test', route: 'chipk.stock.main-force',
+    stock: { id: '3441' },
+  }), (error) => error.code === 'invalid_material_intent');
 });
 
 test('server-built request owns requestId and absolute outputDirectory', (t) => {
@@ -145,19 +272,87 @@ test('prefer falls back and require blocks when provider is absent', async (t) =
 
 test('capability operation gate prevents unsupported acquisition', async (t) => {
   const { request, result } = fixture(t);
+  const contractCapabilities = CAPABILITIES.contractCapabilities.map((item) => (
+    item.contractVersion === 1 ? { ...item, operations: ['record'] } : item));
   const value = await acquireOptionalMaterial({
-    request,
-    provider: provider(result, { ...CAPABILITIES, operations: ['record'] }),
+    request, provider: provider(result, { ...CAPABILITIES, contractCapabilities }),
   });
   assert.equal(value.status, 'fallback');
   assert.equal(value.reason, 'provider_operation_unsupported');
+});
+
+test('v2 capability coverage gap is explicit and never invokes a lower operation', async (t) => {
+  const { request, result } = preparedFixture(t);
+  const unsupported = {
+    ...request,
+    presentation: { profileId: 'chipk.unsupported-profile' },
+  };
+  let calls = 0;
+  const selectedProvider = {
+    capabilities: async () => CAPABILITIES,
+    acquire: async () => { calls += 1; return result; },
+  };
+  const preferred = await acquireOptionalMaterial({ request: unsupported, provider: selectedProvider });
+  assert.equal(preferred.status, 'fallback');
+  assert.equal(preferred.reason, 'provider_coverage_gap');
+  await assert.rejects(
+    () => acquireOptionalMaterial({
+      policy: 'require-capture', request: unsupported, provider: selectedProvider,
+    }),
+    (error) => error.code === 'provider_coverage_gap',
+  );
+  assert.equal(calls, 0);
+});
+
+test('v2 live acquisition remains blocked until capability proves VIP readiness before mutation', async (t) => {
+  const { request, result } = preparedFixture(t);
+  let calls = 0;
+  const liveRequest = { ...request, mode: 'live' };
+  await assert.rejects(
+    () => acquireOptionalMaterial({
+      policy: 'require-capture', request: liveRequest,
+      provider: {
+        capabilities: async () => CAPABILITIES,
+        acquire: async () => { calls += 1; return result; },
+      },
+    }),
+    (error) => error.code === 'provider_live_readiness_unverified',
+  );
+  assert.equal(calls, 0);
+});
+
+test('completed v2 bundle is accepted only with exact evidence and cross-file provenance', async (t) => {
+  const { request, result, outputDirectory } = preparedFixture(t);
+  const acquired = await acquireOptionalMaterial({
+    policy: 'require-capture', request, provider: provider(result),
+  });
+  assert.equal(acquired.status, 'acquired');
+  assert.equal(acquired.contractVersion, 2);
+  assert.equal(acquired.material.length, 5);
+
+  const manifestFile = path.join(outputDirectory, 'ready-to-place', 'preparation-manifest.json');
+  const forged = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  forged.output.sha256 = '0'.repeat(64);
+  const forgedBytes = Buffer.from(JSON.stringify(forged));
+  fs.writeFileSync(manifestFile, forgedBytes);
+  const tampered = {
+    ...result,
+    artifacts: result.artifacts.map((artifact) => artifact.role === 'preparation-manifest'
+      ? { ...artifact, sha256: sha256(forgedBytes) } : artifact),
+  };
+  await assert.rejects(
+    () => acquireOptionalMaterial({
+      policy: 'require-capture', request, provider: provider(tampered),
+    }),
+    (error) => error.code === 'provider_provenance_invalid',
+  );
 });
 
 test('capability version mismatch falls back or fails closed before acquire', async (t) => {
   const { request, result } = fixture(t);
   let acquireCalls = 0;
   const mismatched = {
-    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.0' }),
+    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.9' }),
     acquire: async () => { acquireCalls += 1; return result; },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: mismatched });
@@ -179,7 +374,7 @@ test('completed screenshot bundle becomes fresh only after full validation', asy
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
-  assert.equal(value.providerVersion, '0.2.1');
+  assert.equal(value.providerVersion, '0.3.0');
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
 });
@@ -188,7 +383,7 @@ test('result version drift follows prefer fallback and require fail-closed polic
   const { request, result } = fixture(t);
   const drifted = {
     ...result,
-    provider: { ...result.provider, toolVersion: '0.2.0' },
+    provider: { ...result.provider, toolVersion: '0.2.9' },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: provider(drifted) });
   assert.equal(preferred.status, 'fallback');
@@ -206,7 +401,7 @@ test('result envelope is closed and bound to request/provider/status/error invar
   const { request, result } = fixture(t);
   const badValues = [
     { ...result, requestId: 'other' },
-    { ...result, provider: { id: 'other', toolVersion: '0.2.1' } },
+    { ...result, provider: { id: 'other', toolVersion: '0.3.0' } },
     { ...result, evidence: [] },
     { ...result, error: { code: 'x', message: 'x', retryable: false } },
     { ...result, extra: true },

@@ -8,9 +8,8 @@ const { inspectMediaFile } = require('./project-store');
 const PROVIDER_LOCK = Object.freeze(require('../config/chipk-capture-provider.lock.json'));
 
 const PROVIDER_ID = PROVIDER_LOCK.providerId;
-const CONTRACT_VERSION = PROVIDER_LOCK.contractVersion;
 const POLICIES = new Set(['prefer-capture', 'require-capture', 'disable-capture']);
-const OPERATIONS = new Set(['screenshot', 'record']);
+const OPERATIONS = new Set(['screenshot', 'record', 'prepared-video']);
 const MODES = new Set(['live', 'test']);
 const RESULT_STATUSES = new Set(['completed', 'rejected', 'failed', 'human_action_required']);
 const ARTIFACT_SPEC = Object.freeze({
@@ -19,10 +18,17 @@ const ARTIFACT_SPEC = Object.freeze({
   'raw-video': { kind: 'video', mimeType: 'video/mp4' },
   actions: { kind: 'json', mimeType: 'application/json' },
   'recording-manifest': { kind: 'json', mimeType: 'application/json' },
+  'prepared-video': { kind: 'video', mimeType: 'video/mp4' },
+  'presentation-plan': { kind: 'json', mimeType: 'application/json' },
+  'preparation-manifest': { kind: 'json', mimeType: 'application/json' },
 });
 const REQUIRED_ROLES = Object.freeze({
   screenshot: ['screenshot', 'capture-manifest'],
   record: ['raw-video', 'actions', 'recording-manifest'],
+  'prepared-video': [
+    'prepared-video', 'screenshot', 'capture-manifest',
+    'presentation-plan', 'preparation-manifest',
+  ],
 });
 const RESULT_KEYS = new Set([
   'contractVersion', 'requestId', 'provider', 'status', 'artifacts', 'evidence', 'error',
@@ -68,9 +74,10 @@ function boundedText(value, label, pattern, maxLength) {
 
 function normalizeMaterialAcquisitionIntent(value) {
   const intent = objectWithOnly(value,
-    ['policy', 'operation', 'mode', 'route', 'stock', 'recipe'], 'materialAcquisition');
+    ['policy', 'operation', 'mode', 'route', 'stock', 'recipe', 'presentation'],
+    'materialAcquisition');
   const policy = normalizePolicy(intent.policy);
-  const operation = boundedText(intent.operation, 'operation', /^[a-z]+$/, 20);
+  const operation = boundedText(intent.operation, 'operation', /^[a-z-]+$/, 20);
   if (!OPERATIONS.has(operation)) fail('operation is unsupported', 'invalid_material_intent');
   const mode = boundedText(intent.mode, 'mode', /^[a-z]+$/, 12);
   if (!MODES.has(mode)) fail('mode is unsupported', 'invalid_material_intent');
@@ -89,7 +96,25 @@ function normalizeMaterialAcquisitionIntent(value) {
     : boundedText(intent.recipe, 'recipe', /^[a-zA-Z0-9._-]+$/, 160);
   if (operation === 'record' && !recipe)
     fail('record operation requires recipe', 'invalid_material_intent');
-  return { policy, operation, mode, route, stock, recipe };
+  if (operation !== 'record' && recipe)
+    fail('recipe is supported only for record', 'invalid_material_intent');
+  let presentation = null;
+  if (intent.presentation != null) {
+    const source = objectWithOnly(intent.presentation, ['profileId'], 'presentation');
+    presentation = {
+      profileId: boundedText(source.profileId, 'presentation.profileId',
+        /^[a-zA-Z0-9._-]+$/, 160),
+    };
+  }
+  if (operation === 'prepared-video' && (!stock?.id || !presentation))
+    fail('prepared-video requires stock.id and presentation.profileId',
+      'invalid_material_intent');
+  if (operation !== 'prepared-video' && presentation)
+    fail('presentation is supported only for prepared-video', 'invalid_material_intent');
+  return {
+    policy, operation, mode, route, stock, recipe,
+    ...(presentation ? { presentation } : {}),
+  };
 }
 
 function buildCaptureRequest(intent, { requestId, outputDirectory }) {
@@ -97,12 +122,14 @@ function buildCaptureRequest(intent, { requestId, outputDirectory }) {
   if (intent.stock?.id) target.stockId = intent.stock.id;
   if (intent.stock?.name) target.stockName = intent.stock.name;
   if (intent.recipe) target.recipeId = intent.recipe;
+  const contractVersion = intent.operation === 'prepared-video' ? 2 : 1;
   return {
-    contractVersion: CONTRACT_VERSION,
+    contractVersion,
     requestId,
     operation: intent.operation,
     mode: intent.mode,
     target,
+    ...(contractVersion === 2 ? { presentation: intent.presentation } : {}),
     outputDirectory: path.resolve(outputDirectory),
   };
 }
@@ -229,9 +256,115 @@ function validateMediaDescriptor(artifact, file) {
     fail('Provider video media spec does not match', 'provider_media_mismatch');
 }
 
-function validateCaptureResult(result, request) {
+function artifactJson(artifact) {
+  try { return JSON.parse(fs.readFileSync(artifact.absolutePath, 'utf8')); }
+  catch (_) { fail('Provider JSON artifact is invalid', 'provider_mime_mismatch'); }
+}
+
+function exactObject(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function validatePreparedBundle(result, request, artifacts, profileCapability) {
+  const roles = Object.fromEntries(artifacts.map((artifact) => [artifact.role, artifact]));
+  const expectedNames = {
+    'prepared-video': 'prepared.mp4',
+    screenshot: 'screenshot.png',
+    'capture-manifest': 'capture-manifest.json',
+    'presentation-plan': 'presentation-plan.json',
+    'preparation-manifest': 'preparation-manifest.json',
+  };
+  for (const [role, name] of Object.entries(expectedNames)) {
+    if (roles[role].relativePath !== `ready-to-place/${name}`)
+      fail('Provider ready-to-place bundle path is incompatible',
+        'provider_artifact_set_invalid');
+  }
+  const evidenceKeys = [
+    'routeSelection', 'navigation', 'material', 'catalogVersion',
+    'presentationProfile', 'publication',
+  ];
+  const evidence = result.evidence;
+  if (!exactObject(evidence, evidenceKeys)
+      || evidence.routeSelection !== 'catalog_exact_match'
+      || evidence.navigation !== 'expected_texts_verified'
+      || evidence.material !== 'ready_to_place'
+      || typeof evidence.catalogVersion !== 'string' || !evidence.catalogVersion.trim()
+      || evidence.publication !== 'atomic_directory_rename'
+      || !exactObject(evidence.presentationProfile, ['id', 'version', 'status'])
+      || evidence.presentationProfile.id !== request.presentation.profileId
+      || evidence.presentationProfile.id !== profileCapability?.id
+      || evidence.presentationProfile.version !== profileCapability?.version
+      || evidence.presentationProfile.status !== 'ready_to_place'
+      || profileCapability?.status !== 'ready_to_place'
+      || profileCapability?.artifactRole !== 'prepared-video') {
+    fail('Provider ready-to-place evidence is incompatible', 'provider_evidence_invalid');
+  }
+  const capture = artifactJson(roles['capture-manifest']);
+  const plan = artifactJson(roles['presentation-plan']);
+  const preparation = artifactJson(roles['preparation-manifest']);
+  const video = roles['prepared-video'];
+  const screenshot = roles.screenshot;
+  const expectedTexts = capture?.verification?.expectedTexts;
+  const matchedTexts = capture?.verification?.matchedTexts;
+  const contentExpected = capture?.verification?.contentTexts?.expected;
+  const contentObserved = capture?.verification?.contentTexts?.observed;
+  const contentMissing = capture?.verification?.contentTexts?.missing;
+  if (!Array.isArray(expectedTexts) || expectedTexts.length < 1
+      || !Array.isArray(matchedTexts)
+      || expectedTexts.some((text) => !matchedTexts.includes(text))
+      || !Array.isArray(contentExpected) || contentExpected.length < 1
+      || !Array.isArray(contentObserved)
+      || contentExpected.some((text) => !contentObserved.includes(text))
+      || !Array.isArray(contentMissing) || contentMissing.length !== 0
+      || capture?.screenshot?.file !== 'screenshot.png'
+      || capture?.screenshot?.sha256 !== screenshot.sha256
+      || capture?.route?.id !== request.target.routeId
+      || String(capture?.parameters?.stockid) !== request.target.stockId
+      || capture?.catalogVersion !== evidence.catalogVersion
+      || plan?.schemaVersion !== 1 || plan?.contractVersion !== 2
+      || plan?.requestId !== request.requestId || plan?.operation !== 'prepared-video'
+      || plan?.profile?.id !== request.presentation.profileId
+      || plan?.profile?.version !== evidence.presentationProfile.version
+      || plan?.profile?.status !== 'ready_to_place'
+      || plan?.target?.routeId !== request.target.routeId
+      || String(plan?.target?.stockId) !== request.target.stockId
+      || plan?.target?.mode !== request.mode
+      || plan?.source?.kind !== 'screenshot'
+      || plan?.source?.file !== 'screenshot.png'
+      || plan?.source?.sha256 !== screenshot.sha256
+      || plan?.source?.captureManifest?.file !== 'capture-manifest.json'
+      || plan?.source?.captureManifest?.sha256 !== roles['capture-manifest'].sha256
+      || plan?.output?.codec !== 'h264'
+      || plan?.output?.width !== video.media.width
+      || plan?.output?.height !== video.media.height
+      || plan?.timeline?.durationSeconds !== video.media.durationSeconds
+      || preparation?.schemaVersion !== 1 || preparation?.contractVersion !== 2
+      || preparation?.requestId !== request.requestId
+      || preparation?.status !== 'ready_to_place'
+      || preparation?.profile?.id !== request.presentation.profileId
+      || preparation?.source?.sha256 !== screenshot.sha256
+      || preparation?.source?.captureManifest?.sha256 !== roles['capture-manifest'].sha256
+      || preparation?.presentationPlan?.file !== 'presentation-plan.json'
+      || preparation?.presentationPlan?.sha256 !== roles['presentation-plan'].sha256
+      || preparation?.output?.role !== 'prepared-video'
+      || preparation?.output?.file !== 'prepared.mp4'
+      || preparation?.output?.sha256 !== video.sha256
+      || preparation?.output?.codec !== video.media.codec
+      || preparation?.output?.width !== video.media.width
+      || preparation?.output?.height !== video.media.height
+      || preparation?.output?.durationSeconds !== video.media.durationSeconds
+      || preparation?.publication?.strategy !== 'staging_directory_atomic_rename'
+      || preparation?.publication?.finalDirectory !== 'ready-to-place') {
+    fail('Provider ready-to-place provenance is inconsistent',
+      'provider_provenance_invalid');
+  }
+}
+
+function validateCaptureResult(result, request, profileCapability = null) {
   if (!result || typeof result !== 'object' || Array.isArray(result)
-      || result.contractVersion !== CONTRACT_VERSION || result.requestId !== request.requestId
+      || result.contractVersion !== request.contractVersion || result.requestId !== request.requestId
       || !result.provider || result.provider.id !== PROVIDER_ID
       || typeof result.provider.toolVersion !== 'string' || !result.provider.toolVersion.trim()
       || !RESULT_STATUSES.has(result.status))
@@ -287,6 +420,8 @@ function validateCaptureResult(result, request) {
   });
   if (required.some((role) => !seen.has(role)))
     fail('Provider artifact set is incomplete', 'provider_artifact_set_invalid');
+  if (request.contractVersion === 2)
+    validatePreparedBundle(result, request, artifacts, profileCapability);
   return { result, artifacts };
 }
 
@@ -327,16 +462,37 @@ async function acquireOptionalMaterial({
   }
   const providerId = capabilities?.providerId || null;
   let readinessCode = null;
-  if (capabilities?.schemaVersion !== CONTRACT_VERSION || providerId !== PROVIDER_ID
+  let contractCapability = null;
+  let profileCapability = null;
+  const lockedContract = PROVIDER_LOCK.contracts[String(request.contractVersion)];
+  if (capabilities?.schemaVersion !== PROVIDER_LOCK.capabilitySchemaVersion
+      || providerId !== PROVIDER_ID
       || typeof capabilities?.toolVersion !== 'string' || !capabilities.toolVersion.trim())
     readinessCode = 'provider_contract_incompatible';
   else if (capabilities.toolVersion !== PROVIDER_LOCK.toolVersion)
     readinessCode = 'provider_version_incompatible';
   else if (capabilities?.productionReady !== true)
     readinessCode = 'provider_not_production_ready';
-  else if (!Array.isArray(capabilities.operations)
-      || !capabilities.operations.includes(request.operation))
+  else if (!Array.isArray(capabilities.contractCapabilities)
+      || !(contractCapability = capabilities.contractCapabilities.find(
+        (item) => item?.contractVersion === request.contractVersion))
+      || !Array.isArray(contractCapability.operations)
+      || !contractCapability.operations.includes(request.operation)
+      || !lockedContract
+      || contractCapability.requestSchema !== lockedContract.requestSchema
+      || contractCapability.resultSchema !== lockedContract.resultSchema)
     readinessCode = 'provider_operation_unsupported';
+  else if (request.contractVersion === 2) {
+    profileCapability = contractCapability.presentationProfiles?.find((profile) => (
+      profile?.id === request.presentation.profileId
+      && Array.isArray(profile.routeIds) && profile.routeIds.includes(request.target.routeId)
+      && Array.isArray(profile.stockIds) && profile.stockIds.includes(request.target.stockId)
+    ));
+    if (!profileCapability) readinessCode = 'provider_coverage_gap';
+    else if (request.mode === 'live'
+        && capabilities?.runReadiness?.vipSession !== 'verified_before_mutation')
+      readinessCode = 'provider_live_readiness_unverified';
+  }
   if (readinessCode) {
     if (selectedPolicy === 'require-capture')
       fail('Required material provider is not ready', readinessCode, { providerId });
@@ -344,7 +500,7 @@ async function acquireOptionalMaterial({
   }
   try {
     const rawResult = await provider.acquire(request);
-    const validated = validateCaptureResult(rawResult, request);
+    const validated = validateCaptureResult(rawResult, request, profileCapability);
     if (rawResult.status !== 'completed')
       fail('Material provider did not complete the request',
         rawResult.error?.code || `provider_${rawResult.status}`, { status: rawResult.status });

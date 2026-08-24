@@ -66,9 +66,10 @@ function runJson(command, args, { timeoutMs, runner, acceptResultOnNonzero = fal
 
 function validateProviderCapabilities(value, expected = PROVIDER_LOCK) {
   if (!value || value.providerId !== expected.providerId
-      || value.schemaVersion !== expected.contractVersion
+      || value.schemaVersion !== expected.capabilitySchemaVersion
       || typeof value.toolVersion !== 'string' || !value.toolVersion.trim()
-      || !Array.isArray(value.operations)) {
+      || !Array.isArray(value.operations)
+      || !Array.isArray(value.contractCapabilities)) {
     throw new CaptureCliAdapterError(
       'ChipK Capture CLI returned an incompatible capability document',
       'provider_contract_incompatible');
@@ -77,6 +78,47 @@ function validateProviderCapabilities(value, expected = PROVIDER_LOCK) {
     throw new CaptureCliAdapterError(
       'ChipK Capture CLI version does not match the consumer lock',
       'provider_version_incompatible');
+  }
+  for (const [versionText, contractLock] of Object.entries(expected.contracts || {})) {
+    const version = Number(versionText);
+    const matches = value.contractCapabilities.filter(
+      (item) => item && item.contractVersion === version,
+    );
+    if (matches.length !== 1) {
+      throw new CaptureCliAdapterError(
+        `ChipK Capture CLI must advertise Contract v${version} exactly once`,
+        'provider_contract_incompatible');
+    }
+    const capability = matches[0];
+    if (!Array.isArray(capability.operations)
+        || contractLock.operations.some((operation) => !capability.operations.includes(operation))
+        || capability.requestSchema !== contractLock.requestSchema
+        || capability.resultSchema !== contractLock.resultSchema) {
+      throw new CaptureCliAdapterError(
+        `ChipK Capture CLI Contract v${version} capability is incompatible`,
+        'provider_contract_incompatible');
+    }
+    if (version === 2) {
+      const profiles = capability.presentationProfiles;
+      const validProfiles = Array.isArray(profiles) && profiles.length > 0
+        && new Set(profiles.map((profile) => profile?.id)).size === profiles.length
+        && profiles.every((profile) => (
+          profile && typeof profile.id === 'string' && profile.id.trim()
+          && Number.isInteger(profile.version) && profile.version > 0
+          && profile.status === 'ready_to_place'
+          && profile.sourceKind === 'screenshot'
+          && Array.isArray(profile.routeIds) && profile.routeIds.length > 0
+          && profile.routeIds.every((routeId) => typeof routeId === 'string' && routeId.trim())
+          && Array.isArray(profile.stockIds) && profile.stockIds.length > 0
+          && profile.stockIds.every((stockId) => typeof stockId === 'string' && stockId.trim())
+          && profile.artifactRole === 'prepared-video'
+        ));
+      if (!validProfiles) {
+        throw new CaptureCliAdapterError(
+          'ChipK Capture CLI Contract v2 presentation profile capability is incompatible',
+          'provider_contract_incompatible');
+      }
+    }
   }
   return value;
 }

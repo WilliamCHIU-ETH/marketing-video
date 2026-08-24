@@ -160,6 +160,31 @@ async function prepareJobMaterialAcquisition({
         size: artifact.size,
         media: artifact.media,
       };
+    } else if (intent.operation === 'prepared-video') {
+      const artifact = result.material.find((item) => item.role === 'prepared-video');
+      if (!artifact) fail('Validated prepared-video artifact is missing', 'materialization_failed');
+      const asset = projectStore.ingestAsset(job.projectId, artifact.absolutePath, {
+        originalName: `${intent.route}-${intent.presentation.profileId}.mp4`,
+        kind: 'video',
+      });
+      if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+      summary.artifact = {
+        assetRef: asset.id,
+        role: artifact.role,
+        sha256: artifact.sha256,
+        mimeType: artifact.mimeType,
+        size: artifact.size,
+        media: artifact.media,
+      };
+      summary.artifacts = result.material.map((item) => ({
+        role: item.role,
+        sha256: item.sha256,
+        mimeType: item.mimeType,
+        size: item.size,
+        media: item.media || null,
+      }));
+      summary.presentation = { ...intent.presentation };
+      summary.automaticTimelineUse = false;
     } else {
       summary.artifacts = result.material.map((artifact) => ({
         role: artifact.role,
@@ -186,7 +211,9 @@ async function prepareJobMaterialAcquisition({
   saveJob(job);
   appendLog(job, intent.operation === 'screenshot'
     ? `\n📷 Fresh Capture 已驗證並加入 ${summary.artifact.inputName}。\n`
-    : '\n🎬 Raw recording 已驗證；本輪不自動剪入 timeline。\n');
+    : intent.operation === 'prepared-video'
+      ? '\n🎬 Ready-to-place 影片已驗證並加入 Project；尚未配置 timeline 或證明 render 使用。\n'
+      : '\n🎬 Raw recording 已驗證；本輪不自動剪入 timeline。\n');
   return summary;
 }
 
