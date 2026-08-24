@@ -1581,7 +1581,6 @@ function verifiedPreparedPhoneTimelineEvidence(job) {
   if (placements.length !== 1) return null;
   const placement = placements[0];
   const compiled = result.placement;
-  const expectedFrames = Math.ceil(Number(result.preparedArtifact.media?.durationSeconds) * 30);
   if (placement.assetRef !== result.preparedArtifact.assetRef
       || placement.profileId !== intent.presentation.profileId
       || placement.layoutId !== intent.placement.layoutId
@@ -1593,7 +1592,7 @@ function verifiedPreparedPhoneTimelineEvidence(job) {
       || placement.fps !== 30
       || !Number.isInteger(placement.startFrame) || placement.startFrame < 0
       || !Number.isInteger(placement.endFrame) || placement.endFrame <= placement.startFrame
-      || !Number.isInteger(placement.durationInFrames) || placement.durationInFrames !== expectedFrames
+      || !Number.isInteger(placement.durationInFrames)
       || placement.endFrame - placement.startFrame !== placement.durationInFrames
       || placement.startSec !== Number((placement.startFrame / 30).toFixed(6))
       || placement.endSec !== Number((placement.endFrame / 30).toFixed(6))

@@ -802,6 +802,103 @@ function validatePreparedPhoneProjectAsset({ job, projectStore }) {
   return { asset, assetFile, placement: placements[0] };
 }
 
+function verifyPreparedPhoneDurableOutputs({
+  job,
+  projectStore,
+  archiveRoot,
+  durableOutputFiles,
+}) {
+  const outputs = job.outputs;
+  const revision = job.projectId && job.revisionId
+    ? projectStore.getRevision(job.projectId, job.revisionId)
+    : null;
+  const revisionOutputs = revision?.outputs;
+  const renderOutputs = job.renderEvidence?.outputs;
+  if (!revision || revision.projectId !== job.projectId
+      || revision.jobId !== job.id || revision.runId !== job.id
+      || !Array.isArray(outputs) || outputs.length < 1
+      || !Array.isArray(revisionOutputs) || revisionOutputs.length !== outputs.length
+      || !Array.isArray(renderOutputs) || renderOutputs.length !== outputs.length
+      || typeof archiveRoot !== 'string' || !path.isAbsolute(archiveRoot)
+      || !Array.isArray(durableOutputFiles) || durableOutputFiles.length !== outputs.length) {
+    fail('Prepared phone durable output evidence is incomplete',
+      'acquisition_compaction_failed');
+  }
+
+  let outputRootStat;
+  let outputRoot;
+  try {
+    const directory = projectStore.outputDir(job.projectId);
+    outputRootStat = fs.lstatSync(directory);
+    outputRoot = fs.realpathSync(directory);
+  } catch (_) {}
+  if (!outputRootStat?.isDirectory() || outputRootStat.isSymbolicLink() || !outputRoot) {
+    fail('Prepared phone durable output directory is unsafe',
+      'acquisition_compaction_failed');
+  }
+
+  const revisionByName = new Map();
+  const renderByName = new Map();
+  const indexEvidence = (records, target, requireArchive) => {
+    for (const record of records) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)
+          || typeof record.name !== 'string' || !record.name
+          || path.basename(record.name) !== record.name
+          || !Number.isSafeInteger(record.size) || record.size < 1
+          || !SHA256_HEX.test(record.sha256 || '')
+          || (requireArchive && (typeof record.archive !== 'string' || !record.archive))
+          || target.has(record.name)) {
+        fail('Prepared phone durable output ledger is invalid',
+          'acquisition_compaction_failed');
+      }
+      target.set(record.name, record);
+    }
+  };
+  indexEvidence(revisionOutputs, revisionByName, true);
+  indexEvidence(renderOutputs, renderByName, false);
+
+  const seenNames = new Set();
+  for (const [index, output] of outputs.entries()) {
+    if (!output || typeof output !== 'object' || Array.isArray(output)
+        || typeof output.name !== 'string' || !output.name
+        || path.basename(output.name) !== output.name || seenNames.has(output.name)
+        || typeof output.archive !== 'string' || !output.archive
+        || !Number.isSafeInteger(output.size) || output.size < 1
+        || !SHA256_HEX.test(output.sha256 || '')) {
+      fail('Prepared phone durable output ledger is invalid',
+        'acquisition_compaction_failed');
+    }
+    seenNames.add(output.name);
+    const revisionOutput = revisionByName.get(output.name);
+    const renderOutput = renderByName.get(output.name);
+    if (!revisionOutput || revisionOutput.archive !== output.archive
+        || revisionOutput.size !== output.size || revisionOutput.sha256 !== output.sha256
+        || !renderOutput || renderOutput.size !== output.size
+        || renderOutput.sha256 !== output.sha256) {
+      fail('Prepared phone durable output ledgers disagree',
+        'acquisition_compaction_failed');
+    }
+
+    const file = durableOutputFiles[index];
+    let stat;
+    let real;
+    let declaredReal;
+    try {
+      stat = typeof file === 'string' ? fs.lstatSync(file) : null;
+      real = stat && fs.realpathSync(file);
+      declaredReal = fs.realpathSync(path.resolve(archiveRoot, output.archive));
+    } catch (_) {}
+    const relative = real && path.relative(outputRoot, real);
+    if (!stat?.isFile() || stat.isSymbolicLink() || !real || real !== declaredReal || !relative
+        || relative === '..' || relative.startsWith(`..${path.sep}`)
+        || path.isAbsolute(relative) || stat.size !== output.size
+        || hashFile(file) !== output.sha256) {
+      fail('Prepared phone durable output bytes are missing, unsafe, or changed',
+        'acquisition_compaction_failed');
+    }
+  }
+}
+
 function acquisitionLedgerPath(jobRoot, relativePath) {
   if (typeof relativePath !== 'string' || !relativePath.startsWith('acquisition/')
       || relativePath.includes('\\') || path.posix.normalize(relativePath) !== relativePath) {
@@ -917,20 +1014,67 @@ function recoverInterruptedPreparedPhoneCompaction({
   return true;
 }
 
+function finalizeCommittedPreparedPhoneCompaction({
+  artifacts,
+  acquisitionRoot,
+  trash,
+}) {
+  if (!fs.existsSync(trash)) return false;
+  let trashStat;
+  let trashReal;
+  try {
+    trashStat = fs.lstatSync(trash);
+    trashReal = fs.realpathSync(trash);
+  } catch (_) {}
+  if (!trashStat?.isDirectory() || trashStat.isSymbolicLink() || trashReal !== trash) {
+    fail('Prepared acquisition compaction staging is unsafe',
+      'acquisition_compaction_failed');
+  }
+
+  const binaries = artifacts.filter(({ role }) =>
+    role === 'prepared-video' || role === 'screenshot');
+  const expectedByName = new Map();
+  for (const artifact of binaries) {
+    if (!Number.isSafeInteger(artifact.size) || artifact.size < 1
+        || !SHA256_HEX.test(artifact.sha256 || '')) {
+      fail('Prepared acquisition binary ledger is invalid',
+        'acquisition_compaction_failed');
+    }
+    expectedByName.set(`${artifact.role}-${artifact.sha256}`, artifact);
+  }
+  const entries = fs.readdirSync(trash, { withFileTypes: true });
+  if (entries.some((entry) => !expectedByName.has(entry.name)
+      || !entry.isFile() || entry.isSymbolicLink())) {
+    fail('Prepared acquisition compaction staging is ambiguous',
+      'acquisition_compaction_failed');
+  }
+  for (const entry of entries) {
+    const file = path.join(trash, entry.name);
+    verifyCompactionArtifactFile(file, expectedByName.get(entry.name), acquisitionRoot,
+      'Prepared acquisition staged evidence file');
+  }
+  for (const entry of entries) fs.unlinkSync(path.join(trash, entry.name));
+  if (fs.readdirSync(trash).length !== 0) {
+    fail('Prepared acquisition compaction staging could not be emptied',
+      'acquisition_compaction_failed');
+  }
+  fs.rmdirSync(trash);
+  return true;
+}
+
 function compactPreparedPhoneAcquisition({
   job,
   jobDirectory,
   projectStore,
+  archiveRoot,
+  durableOutputFiles,
   saveJob,
+  writeJobRecord,
+  renameFile = fs.renameSync,
   nowISO,
 }) {
   const summary = job.materialAcquisitionResult;
   if (job.materialAcquisition?.operation !== 'prepared-video') return null;
-  if (summary?.acquisitionRetention?.status === 'sidecars_only') {
-    const staleTrash = path.join(jobDirectory, 'acquisition', '.compacted-binary');
-    try { fs.rmSync(staleTrash, { recursive: true, force: true }); } catch (_) {}
-    return { compacted: true, bytesFreed: 0, alreadyCompacted: true };
-  }
   const assetRef = summary?.preparedArtifact?.assetRef;
   const preparedPlacements = (job.timelinePlacements || []).filter((item) =>
     item?.kind === 'prepared-phone-video');
@@ -948,6 +1092,27 @@ function compactPreparedPhoneAcquisition({
   try { validatePreparedPhoneProjectAsset({ job, projectStore }); }
   catch (_) {
     fail('Prepared Project Asset is not durable for acquisition compaction',
+      'acquisition_compaction_failed');
+  }
+  verifyPreparedPhoneDurableOutputs({
+    job,
+    projectStore,
+    archiveRoot,
+    durableOutputFiles,
+  });
+  if (summary?.acquisitionRetention?.status === 'sidecars_only') {
+    const acquisitionRoot = fs.realpathSync(path.join(jobDirectory, 'acquisition'));
+    const staleTrash = path.join(acquisitionRoot, '.compacted-binary');
+    finalizeCommittedPreparedPhoneCompaction({
+      artifacts: summary.artifacts,
+      acquisitionRoot,
+      trash: staleTrash,
+    });
+    return { compacted: true, bytesFreed: 0, alreadyCompacted: true };
+  }
+  if (typeof saveJob !== 'function' || typeof writeJobRecord !== 'function'
+      || typeof renameFile !== 'function') {
+    fail('Prepared acquisition compaction persistence is unavailable',
       'acquisition_compaction_failed');
   }
   const expectedRoles = new Set([
@@ -998,6 +1163,10 @@ function compactPreparedPhoneAcquisition({
     fail('Prepared acquisition compaction staging already exists', 'acquisition_compaction_failed');
   fs.mkdirSync(trash, { mode: 0o700 });
   const previousArtifacts = JSON.parse(JSON.stringify(summary.artifacts));
+  const hadPreviousRetention = Object.prototype.hasOwnProperty.call(
+    summary, 'acquisitionRetention');
+  const previousRetention = hadPreviousRetention
+    ? JSON.parse(JSON.stringify(summary.acquisitionRetention)) : undefined;
   const moved = [];
   let bytesFreed = 0;
   try {
@@ -1006,8 +1175,8 @@ function compactPreparedPhoneAcquisition({
       // the already validated unique role + digest so two nested files named alike can never
       // replace one another before saveJob commits the compacted ledger.
       const staged = path.join(trash, `${entry.artifact.role}-${entry.artifact.sha256}`);
-      fs.renameSync(entry.absolute, staged);
-      moved.push({ from: entry.absolute, staged });
+      renameFile(entry.absolute, staged);
+      moved.push({ from: entry.absolute, staged, artifact: entry.artifact });
       bytesFreed += entry.stat.size;
       delete entry.artifact.evidenceFile;
       entry.artifact.retention = 'compacted_after_verified_render';
@@ -1024,14 +1193,38 @@ function compactPreparedPhoneAcquisition({
     saveJob(job);
   } catch (error) {
     summary.artifacts = previousArtifacts;
-    delete summary.acquisitionRetention;
-    for (const item of moved.reverse()) {
-      try { fs.renameSync(item.staged, item.from); } catch (_) {}
+    if (hadPreviousRetention) summary.acquisitionRetention = previousRetention;
+    else delete summary.acquisitionRetention;
+    // First make the restored ledger durable. If this atomic write fails, every staged byte stays
+    // untouched so the next process can inspect the durable old/new ledger and recover or finish
+    // the commit. Never recursively delete an ambiguous transaction directory.
+    try { writeJobRecord(job); }
+    catch (rollbackError) {
+      error.rollbackError = rollbackError;
+      throw error;
     }
-    try { fs.rmSync(trash, { recursive: true, force: true }); } catch (_) {}
+    let restoreError = null;
+    for (const item of moved.reverse()) {
+      try {
+        renameFile(item.staged, item.from);
+        verifyCompactionArtifactFile(item.from, item.artifact, acquisitionRoot,
+          'Restored prepared acquisition evidence file');
+      } catch (rollbackError) {
+        restoreError = restoreError || rollbackError;
+      }
+    }
+    if (restoreError) {
+      error.rollbackError = restoreError;
+      throw error;
+    }
+    try { fs.rmdirSync(trash); } catch (_) {}
     throw error;
   }
-  try { fs.rmSync(trash, { recursive: true, force: true }); } catch (_) {}
+  finalizeCommittedPreparedPhoneCompaction({
+    artifacts: summary.artifacts,
+    acquisitionRoot,
+    trash,
+  });
   return { compacted: true, bytesFreed, alreadyCompacted: false };
 }
 
@@ -1192,5 +1385,6 @@ module.exports = {
   validateFocusstockVisualTimelinePlacements,
   validatePreparedPhonePlacementMath,
   validatePreparedFocusstockAssetRefs,
+  verifyPreparedPhoneDurableOutputs,
   validatePreparedPhoneProjectAsset,
 };

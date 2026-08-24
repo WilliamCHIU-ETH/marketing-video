@@ -558,7 +558,7 @@ startupJobs.recovered.forEach(saveJob);
 function saveJob(j) {
   writeJobRecord(j);
   if (j.projectId && j.revisionId) {
-    PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
+    const updatedRevision = PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
       jobId: j.id,
       runId: j.id,
       status: j.status,
@@ -590,6 +590,7 @@ function saveJob(j) {
       ...(j.materialAcquisitionResult
         ? { materialAcquisitionResult: j.materialAcquisitionResult } : {}),
     });
+    if (!updatedRevision) throw new Error('Project／Revision job state 無法同步');
   }
 }
 
@@ -3519,7 +3520,10 @@ function pruneOldJobs() {
           job: j,
           jobDirectory: jobDir(j.id),
           projectStore: PROJECT_STORE,
+          archiveRoot: ROOT,
+          durableOutputFiles: verifiedOutputs,
           saveJob,
+          writeJobRecord,
           nowISO,
         });
         if (!compacted?.compacted) return;

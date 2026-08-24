@@ -335,6 +335,47 @@ function compileRuntimePlan(ctx) {
   return { workspaceRoot, publicDirectory };
 }
 
+function completeCompactionEvidence(ctx) {
+  ctx.job.status = 'done';
+  ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
+  const revision = ctx.projectStore.addRevision(ctx.project.id, {
+    jobId: ctx.job.id,
+    runId: ctx.job.id,
+    status: 'done',
+    assetRefs: [...ctx.job.assetRefs],
+    materialAcquisition: ctx.job.materialAcquisition,
+    materialAcquisitionResult: ctx.job.materialAcquisitionResult,
+  });
+  ctx.job.revisionId = revision.id;
+  const outputFile = path.join(
+    ctx.projectStore.outputDir(ctx.project.id), `${revision.id}-${ctx.job.id}-final.mp4`);
+  fs.writeFileSync(outputFile, MP4);
+  const output = {
+    name: 'final.mp4',
+    size: MP4.length,
+    sha256: hash(MP4),
+    archive: path.relative(ctx.dataDir, outputFile).split(path.sep).join('/'),
+  };
+  ctx.job.outputs = [output];
+  ctx.job.renderEvidence = {
+    schemaVersion: 1,
+    renderInputManifestSha256: ctx.job.renderInputManifestSha256,
+    outputs: [{ name: output.name, size: output.size, sha256: output.sha256 }],
+  };
+  ctx.projectStore.updateRevision(ctx.project.id, revision.id, {
+    status: 'done',
+    assetRefs: [...ctx.job.assetRefs],
+    outputs: [output],
+    renderEvidence: ctx.job.renderEvidence,
+    materialAcquisitionResult: ctx.job.materialAcquisitionResult,
+  });
+  return {
+    archiveRoot: ctx.dataDir,
+    durableOutputFiles: [outputFile],
+    writeJobRecord: () => {},
+  };
+}
+
 function bindReusableFocusstockImage(ctx, compiled, inputName = 'shot1.png') {
   const source = path.join(ctx.root, `${inputName}.source.png`);
   fs.writeFileSync(source, PNG);
@@ -910,12 +951,7 @@ test('verified completed Run compacts binary acquisition duplicates but preserve
     job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
   });
   ctx.job.timelinePlacements = [placement];
-  ctx.job.status = 'done';
-  ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
-  ctx.job.renderEvidence = {
-    schemaVersion: 1,
-    renderInputManifestSha256: ctx.job.renderInputManifestSha256,
-  };
+  const outputEvidence = completeCompactionEvidence(ctx);
   const filesByRole = new Map(summary.artifacts.map((artifact) => [
     artifact.role, path.join(ctx.jobDirectory, artifact.evidenceFile),
   ]));
@@ -923,6 +959,7 @@ test('verified completed Run compacts binary acquisition duplicates but preserve
     job: ctx.job,
     jobDirectory: ctx.jobDirectory,
     projectStore: ctx.projectStore,
+    ...outputEvidence,
     saveJob: ctx.options.saveJob,
     nowISO: () => '2026-08-24T00:00:02.000Z',
   });
@@ -940,7 +977,53 @@ test('verified completed Run compacts binary acquisition duplicates but preserve
     summary.preparedArtifact.sha256);
 });
 
-test('compaction rollback preserves nested binary artifacts with the same basename', async (t) => {
+test('same-size durable output corruption fails closed before acquisition or Run payload cleanup',
+  async (t) => {
+    const ctx = runtimeContext(t);
+    const summary = await prepareJobMaterialAcquisition(ctx.options);
+    const compiled = compileRuntimePlan(ctx);
+    const selected = finalizePreparedPhoneMaterial({
+      job: ctx.job,
+      jobDirectory: ctx.jobDirectory,
+      workspaceRoot: compiled.workspaceRoot,
+      publicDirectory: compiled.publicDirectory,
+      projectStore: ctx.projectStore,
+    });
+    ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
+      job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+    })];
+    const outputEvidence = completeCompactionEvidence(ctx);
+    const payloadMarkers = ['state/keep.json', 'thumbs/keep.png'].map((relative) => {
+      const file = path.join(ctx.jobDirectory, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'keep');
+      return file;
+    });
+    const acquisitionFiles = summary.artifacts.map((artifact) =>
+      path.join(ctx.jobDirectory, artifact.evidenceFile));
+    const corrupted = Buffer.from(MP4);
+    corrupted[corrupted.length - 1] ^= 0xff;
+    assert.equal(corrupted.length, ctx.job.outputs[0].size);
+    assert.notEqual(hash(corrupted), ctx.job.outputs[0].sha256);
+    fs.writeFileSync(outputEvidence.durableOutputFiles[0], corrupted);
+
+    assert.throws(() => compactPreparedPhoneAcquisition({
+      job: ctx.job,
+      jobDirectory: ctx.jobDirectory,
+      projectStore: ctx.projectStore,
+      ...outputEvidence,
+      saveJob: ctx.options.saveJob,
+      nowISO: () => '2026-08-24T00:00:02.000Z',
+    }), (error) => error.code === 'acquisition_compaction_failed'
+      && /durable output bytes/.test(error.message));
+    assert.equal(summary.acquisitionRetention, undefined);
+    for (const file of acquisitionFiles) assert.equal(fs.existsSync(file), true);
+    for (const file of payloadMarkers) assert.equal(fs.readFileSync(file, 'utf8'), 'keep');
+    assert.equal(fs.existsSync(path.join(
+      ctx.jobDirectory, 'acquisition', '.compacted-binary')), false);
+  });
+
+test('job-first partial save rewrites the old durable ledger and restores nested binaries', async (t) => {
   const ctx = runtimeContext(t);
   const summary = await prepareJobMaterialAcquisition(ctx.options);
   const compiled = compileRuntimePlan(ctx);
@@ -954,12 +1037,7 @@ test('compaction rollback preserves nested binary artifacts with the same basena
   ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
     job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
   })];
-  ctx.job.status = 'done';
-  ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
-  ctx.job.renderEvidence = {
-    schemaVersion: 1,
-    renderInputManifestSha256: ctx.job.renderInputManifestSha256,
-  };
+  const outputEvidence = completeCompactionEvidence(ctx);
 
   const binaries = summary.artifacts.filter(({ role }) =>
     role === 'prepared-video' || role === 'screenshot');
@@ -971,15 +1049,31 @@ test('compaction rollback preserves nested binary artifacts with the same basena
     artifact.evidenceFile = path.relative(ctx.jobDirectory, nested).split(path.sep).join('/');
   }
   const before = JSON.parse(JSON.stringify(summary.artifacts));
+  const durableJobFile = path.join(ctx.jobDirectory, 'job.json');
+  fs.writeFileSync(durableJobFile, JSON.stringify(ctx.job, null, 2));
+  let persistedCompactedLedger = false;
   assert.throws(() => compactPreparedPhoneAcquisition({
     job: ctx.job,
     jobDirectory: ctx.jobDirectory,
     projectStore: ctx.projectStore,
-    saveJob: () => { throw new Error('synthetic persistence failure'); },
+    ...outputEvidence,
+    saveJob: (value) => {
+      persistedCompactedLedger = value.materialAcquisitionResult.acquisitionRetention?.status
+        === 'sidecars_only';
+      fs.writeFileSync(durableJobFile, JSON.stringify(value, null, 2));
+      throw new Error('synthetic Project update failure after job write');
+    },
+    writeJobRecord: (value) =>
+      fs.writeFileSync(durableJobFile, JSON.stringify(value, null, 2)),
     nowISO: () => '2026-08-24T00:00:02.000Z',
-  }), /synthetic persistence failure/);
+  }), /synthetic Project update failure after job write/);
 
+  assert.equal(persistedCompactedLedger, true, 'fixture 必須真的重現 job-first partial save');
   assert.deepEqual(summary.artifacts, before);
+  const durableJob = JSON.parse(fs.readFileSync(durableJobFile, 'utf8'));
+  assert.deepEqual(durableJob.materialAcquisitionResult.artifacts, before,
+    'rollback 後 durable Job ledger 必須重新引用已恢復的 binaries');
+  assert.equal(durableJob.materialAcquisitionResult.acquisitionRetention, undefined);
   for (const artifact of before.filter(({ role }) =>
     role === 'prepared-video' || role === 'screenshot')) {
     const restored = path.join(ctx.jobDirectory, artifact.evidenceFile);
@@ -988,6 +1082,69 @@ test('compaction rollback preserves nested binary artifacts with the same basena
   }
   assert.equal(fs.existsSync(path.join(
     ctx.jobDirectory, 'acquisition', '.compacted-binary')), false);
+});
+
+test('rollback rename failure preserves staging and the next attempt recovers safely', async (t) => {
+  const ctx = runtimeContext(t);
+  const summary = await prepareJobMaterialAcquisition(ctx.options);
+  const compiled = compileRuntimePlan(ctx);
+  const selected = finalizePreparedPhoneMaterial({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    workspaceRoot: compiled.workspaceRoot,
+    publicDirectory: compiled.publicDirectory,
+    projectStore: ctx.projectStore,
+  });
+  ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
+    job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+  })];
+  const outputEvidence = completeCompactionEvidence(ctx);
+  const before = JSON.parse(JSON.stringify(summary.artifacts));
+  const durableJobFile = path.join(ctx.jobDirectory, 'job.json');
+  fs.writeFileSync(durableJobFile, JSON.stringify(ctx.job, null, 2));
+  let blockedRollback = false;
+  const renameFile = (from, to) => {
+    if (!blockedRollback && from.includes(`${path.sep}.compacted-binary${path.sep}`)) {
+      blockedRollback = true;
+      throw new Error('synthetic rollback rename failure');
+    }
+    fs.renameSync(from, to);
+  };
+
+  assert.throws(() => compactPreparedPhoneAcquisition({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    projectStore: ctx.projectStore,
+    ...outputEvidence,
+    saveJob: (value) => {
+      fs.writeFileSync(durableJobFile, JSON.stringify(value, null, 2));
+      throw new Error('synthetic Project update failure');
+    },
+    writeJobRecord: (value) =>
+      fs.writeFileSync(durableJobFile, JSON.stringify(value, null, 2)),
+    renameFile,
+    nowISO: () => '2026-08-24T00:00:02.000Z',
+  }), (error) => /synthetic Project update failure/.test(error.message)
+    && /synthetic rollback rename failure/.test(error.rollbackError?.message || ''));
+  assert.equal(blockedRollback, true);
+  const durableJob = JSON.parse(fs.readFileSync(durableJobFile, 'utf8'));
+  assert.deepEqual(durableJob.materialAcquisitionResult.artifacts, before);
+  assert.equal(durableJob.materialAcquisitionResult.acquisitionRetention, undefined);
+  const trash = path.join(ctx.jobDirectory, 'acquisition', '.compacted-binary');
+  assert.equal(fs.existsSync(trash), true, '未還原的 bytes 必須留在 staging');
+  assert.equal(fs.readdirSync(trash).length, 1);
+
+  const compacted = compactPreparedPhoneAcquisition({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    projectStore: ctx.projectStore,
+    ...outputEvidence,
+    saveJob: ctx.options.saveJob,
+    nowISO: () => '2026-08-24T00:00:03.000Z',
+  });
+  assert.equal(compacted.compacted, true);
+  assert.equal(summary.acquisitionRetention.status, 'sidecars_only');
+  assert.equal(fs.existsSync(trash), false);
 });
 
 test('interrupted compaction restores staged binaries before a safe retry', async (t) => {
@@ -1006,12 +1163,7 @@ test('interrupted compaction restores staged binaries before a safe retry', asyn
       ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
         job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
       })];
-      ctx.job.status = 'done';
-      ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
-      ctx.job.renderEvidence = {
-        schemaVersion: 1,
-        renderInputManifestSha256: ctx.job.renderInputManifestSha256,
-      };
+      const outputEvidence = completeCompactionEvidence(ctx);
 
       const before = JSON.parse(JSON.stringify(summary.artifacts));
       const binaries = before.filter(({ role }) =>
@@ -1029,6 +1181,7 @@ test('interrupted compaction restores staged binaries before a safe retry', asyn
         job: ctx.job,
         jobDirectory: ctx.jobDirectory,
         projectStore: ctx.projectStore,
+        ...outputEvidence,
         saveJob: () => {
           saveAttempts += 1;
           throw new Error('synthetic persistence failure after recovery');
@@ -1048,6 +1201,7 @@ test('interrupted compaction restores staged binaries before a safe retry', asyn
         job: ctx.job,
         jobDirectory: ctx.jobDirectory,
         projectStore: ctx.projectStore,
+        ...outputEvidence,
         saveJob: ctx.options.saveJob,
         nowISO: () => '2026-08-24T00:00:03.000Z',
       });

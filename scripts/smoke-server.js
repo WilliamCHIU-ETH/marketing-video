@@ -720,6 +720,11 @@ async function main() {
   assert.equal(preparedEvidence.placement.compositionStartSec, 3);
   assert.equal(JSON.stringify(preparedFixture), preparedFixtureBefore,
     'ready-to-place evidence gate 必須唯讀');
+  const toleratedDurationFixture = JSON.parse(JSON.stringify(preparedFixture));
+  toleratedDurationFixture.materialAcquisitionResult.preparedArtifact.media.durationSeconds
+    = 1.000001;
+  assert.ok(verifiedPreparedPhoneTimelineEvidence(toleratedDurationFixture),
+    'UI 應採用後端已驗證的 compiled frame identity，不得以 provider duration 二次推算 frame');
   for (const mutate of [
     (fixture) => { fixture.materialAcquisitionResult.placementStatus = 'compiled_pending_evidence'; },
     (fixture) => { fixture.materialAcquisitionResult.automaticTimelineUse = false; },
