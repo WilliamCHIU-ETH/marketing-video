@@ -348,6 +348,37 @@ test('completed v2 bundle is accepted only with exact evidence and cross-file pr
   );
 });
 
+test('v2 preparation profile version and status must match capability, evidence, and plan', async (t) => {
+  const { request, result, outputDirectory } = preparedFixture(t);
+  const manifestFile = path.join(outputDirectory, 'ready-to-place', 'preparation-manifest.json');
+  const original = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  const cases = [
+    ['missing version', (profile) => { delete profile.version; }],
+    ['wrong version', (profile) => { profile.version = 2; }],
+    ['missing status', (profile) => { delete profile.status; }],
+    ['wrong status', (profile) => { profile.status = 'draft'; }],
+  ];
+
+  for (const [label, mutate] of cases) {
+    const manifest = structuredClone(original);
+    mutate(manifest.profile);
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    fs.writeFileSync(manifestFile, bytes);
+    const tampered = {
+      ...result,
+      artifacts: result.artifacts.map((artifact) => artifact.role === 'preparation-manifest'
+        ? { ...artifact, sha256: sha256(bytes) } : artifact),
+    };
+    await assert.rejects(
+      () => acquireOptionalMaterial({
+        policy: 'require-capture', request, provider: provider(tampered),
+      }),
+      (error) => error.code === 'provider_provenance_invalid',
+      label,
+    );
+  }
+});
+
 test('capability version mismatch falls back or fails closed before acquire', async (t) => {
   const { request, result } = fixture(t);
   let acquireCalls = 0;

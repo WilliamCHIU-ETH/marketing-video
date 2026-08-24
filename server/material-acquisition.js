@@ -344,6 +344,15 @@ function validatePreparedBundle(result, request, artifacts, profileCapability) {
       || preparation?.requestId !== request.requestId
       || preparation?.status !== 'ready_to_place'
       || preparation?.profile?.id !== request.presentation.profileId
+      || preparation?.profile?.id !== profileCapability?.id
+      || preparation?.profile?.id !== evidence.presentationProfile.id
+      || preparation?.profile?.id !== plan?.profile?.id
+      || preparation?.profile?.version !== profileCapability?.version
+      || preparation?.profile?.version !== evidence.presentationProfile.version
+      || preparation?.profile?.version !== plan?.profile?.version
+      || preparation?.profile?.status !== profileCapability?.status
+      || preparation?.profile?.status !== evidence.presentationProfile.status
+      || preparation?.profile?.status !== plan?.profile?.status
       || preparation?.source?.sha256 !== screenshot.sha256
       || preparation?.source?.captureManifest?.sha256 !== roles['capture-manifest'].sha256
       || preparation?.presentationPlan?.file !== 'presentation-plan.json'
