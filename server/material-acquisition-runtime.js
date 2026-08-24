@@ -886,7 +886,10 @@ function compactPreparedPhoneAcquisition({
   let bytesFreed = 0;
   try {
     for (const entry of binary) {
-      const staged = path.join(trash, path.basename(entry.absolute));
+      // Provider artifact paths are unique, but their basenames are not required to be. Stage by
+      // the already validated unique role + digest so two nested files named alike can never
+      // replace one another before saveJob commits the compacted ledger.
+      const staged = path.join(trash, `${entry.artifact.role}-${entry.artifact.sha256}`);
       fs.renameSync(entry.absolute, staged);
       moved.push({ from: entry.absolute, staged });
       bytesFreed += entry.stat.size;

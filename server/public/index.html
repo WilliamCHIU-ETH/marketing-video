@@ -1654,7 +1654,7 @@ function preparedPhoneEvidenceCard(job) {
     : `目前狀態：${result?.placementStatus || result?.status || '等待 Capture'}`;
   return el('div', { class: 'card' },
     el('div', { class: 'asset-section-head' },
-      el('h2', {}, '已完成手機畫面 placement'),
+      el('h2', {}, '手機畫面 placement'),
       el('span', { class: 'asset-readonly' }, evidence ? '✓ 證據一致' : '尚未配置')),
     el('div', { class: evidence ? 'asset-section-note' : 'note' }, status),
     el('div', { class: 'composition-summary' },

@@ -940,6 +940,56 @@ test('verified completed Run compacts binary acquisition duplicates but preserve
     summary.preparedArtifact.sha256);
 });
 
+test('compaction rollback preserves nested binary artifacts with the same basename', async (t) => {
+  const ctx = runtimeContext(t);
+  const summary = await prepareJobMaterialAcquisition(ctx.options);
+  const compiled = compileRuntimePlan(ctx);
+  const selected = finalizePreparedPhoneMaterial({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    workspaceRoot: compiled.workspaceRoot,
+    publicDirectory: compiled.publicDirectory,
+    projectStore: ctx.projectStore,
+  });
+  ctx.job.timelinePlacements = [commitPreparedPhoneMaterialSelection({
+    job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+  })];
+  ctx.job.status = 'done';
+  ctx.job.renderInputManifestSha256 = 'a'.repeat(64);
+  ctx.job.renderEvidence = {
+    schemaVersion: 1,
+    renderInputManifestSha256: ctx.job.renderInputManifestSha256,
+  };
+
+  const binaries = summary.artifacts.filter(({ role }) =>
+    role === 'prepared-video' || role === 'screenshot');
+  for (const [index, artifact] of binaries.entries()) {
+    const source = path.join(ctx.jobDirectory, artifact.evidenceFile);
+    const nested = path.join(ctx.jobDirectory, 'acquisition', `nested-${index + 1}`, 'shared.bin');
+    fs.mkdirSync(path.dirname(nested), { recursive: true });
+    fs.renameSync(source, nested);
+    artifact.evidenceFile = path.relative(ctx.jobDirectory, nested).split(path.sep).join('/');
+  }
+  const before = JSON.parse(JSON.stringify(summary.artifacts));
+  assert.throws(() => compactPreparedPhoneAcquisition({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    projectStore: ctx.projectStore,
+    saveJob: () => { throw new Error('synthetic persistence failure'); },
+    nowISO: () => '2026-08-24T00:00:02.000Z',
+  }), /synthetic persistence failure/);
+
+  assert.deepEqual(summary.artifacts, before);
+  for (const artifact of before.filter(({ role }) =>
+    role === 'prepared-video' || role === 'screenshot')) {
+    const restored = path.join(ctx.jobDirectory, artifact.evidenceFile);
+    assert.equal(fs.existsSync(restored), true, `${artifact.role} must be restored`);
+    assert.equal(hash(fs.readFileSync(restored)), artifact.sha256);
+  }
+  assert.equal(fs.existsSync(path.join(
+    ctx.jobDirectory, 'acquisition', '.compacted-binary')), false);
+});
+
 test('hash drift after compile fails closed before Project Asset ingest', async (t) => {
   const ctx = runtimeContext(t);
   await prepareJobMaterialAcquisition(ctx.options);

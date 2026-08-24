@@ -522,7 +522,8 @@ async function main() {
   assert.match(html, /成品已保存於這台 Mac/);
   assert.match(html, /技術資訊與執行記錄/);
   assert.match(html, /素材資料暫時無法載入/);
-  assert.match(html, /已完成手機畫面 placement/);
+  assert.match(html, /el\('h2', \{\}, '手機畫面 placement'\)/);
+  assert.doesNotMatch(html, /el\('h2', \{\}, '已完成手機畫面 placement'\)/);
   assert.match(html, /source／plan／render linkage/);
   assert.match(html, /compositionStartSec/);
   assert.match(html, /（主段 /);
