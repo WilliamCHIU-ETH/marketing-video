@@ -14,11 +14,15 @@ const FOCUSSTOCK_VISUAL_TIMING = require(
   '../src/Focusstock/focusstock-visual-timing.contract.json');
 const { halfOpenFrameIntervalsOverlap } = require(
   '../src/Focusstock/focusstock-half-open');
+const { validateFocusstockBrollCarryPlan } = require('./focusstock-broll-carry-forward');
 
 const PREPARED_VIDEO_INPUT = 'prepared-phone-material.mp4';
 const PREPARED_INTENT_INPUT = 'prepared-phone-material.intent.json';
 const PREPARED_PLAN = path.posix.join(
   'src', 'Focusstock', 'prepared-phone-material.generated.json');
+const FOCUSSTOCK_BROLL_PLAN = path.posix.join(
+  'src', 'Focusstock', 'focusstock-broll.generated.json');
+const FOCUSSTOCK_BROLL_SOURCE_INPUT = 'focusstock-broll-carry.source.json';
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const PREPARED_FPS = 30;
 const FOCUSSTOCK_MAIN_OFFSET_FRAMES = PREPARED_FPS;
@@ -412,6 +416,92 @@ function validateBoundVisualFile(root, binding) {
   }
 }
 
+function validateFocusstockBrollAssetBindings({ job, projectStore, workspaceRoot, assetsById }) {
+  const record = job.focusstockBrollCarryForward;
+  if (!record) return { assetRefs: new Set(), plan: null };
+  const planFile = readRegularJson(workspaceRoot, FOCUSSTOCK_BROLL_PLAN,
+    'Focusstock B-roll plan');
+  const sourceFile = path.join(workspaceRoot, 'public', FOCUSSTOCK_BROLL_SOURCE_INPUT);
+  let sourceStat;
+  let sourceRaw;
+  try {
+    sourceStat = fs.lstatSync(sourceFile);
+    sourceRaw = fs.readFileSync(sourceFile, 'utf8');
+  } catch (_) {}
+  try { validateFocusstockBrollCarryPlan(planFile.value); }
+  catch (error) {
+    fail(`Focusstock B-roll carry plan is invalid: ${error.reason || error.message}`,
+      'placement_compile_failed');
+  }
+  const plan = planFile.value;
+  if (record.schemaVersion !== 1 || record.status !== 'compiled'
+      || record.mode !== 'carried-v1' || record.planFile !== FOCUSSTOCK_BROLL_PLAN
+      || record.sourceInputName !== FOCUSSTOCK_BROLL_SOURCE_INPUT
+      || plan.parent?.projectId !== job.projectId
+      || record.sourceSnapshot?.parent?.projectId !== job.projectId
+      || record.sourceSnapshot?.parent?.projectId !== plan.parent?.projectId
+      || record.sourceSnapshot?.parent?.revisionId !== plan.parent?.revisionId
+      || record.sourceSnapshot?.parent?.runId !== plan.parent?.runId
+      || record.parentRevisionId !== plan.parent.revisionId
+      || record.planSha256 !== planFile.sha256 || record.planSha256 !== hashJson(plan)
+      || JSON.stringify(record.plan) !== JSON.stringify(plan)
+      || record.sourceSnapshotSha256 !== plan.sourceSnapshotSha256
+      || JSON.stringify(record.sourceSnapshot) !== sourceRaw
+      || !sourceStat?.isFile() || sourceStat.isSymbolicLink()
+      || hashFile(sourceFile) !== record.sourceSnapshotSha256
+      || !Array.isArray(record.materialized)
+      || record.materialized.length !== plan.cards.length) {
+    fail('Focusstock B-roll Run binding is incomplete', 'placement_compile_failed');
+  }
+
+  const prepared = readRegularJson(workspaceRoot, PREPARED_PLAN, 'Prepared phone plan');
+  const preparedPlacement = prepared.value?.placement;
+  if (prepared.sha256 !== plan.prepared.planSha256
+      || prepared.value?.source?.sha256 !== plan.prepared.sourceSha256
+      || preparedPlacement?.fps !== plan.prepared.fps
+      || preparedPlacement?.startFrame !== plan.prepared.startFrame
+      || preparedPlacement?.endFrame !== plan.prepared.endFrame
+      || preparedPlacement?.durationInFrames !== plan.prepared.durationInFrames
+      || plan.prepared.intervalSemantics !== 'frame-half-open'
+      || job.materialAcquisitionResult?.compiledPlanSha256 !== plan.prepared.planSha256
+      || job.materialAcquisitionResult?.preparedArtifact?.sha256
+        !== plan.prepared.sourceSha256) {
+    fail('Focusstock B-roll prepared binding drifted', 'placement_compile_failed');
+  }
+
+  const selectedRefs = new Set(job.assetRefs);
+  const boundRefs = new Set();
+  for (const [index, card] of plan.cards.entries()) {
+    const materialized = record.materialized[index];
+    const asset = assetsById.get(card.assetRef);
+    const source = asset && projectStore.assetPath(job.projectId, asset.id);
+    const publicFile = path.join(workspaceRoot, 'public', card.inputName);
+    let sourceAssetStat;
+    let publicStat;
+    try { sourceAssetStat = source && fs.lstatSync(source); } catch (_) {}
+    try { publicStat = fs.lstatSync(publicFile); } catch (_) {}
+    if (boundRefs.has(card.assetRef) || !selectedRefs.has(card.assetRef)
+        || !asset || asset.kind !== 'video' || asset.role != null || asset.origin != null
+        || asset.mediaType !== card.mediaType || asset.sha256 !== card.assetSha256
+        || asset.size !== card.assetSize
+        || !sourceAssetStat?.isFile() || sourceAssetStat.isSymbolicLink()
+        || sourceAssetStat.size !== card.assetSize || hashFile(source) !== card.assetSha256
+        || !publicStat?.isFile() || publicStat.isSymbolicLink()
+        || publicStat.size !== card.assetSize || hashFile(publicFile) !== card.assetSha256
+        || !materialized || materialized.cardId !== card.id
+        || materialized.assetRef !== card.assetRef
+        || materialized.inputName !== card.inputName
+        || materialized.size !== card.assetSize || materialized.sha256 !== card.assetSha256
+        || materialized.disposition !== card.disposition
+        || typeof materialized.reusedExactBytes !== 'boolean') {
+      fail(`Focusstock B-roll Asset binding drifted: ${card.assetRef}`,
+        'placement_compile_failed');
+    }
+    boundRefs.add(card.assetRef);
+  }
+  return { assetRefs: boundRefs, plan };
+}
+
 function validatePreparedFocusstockAssetRefs({ job, projectStore, workspaceRoot }) {
   if (job.materialAcquisition?.operation !== 'prepared-video') return [];
   const bindings = job.focusstockVisualInputs == null ? [] : job.focusstockVisualInputs;
@@ -422,6 +512,9 @@ function validatePreparedFocusstockAssetRefs({ job, projectStore, workspaceRoot 
   const project = projectStore.get(job.projectId);
   if (!project) fail('Ready-to-place Project is missing', 'placement_compile_failed');
   const assetsById = new Map((project.assets || []).map((asset) => [asset.id, asset]));
+  const carried = validateFocusstockBrollAssetBindings({
+    job, projectStore, workspaceRoot, assetsById,
+  });
   const bindingByRef = new Map(bindings.map((binding) => [binding?.assetRef, binding]));
   if (bindingByRef.size !== bindings.length)
     fail('Ready-to-place image bindings are duplicated', 'placement_compile_failed');
@@ -446,6 +539,7 @@ function validatePreparedFocusstockAssetRefs({ job, projectStore, workspaceRoot 
   const speakerRefs = [];
   for (const assetRef of job.assetRefs) {
     if (bindingByRef.has(assetRef)) continue;
+    if (carried.assetRefs.has(assetRef)) continue;
     const asset = assetsById.get(assetRef);
     if (!asset)
       fail(`Ready-to-place assetRef is outside the Project: ${assetRef}`,
@@ -485,6 +579,12 @@ function validatePreparedFocusstockAssetRefs({ job, projectStore, workspaceRoot 
       || publicSpeakerStat.size !== speaker.size
       || hashFile(publicSpeaker) !== speaker.sha256) {
     fail('Speaker asset does not match the ready-to-place Render input',
+      'placement_compile_failed');
+  }
+  if (carried.plan && (speaker.id !== carried.plan.speaker.assetRef
+      || speaker.sha256 !== carried.plan.speaker.assetSha256
+      || speaker.size !== carried.plan.speaker.assetSize)) {
+    fail('Speaker asset does not match the carried B-roll plan',
       'placement_compile_failed');
   }
   return bindings;
@@ -738,17 +838,41 @@ function validateFocusstockVisualTimelinePlacements(job, evidence, evidenceSha25
 }
 
 function mergePreparedPhoneTimelineChannels({
-  existingPlacements = [], focusstockVisualPlacements = [], preparedPlacement,
+  existingPlacements = [], focusstockVisualPlacements = [],
+  focusstockBrollPlacements = [], preparedPlacement,
 }) {
   if (!Array.isArray(existingPlacements) || !Array.isArray(focusstockVisualPlacements)
+      || !Array.isArray(focusstockBrollPlacements)
       || !preparedPlacement || preparedPlacement.kind !== 'prepared-phone-video') {
     fail('Prepared phone timeline merge contract is invalid', 'placement_compile_failed');
+  }
+  const brollIds = new Set();
+  for (const placement of focusstockBrollPlacements) {
+    const id = placement?.clipId;
+    if (!placement || placement.kind !== 'focusstock-broll-placement'
+        || placement.channel !== 'focusstock-broll' || typeof id !== 'string' || !id
+        || placement.cardId !== id
+        || brollIds.has(id)
+        || !['rendered', 'suppressed_by_prepared'].includes(placement.disposition)
+        || placement.suppressedBy
+          !== (placement.disposition === 'suppressed_by_prepared'
+            ? 'prepared-phone-video' : null)) {
+      fail('Focusstock B-roll timeline placements are invalid', 'placement_compile_failed');
+    }
+    brollIds.add(id);
   }
   const preserved = existingPlacements.filter((item) => item
     && item.kind !== 'prepared-phone-video'
     && item.kind !== 'focusstock-shot-run'
-    && item.channel !== 'focusstock-shots');
-  return [...preserved, ...focusstockVisualPlacements, preparedPlacement];
+    && item.channel !== 'focusstock-shots'
+    && item.kind !== 'focusstock-broll-placement'
+    && item.channel !== 'focusstock-broll');
+  return [
+    ...preserved,
+    ...focusstockVisualPlacements,
+    ...focusstockBrollPlacements,
+    preparedPlacement,
+  ];
 }
 
 function selectPreparedPhoneGraphicBroll(existingGraphicBroll, generatedGraphicBroll) {
@@ -1389,6 +1513,38 @@ function finalizeCommittedPreparedPhoneCompaction({
   return true;
 }
 
+/**
+ * A carried Focusstock Run has the same durable intent recorded in both the Run and Revision.
+ * Cleanup is destructive, so one surviving carry marker must force every marker and the
+ * prepared-video operation to agree before state/ can be removed. This prevents deleting the
+ * last exact B-roll bytes after a partially edited or damaged ledger bypasses compaction.
+ */
+function requireFocusstockCarryCompaction({ job, revision }) {
+  const signals = (record) => [
+    record?.focusstockBrollCarryForward != null,
+    record?.graphicBroll?.style === 'focusstock-carried-v1',
+    record?.graphicBroll?.provenance?.level === 'pre-render-manifest-v1',
+    record?.renderInputManifest?.options?.focusstockBrollMode === 'carried-v1',
+  ];
+  const jobSignals = signals(job);
+  const revisionSignals = signals(revision);
+  const allSignals = [...jobSignals, ...revisionSignals];
+  if (!allSignals.some(Boolean)) return false;
+  const exactLedgers = JSON.stringify(job?.focusstockBrollCarryForward)
+      === JSON.stringify(revision?.focusstockBrollCarryForward)
+    && JSON.stringify(job?.graphicBroll) === JSON.stringify(revision?.graphicBroll)
+    && job?.renderInputManifestSha256 === revision?.renderInputManifestSha256
+    && JSON.stringify(job?.renderInputManifest) === JSON.stringify(revision?.renderInputManifest);
+  if (!allSignals.every(Boolean)
+      || job?.materialAcquisition?.operation !== 'prepared-video'
+      || revision?.materialAcquisition?.operation !== 'prepared-video'
+      || !exactLedgers) {
+    fail('Carried Focusstock cleanup ledger is incomplete or inconsistent',
+      'acquisition_compaction_failed');
+  }
+  return true;
+}
+
 function compactPreparedPhoneAcquisition({
   job,
   jobDirectory,
@@ -1420,6 +1576,20 @@ function compactPreparedPhoneAcquisition({
   catch (_) {
     fail('Prepared Project Asset is not durable for acquisition compaction',
       'acquisition_compaction_failed');
+  }
+  if (job.focusstockBrollCarryForward) {
+    try {
+      validatePreparedFocusstockAssetRefs({
+        job,
+        projectStore,
+        workspaceRoot: path.join(jobDirectory, 'state'),
+      });
+    } catch (_) {
+      // state/public can be the last exact copy after a Project Asset drifts. Gate before staging
+      // acquisition binaries so pruneOldJobs cannot continue on to remove state/input.
+      fail('Carried Focusstock B-roll or speaker is not durable for Run compaction',
+        'acquisition_compaction_failed');
+    }
   }
   verifyPreparedPhoneDurableOutputs({
     job,
@@ -1711,6 +1881,7 @@ module.exports = {
   prepareJobMaterialAcquisition,
   recordPreparedPhoneReviewEditCommitIntent,
   recoverPreparedPhoneReviewEditTransaction,
+  requireFocusstockCarryCompaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
   finalizePreparedPhoneReviewEditTransaction,

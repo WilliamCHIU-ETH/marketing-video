@@ -34,6 +34,7 @@ const {
   prepareJobMaterialAcquisition,
   recordPreparedPhoneReviewEditCommitIntent,
   recoverPreparedPhoneReviewEditTransaction,
+  requireFocusstockCarryCompaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
@@ -978,6 +979,276 @@ test('ready-to-place assetRefs allow only bound images, exact speaker, and curre
   ctx.job.assetRefs = validRefs;
 });
 
+test('ready-to-place assetRefs accept exact carried B-roll and keep suppressed clips bound', async (t) => {
+  const ctx = runtimeContext(t);
+  await prepareJobMaterialAcquisition(ctx.options);
+  const compiled = compileRuntimePlan(ctx);
+  const speaker = bindSpeakerVideo(ctx, compiled);
+  const selected = finalizePreparedPhoneMaterial({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    workspaceRoot: compiled.workspaceRoot,
+    publicDirectory: compiled.publicDirectory,
+    projectStore: ctx.projectStore,
+  });
+  const preparedPlacement = commitPreparedPhoneMaterialSelection({
+    job: ctx.job, asset: selected.asset, plan: selected.plan, projectStore: ctx.projectStore,
+  });
+  ctx.job.timelinePlacements = [preparedPlacement];
+  const assets = ['red', 'blue'].map((color, offset) => {
+    const source = path.join(ctx.root, `carry-${offset + 1}.mp4`);
+    execFileSync('ffmpeg', [
+      '-y', '-loglevel', 'error', '-f', 'lavfi',
+      '-i', `color=c=${color}:s=16x16:r=30:d=1`,
+      '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source,
+    ], { stdio: 'ignore', timeout: 15000 });
+    const asset = ctx.projectStore.ingestAsset(ctx.project.id, source, {
+      originalName: `carry-${offset + 1}.mp4`, kind: 'video',
+    });
+    ctx.projectStore.materializeAsset(ctx.project.id, asset.id,
+      path.join(compiled.publicDirectory, `broll${offset + 1}.mp4`));
+    ctx.job.assetRefs.push(asset.id);
+    return asset;
+  });
+  const makeCard = (asset, ordinal, startSec, endSec, disposition) => {
+    const startFrame = Math.round(startSec * 30);
+    const durationInFrames = Math.max(1, Math.round((endSec - startSec) * 30));
+    const endFrame = startFrame + durationInFrames;
+    return {
+      ordinal,
+      id: `carry-${String(ordinal).padStart(2, '0')}`,
+      assetRef: asset.id,
+      assetSha256: asset.sha256,
+      assetSize: asset.size,
+      mediaType: 'video/mp4',
+      inputName: `broll${ordinal}.mp4`,
+      startCharIdx: (ordinal - 1) * 10,
+      endCharIdx: (ordinal * 10) - 1,
+      startSec,
+      endSec,
+      fps: 30,
+      mainStartFrame: startFrame,
+      mainEndFrame: endFrame,
+      mainDurationInFrames: durationInFrames,
+      compositionOffsetFrames: 30,
+      compositionStartFrame: startFrame + 30,
+      compositionEndFrame: endFrame + 30,
+      compositionStartSec: Number(((startFrame + 30) / 30).toFixed(6)),
+      compositionEndSec: Number(((endFrame + 30) / 30).toFixed(6)),
+      disposition,
+      suppressedBy: disposition === 'suppressed_by_prepared'
+        ? 'prepared-phone-video' : null,
+    };
+  };
+  const cards = [
+    makeCard(assets[0], 1, 1, 2, 'rendered'),
+    makeCard(assets[1], 2, 2, 3, 'suppressed_by_prepared'),
+  ];
+  const output = { name: 'parent.mp4', size: 10, sha256: hash('parent-output') };
+  const evidence = {
+    status: 'verified', projectId: ctx.project.id, revisionId: 'v001',
+    renderInputManifestSha256: hash('parent-manifest'),
+    cardIds: cards.map((card) => card.id), output,
+  };
+  const parent = {
+    projectId: ctx.project.id,
+    revisionId: 'v001',
+    runId: 'parent-run',
+    renderInputManifestSha256: evidence.renderInputManifestSha256,
+    evidenceStatus: 'verified',
+    evidence,
+    evidenceSha256: hash(JSON.stringify(evidence)),
+    output,
+  };
+  const sourceSnapshot = {
+    schemaVersion: 2,
+    mode: 'carry-source-v1',
+    template: 'focusstock',
+    timelineBasis: 'focusstock-main-v1',
+    fps: 30,
+    intervalSemantics: 'frame-half-open',
+    parent,
+    sourceScriptSha256: hash('same-script'),
+    speaker: {
+      assetRef: speaker.id,
+      assetSha256: speaker.sha256,
+      assetSize: speaker.size,
+      inputName: 'heygen.mp4',
+    },
+    cards: cards.map(({ disposition: _disposition, suppressedBy: _suppressedBy, ...card }) => card),
+  };
+  const plan = {
+    schemaVersion: 2,
+    mode: 'carried-v1',
+    template: 'focusstock',
+    timelineBasis: 'focusstock-main-v1',
+    fps: 30,
+    intervalSemantics: 'frame-half-open',
+    sourceSnapshotSha256: hash(JSON.stringify(sourceSnapshot)),
+    parent,
+    sourceScriptSha256: sourceSnapshot.sourceScriptSha256,
+    prepared: {
+      planSha256: ctx.job.materialAcquisitionResult.compiledPlanSha256,
+      sourceSha256: selected.asset.sha256,
+      fps: selected.plan.placement.fps,
+      startFrame: selected.plan.placement.startFrame,
+      endFrame: selected.plan.placement.endFrame,
+      durationInFrames: selected.plan.placement.durationInFrames,
+      intervalSemantics: 'frame-half-open',
+    },
+    speaker: sourceSnapshot.speaker,
+    cards,
+  };
+  const planSha256 = hash(JSON.stringify(plan));
+  fs.writeFileSync(path.join(compiled.publicDirectory, 'focusstock-broll-carry.source.json'),
+    JSON.stringify(sourceSnapshot));
+  fs.writeFileSync(path.join(compiled.workspaceRoot,
+    'src', 'Focusstock', 'focusstock-broll.generated.json'), JSON.stringify(plan));
+  ctx.job.focusstockBrollCarryForward = {
+    schemaVersion: 1,
+    status: 'compiled',
+    mode: 'carried-v1',
+    parentRevisionId: parent.revisionId,
+    sourceInputName: 'focusstock-broll-carry.source.json',
+    sourceSnapshotSha256: plan.sourceSnapshotSha256,
+    sourceSnapshot,
+    planFile: 'src/Focusstock/focusstock-broll.generated.json',
+    planSha256,
+    plan,
+    materialized: cards.map((card) => ({
+      cardId: card.id,
+      assetRef: card.assetRef,
+      inputName: card.inputName,
+      size: card.assetSize,
+      sha256: card.assetSha256,
+      disposition: card.disposition,
+      reusedExactBytes: false,
+    })),
+  };
+  assert.doesNotThrow(() => validatePreparedFocusstockAssetRefs({
+    job: ctx.job, projectStore: ctx.projectStore, workspaceRoot: compiled.workspaceRoot,
+  }));
+
+  const stateDirectory = path.join(ctx.jobDirectory, 'state');
+  fs.cpSync(compiled.workspaceRoot, stateDirectory, { recursive: true });
+  const outputEvidence = completeCompactionEvidence(ctx);
+  const acquisitionBinary = path.join(ctx.jobDirectory,
+    ctx.job.materialAcquisitionResult.artifacts.find(
+      ({ role }) => role === 'prepared-video').evidenceFile);
+  const carriedAssetFile = ctx.projectStore.assetPath(ctx.project.id, assets[1].id);
+  const exactCarriedBytes = fs.readFileSync(carriedAssetFile);
+  const corruptedCarriedBytes = Buffer.from(exactCarriedBytes);
+  corruptedCarriedBytes[corruptedCarriedBytes.length - 1] ^= 0xff;
+  fs.writeFileSync(carriedAssetFile, corruptedCarriedBytes);
+  assert.throws(() => compactPreparedPhoneAcquisition({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    projectStore: ctx.projectStore,
+    ...outputEvidence,
+    saveJob: ctx.options.saveJob,
+    nowISO: () => '2026-08-24T00:00:02.000Z',
+  }), (error) => error.code === 'acquisition_compaction_failed'
+    && /Carried Focusstock/.test(error.message),
+  'carried Project Asset drift must stop before Run payload compaction');
+  assert.equal(fs.existsSync(acquisitionBinary), true);
+  assert.equal(fs.existsSync(path.join(stateDirectory, 'public', 'broll2.mp4')), true);
+  assert.equal(fs.existsSync(path.join(ctx.jobDirectory, 'input', PREPARED_VIDEO_INPUT)), true);
+  fs.writeFileSync(carriedAssetFile, exactCarriedBytes);
+  const validCompaction = compactPreparedPhoneAcquisition({
+    job: ctx.job,
+    jobDirectory: ctx.jobDirectory,
+    projectStore: ctx.projectStore,
+    ...outputEvidence,
+    saveJob: ctx.options.saveJob,
+    nowISO: () => '2026-08-24T00:00:03.000Z',
+  });
+  assert.equal(validCompaction.compacted, true,
+    'exact carried Project/state bytes keep the existing compaction path available');
+
+  const exactCarryRecord = JSON.parse(JSON.stringify(ctx.job.focusstockBrollCarryForward));
+  const wrongProjectCarry = JSON.parse(JSON.stringify(exactCarryRecord));
+  wrongProjectCarry.sourceSnapshot.parent.projectId = 'other-project';
+  wrongProjectCarry.sourceSnapshot.parent.evidence.projectId = 'other-project';
+  wrongProjectCarry.sourceSnapshot.parent.evidenceSha256 = hash(
+    JSON.stringify(wrongProjectCarry.sourceSnapshot.parent.evidence));
+  wrongProjectCarry.sourceSnapshotSha256 = hash(JSON.stringify(wrongProjectCarry.sourceSnapshot));
+  wrongProjectCarry.plan.parent = JSON.parse(JSON.stringify(
+    wrongProjectCarry.sourceSnapshot.parent));
+  wrongProjectCarry.plan.sourceSnapshotSha256 = wrongProjectCarry.sourceSnapshotSha256;
+  wrongProjectCarry.planSha256 = hash(JSON.stringify(wrongProjectCarry.plan));
+  ctx.job.focusstockBrollCarryForward = wrongProjectCarry;
+  fs.writeFileSync(path.join(compiled.publicDirectory, 'focusstock-broll-carry.source.json'),
+    JSON.stringify(wrongProjectCarry.sourceSnapshot));
+  fs.writeFileSync(path.join(compiled.workspaceRoot,
+    'src', 'Focusstock', 'focusstock-broll.generated.json'),
+  JSON.stringify(wrongProjectCarry.plan));
+  assert.throws(() => validatePreparedFocusstockAssetRefs({
+    job: ctx.job, projectStore: ctx.projectStore, workspaceRoot: compiled.workspaceRoot,
+  }), (error) => error.code === 'placement_compile_failed',
+  'canonical carry records bound to another Project must fail before render');
+  ctx.job.focusstockBrollCarryForward = exactCarryRecord;
+  fs.writeFileSync(path.join(compiled.publicDirectory, 'focusstock-broll-carry.source.json'),
+    JSON.stringify(exactCarryRecord.sourceSnapshot));
+  fs.writeFileSync(path.join(compiled.workspaceRoot,
+    'src', 'Focusstock', 'focusstock-broll.generated.json'),
+  JSON.stringify(exactCarryRecord.plan));
+
+  const validRefs = [...ctx.job.assetRefs];
+  ctx.job.assetRefs = validRefs.filter((assetRef) => assetRef !== assets[1].id);
+  assert.throws(() => validatePreparedFocusstockAssetRefs({
+    job: ctx.job, projectStore: ctx.projectStore, workspaceRoot: compiled.workspaceRoot,
+  }), (error) => error.code === 'placement_compile_failed',
+  'suppressed B-roll remains an exact selected input');
+  ctx.job.assetRefs = validRefs;
+  ctx.job.focusstockBrollCarryForward.plan.prepared.planSha256 = 'f'.repeat(64);
+  fs.writeFileSync(path.join(compiled.workspaceRoot,
+    'src', 'Focusstock', 'focusstock-broll.generated.json'),
+  JSON.stringify(ctx.job.focusstockBrollCarryForward.plan));
+  ctx.job.focusstockBrollCarryForward.planSha256 = hash(
+    JSON.stringify(ctx.job.focusstockBrollCarryForward.plan));
+  assert.throws(() => validatePreparedFocusstockAssetRefs({
+    job: ctx.job, projectStore: ctx.projectStore, workspaceRoot: compiled.workspaceRoot,
+  }), (error) => error.code === 'placement_compile_failed',
+  'carried plan must remain cross-bound to the compiled prepared plan');
+});
+
+test('carry cleanup requires every Run and Revision marker plus prepared-video intent', () => {
+  const carry = { schemaVersion: 1, status: 'compiled', mode: 'carried-v1' };
+  const graphic = {
+    style: 'focusstock-carried-v1',
+    provenance: { level: 'pre-render-manifest-v1' },
+  };
+  const manifest = { options: { focusstockBrollMode: 'carried-v1' } };
+  const makeRecord = () => ({
+    materialAcquisition: { operation: 'prepared-video' },
+    focusstockBrollCarryForward: JSON.parse(JSON.stringify(carry)),
+    graphicBroll: JSON.parse(JSON.stringify(graphic)),
+    renderInputManifest: JSON.parse(JSON.stringify(manifest)),
+    renderInputManifestSha256: 'a'.repeat(64),
+  });
+  const job = makeRecord();
+  const revision = makeRecord();
+  assert.equal(requireFocusstockCarryCompaction({ job, revision }), true);
+
+  for (const mutate of [
+    (record) => { delete record.focusstockBrollCarryForward; },
+    (record) => { delete record.graphicBroll.provenance; },
+    (record) => { record.renderInputManifest.options.focusstockBrollMode = 'disabled'; },
+    (record) => { delete record.materialAcquisition.operation; },
+  ]) {
+    const damagedJob = makeRecord();
+    mutate(damagedJob);
+    assert.throws(() => requireFocusstockCarryCompaction({
+      job: damagedJob, revision: makeRecord(),
+    }), (error) => error.code === 'acquisition_compaction_failed',
+    'one remaining carry signal must stop destructive cleanup');
+  }
+
+  const ordinary = { materialAcquisition: { operation: 'prepared-video' } };
+  assert.equal(requireFocusstockCarryCompaction({ job: ordinary, revision: ordinary }), false,
+    'ordinary ready-to-place compaction remains on its existing path');
+});
+
 test('Focusstock conflict evidence uses renderer-equivalent <=2 second run merging', (t) => {
   const evidence = conflictEvidenceFixture(t, {
     images: [{ inputName: 'shot1.png', bytes: Buffer.from('bound-image-one') }],
@@ -1103,15 +1374,29 @@ test('Focusstock visual timeline placements are an exact evidence-bound retry co
     validJob, evidence, evidenceSha256), expected);
 
   const replacementPrepared = { kind: 'prepared-phone-video', assetRef: 'prepared-new' };
+  const replacementBroll = [{
+    kind: 'focusstock-broll-placement', channel: 'focusstock-broll',
+    clipId: 'carry-01', cardId: 'carry-01', disposition: 'rendered', suppressedBy: null,
+  }, {
+    kind: 'focusstock-broll-placement', channel: 'focusstock-broll',
+    clipId: 'carry-02', cardId: 'carry-02', disposition: 'suppressed_by_prepared',
+    suppressedBy: 'prepared-phone-video',
+  }];
   assert.deepEqual(mergePreparedPhoneTimelineChannels({
     existingPlacements: [
       recordedCompositionPlacement,
       { ...expected[0], disposition: 'stale' },
+      { ...replacementBroll[0], clipId: 'stale-carry' },
       { kind: 'prepared-phone-video', assetRef: 'prepared-old' },
     ],
     focusstockVisualPlacements: expected,
+    focusstockBrollPlacements: replacementBroll,
     preparedPlacement: replacementPrepared,
-  }), [recordedCompositionPlacement, ...expected, replacementPrepared]);
+  }), [recordedCompositionPlacement, ...expected, ...replacementBroll, replacementPrepared]);
+  assert.throws(() => mergePreparedPhoneTimelineChannels({
+    focusstockBrollPlacements: [replacementBroll[0], replacementBroll[0]],
+    preparedPlacement: replacementPrepared,
+  }), (error) => error.code === 'placement_compile_failed');
 
   const recordedComposition = {
     schemaVersion: 1,

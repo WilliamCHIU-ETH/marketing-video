@@ -201,10 +201,13 @@ const path = require('path');
 const tls = require('tls');
 const log = process.env.SMOKE_GUARD_LOG;
 const originalSpawn = childProcess.spawn;
+const originalExecFile = childProcess.execFile;
 const originalExecFileSync = childProcess.execFileSync;
 function blocked(kind) {
-  return function () {
-    fs.appendFileSync(log, kind + '\\n');
+  return function (...args) {
+    const detail = kind === 'child_process.execFileSync'
+      ? ' ' + String(args[0] || '') + ' ' + JSON.stringify(args[1] || []) : '';
+    fs.appendFileSync(log, kind + detail + '\\n');
     throw new Error('smoke guard blocked ' + kind);
   };
 }
@@ -225,6 +228,22 @@ childProcess.spawn = function (file, args, options) {
   } catch (_) {}
   return blockedSpawn(file, args, options);
 };
+const blockedExecFile = childProcess.execFile;
+childProcess.execFile = function (file, args, options, callback) {
+  try {
+    const dataRoot = fs.realpathSync(process.env.DATA_DIR);
+    const provider = fs.realpathSync(process.env.CHIPK_CAPTURE_BIN || '');
+    const command = fs.realpathSync(file);
+    const validArgs = Array.isArray(args) && (
+      (args.length === 2 && args[0] === 'capabilities' && args[1] === '--json')
+      || (args.length === 4 && args[0] === 'acquire' && args[1] === '--request'
+        && args[3] === '--json' && fs.realpathSync(args[2]).startsWith(dataRoot + path.sep))
+    );
+    if (command === provider && provider.startsWith(dataRoot + path.sep) && validArgs)
+      return originalExecFile(file, args, options, callback);
+  } catch (_) {}
+  return blockedExecFile(file, args, options, callback);
+};
 const blockedExecFileSync = childProcess.execFileSync;
 childProcess.execFileSync = function (file, args, options) {
   const input = Array.isArray(args) ? args[args.length - 1] : null;
@@ -234,13 +253,25 @@ childProcess.execFileSync = function (file, args, options) {
     const target = fs.realpathSync(input);
     localProbe = target.startsWith(dataRoot + path.sep);
   } catch (_) {}
-  if (file === 'ffprobe' && Array.isArray(args) && args.includes('-count_frames') && localProbe)
+  if (file === 'ffprobe' && Array.isArray(args) && localProbe)
     return originalExecFileSync(file, args, options);
+  if (file === process.execPath && Array.isArray(args) && args.length === 3
+      && args[0] === 'scripts/auto-shot.js'
+      && args[1] === '--sentences' && /^--script=/.test(args[2])) {
+    const commandCwd = path.resolve(options?.cwd || process.cwd());
+    const script = path.resolve(args[2].slice('--script='.length));
+    const dataRoot = path.resolve(process.env.DATA_DIR || '');
+    if (commandCwd === path.resolve(process.cwd())
+        && fs.existsSync(path.join(commandCwd, args[0]))
+        && fs.existsSync(script)
+        && script.startsWith(dataRoot + path.sep))
+      return originalExecFileSync(file, args, options);
+  }
   if (file === 'ps' && Array.isArray(args) && args.length === 4
       && args[0] === '-p' && /^\\d+$/.test(String(args[1]))
       && args[2] === '-o' && ['command=', 'lstart='].includes(args[3]))
     return originalExecFileSync(file, args, options);
-  return blockedExecFileSync();
+  return blockedExecFileSync(file, args, options);
 };
 http.request = blocked('http.request');
 http.get = blocked('http.get');
@@ -342,6 +373,15 @@ async function waitForJobStatus(base, id, expected, timeoutMs = 10000) {
   }
   throw new Error(`等待 ${id} 進入 ${[...wanted].join('/')} 逾時；最後狀態 ${latest?.job?.status}`
     + (latest?.job?.error ? `；${latest.job.error}` : ''));
+}
+
+async function waitForPath(file, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return file;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`等待檔案逾時：${file}`);
 }
 
 async function main() {
@@ -907,11 +947,29 @@ async function main() {
   assert.match(serverSource,
     /if \(job\.skipGenerate\) args\.push\('--skip-generate'\);[\s\S]{0,160}if \(job\.noSpeed\) args\.push\('--no-speed'\);/,
     'API-forced speaker byte preservation flags must reach the pipeline command');
-  const renderDoneBlock = serverSource.match(
-    /transitionJobSafely\(job, \{[\s\S]{0,400}status: 'done',[\s\S]{0,700}\}\);/);
-  assert.ok(renderDoneBlock, 'render 完成狀態必須以 durable transition 保存，再交給 cleanup');
-  assert.doesNotMatch(renderDoneBlock[0],
-    /rmrf\(path\.join\(jobDir\(job\.id\), 'state'\)\);/);
+  const createRouteSource = serverSource.slice(serverSource.indexOf(
+    "if (p === '/api/jobs' && req.method === 'POST')"));
+  const carryPreflightIndex = createRouteSource.indexOf('carryPreflight = preflightCarryFromParent({');
+  const addRevisionIndex = createRouteSource.indexOf('revision = PROJECT_STORE.addRevision(');
+  assert.ok(carryPreflightIndex >= 0 && carryPreflightIndex < addRevisionIndex,
+    'carried B-roll preflight 必須在 addRevision／job directory 等寫入前完成');
+  const prepareLifecycle = serverSource.slice(
+    serverSource.indexOf('async function doPrepare(job)'),
+    serverSource.indexOf('async function doRender(job)'));
+  assert.ok(prepareLifecycle.indexOf('revalidateCarryBeforeProvider(job)')
+    < prepareLifecycle.indexOf('await prepareJobMaterialAcquisition({'),
+  'parent evidence revalidation 必須早於 Provider acquisition');
+  assert.ok(prepareLifecycle.indexOf('finalizeFocusstockBrollCarry(job, preparedCandidate)')
+    < prepareLifecycle.indexOf('snapshotWorkspace(job)'),
+  'final carried plan/materialization 必須在 immutable snapshot 前完成');
+  assert.match(prepareLifecycle, /--focusstock-broll=\$\{job\.focusstockBrollCarryForward \? 'deferred' : 'disabled'\}/);
+  const successfulTransitions = serverSource.match(
+    /transitionJobSafely\(job, successfulRenderPatch\(job, finalized\)\)/g) || [];
+  assert.equal(successfulTransitions.length, 2,
+    'normal 與 detached success 必須共用一次性 output/evidence transition');
+  assert.match(serverSource,
+    /function successfulRenderPatch\([\s\S]{0,1400}graphicBroll,[\s\S]{0,300}renderEvidence:/,
+  'final output identity、carried graphic 與 render evidence 必須由同一 patch 保存');
   assert.match(serverSource,
     /\.finally\(\(\) => \{[\s\S]{0,200}pruneOldJobsNonFatal\('工作結束'\);/);
   assert.match(serverSource,
@@ -2937,6 +2995,441 @@ if (mode !== 'wait') process.exitCode = mode.startsWith('success') ? 0 : 1;
   const queuedBehindResult = await request(base, `/api/jobs/${normalQueuedBehind.job.id}`);
   assert.equal(queuedBehindResult.job.status, 'approved');
   assert.equal(fs.readFileSync(normalWorkerInvocations, 'utf8').trim().split('\n').length, 5);
+  await stopTestServer(child);
+
+  // Provider-free synthetic OneShot for the complete verified carry lifecycle. The local CLI
+  // fixture implements only the locked JSON contract and writes DATA_DIR-owned artifacts; the
+  // local pipeline fixture compiles a real prepared plan and writes a valid MP4 without Remotion.
+  // We intentionally restart the server after stop-before-render completes to prove that a
+  // skipGenerate carry Run resumes finalization instead of being mislabeled detached-done.
+  const carryWorkerDir = path.join(DATA_DIR, 'carry-oneshot-worker');
+  fs.mkdirSync(carryWorkerDir, { recursive: true });
+  const carryPreparedFixture = path.join(carryWorkerDir, 'prepared-fixture.mp4');
+  const carryRenderFixture = path.join(carryWorkerDir, 'render-fixture.mp4');
+  const carryScreenshotFixture = path.join(carryWorkerDir, 'screenshot-fixture.png');
+  const carryProviderEntry = path.join(carryWorkerDir, 'fake-chipk-capture');
+  const carryPipelineEntry = path.join(carryWorkerDir, 'carry-run.js');
+  const carryPipelineMarker = path.join(carryWorkerDir, 'prepare-complete.marker');
+  const carryPipelineInvocations = path.join(carryWorkerDir, 'invocations.log');
+  fs.writeFileSync(carryPreparedFixture, MP4_FIXTURE);
+  fs.writeFileSync(carryRenderFixture, FRAGMENTED_MP4_FIXTURE);
+  fs.writeFileSync(carryScreenshotFixture, PNG_FIXTURE);
+  fs.writeFileSync(carryProviderEntry, `#!/usr/bin/env node
+'use strict';
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const capabilities = {
+  schemaVersion: 1,
+  providerId: 'chipk-simulator-capture',
+  toolVersion: '0.3.0',
+  productionReady: true,
+  operations: ['screenshot', 'record'],
+  contractCapabilities: [
+    {
+      contractVersion: 1,
+      operations: ['screenshot', 'record'],
+      requestSchema: 'contracts/capture-request.schema.json',
+      resultSchema: 'contracts/capture-result.schema.json',
+    },
+    {
+      contractVersion: 2,
+      operations: ['prepared-video'],
+      requestSchema: 'contracts/capture-request-v2.schema.json',
+      resultSchema: 'contracts/capture-result-v2.schema.json',
+      presentationProfiles: [{
+        id: 'chipk.stock-main-force-portrait.v1',
+        version: 1,
+        status: 'ready_to_place',
+        sourceKind: 'screenshot',
+        routeIds: ['chipk.stock.main-force'],
+        stockIds: ['3441'],
+        artifactRole: 'prepared-video',
+      }],
+    },
+  ],
+};
+const args = process.argv.slice(2);
+if (args[0] === 'capabilities' && args[1] === '--json') {
+  process.stdout.write(JSON.stringify(capabilities));
+  process.exit(0);
+}
+if (args[0] !== 'acquire' || args[1] !== '--request' || args[3] !== '--json')
+  throw new Error('unsupported fake provider invocation');
+const request = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+const files = {
+  'prepared-video': {
+    name: 'prepared.mp4', bytes: fs.readFileSync(process.env.SMOKE_CARRY_PREPARED_MP4),
+    kind: 'video', mimeType: 'video/mp4',
+    media: { codec: 'h264', width: 16, height: 16, durationSeconds: 1 },
+  },
+  screenshot: {
+    name: 'screenshot.png', bytes: fs.readFileSync(process.env.SMOKE_CARRY_SCREENSHOT),
+    kind: 'image', mimeType: 'image/png', media: { width: 1, height: 1 },
+  },
+  'capture-manifest': {
+    name: 'capture-manifest.json', bytes: Buffer.from('{"capture":true}'),
+    kind: 'json', mimeType: 'application/json',
+  },
+  'presentation-plan': {
+    name: 'presentation-plan.json', bytes: Buffer.from('{"profile":"ready"}'),
+    kind: 'json', mimeType: 'application/json',
+  },
+  'preparation-manifest': {
+    name: 'preparation-manifest.json', bytes: Buffer.from('{"prepared":true}'),
+    kind: 'json', mimeType: 'application/json',
+  },
+};
+for (const value of Object.values(files))
+  fs.writeFileSync(path.join(request.outputDirectory, value.name), value.bytes);
+process.stdout.write(JSON.stringify({
+  contractVersion: 2,
+  requestId: request.requestId,
+  provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+  status: 'completed',
+  artifacts: Object.entries(files).map(([role, value]) => ({
+    role,
+    kind: value.kind,
+    relativePath: value.name,
+    sha256: hash(value.bytes),
+    mimeType: value.mimeType,
+    ...(value.media ? { media: value.media } : {}),
+  })),
+  evidence: {
+    routeSelection: 'catalog_exact_match',
+    navigation: 'expected_texts_verified',
+    material: 'ready_to_place',
+    catalogVersion: 'smoke-ready-to-place-v2',
+    presentationProfile: {
+      id: 'chipk.stock-main-force-portrait.v1', version: 1, status: 'ready_to_place',
+    },
+    publication: 'atomic_directory_rename',
+  },
+  error: null,
+}));
+`);
+  fs.chmodSync(carryProviderEntry, 0o700);
+  fs.writeFileSync(carryPipelineEntry, `
+'use strict';
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const args = process.argv.slice(2);
+const dataDir = process.env.DATA_DIR;
+const workspace = path.join(dataDir, 'workspace');
+const publicDir = path.join(workspace, 'public');
+const srcDir = path.join(workspace, 'src');
+const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+const writeJson = (file, value) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\\n');
+};
+fs.mkdirSync(publicDir, { recursive: true });
+fs.writeFileSync(path.join(dataDir, '.run.owner.json'), JSON.stringify({
+  pid: process.pid,
+  startedAt: new Date().toISOString(),
+  token: process.env.WORKSPACE_RUN_TOKEN,
+}));
+fs.appendFileSync(process.env.SMOKE_CARRY_INVOCATIONS, args.join(' ') + '\\n');
+if (args.includes('--stop-before-render')) {
+  const script = fs.readFileSync(path.join(publicDir, 'script.txt'));
+  writeJson(path.join(srcDir, 'graphic-broll.generated.json'), {
+    schemaVersion: 1,
+    mode: 'disabled',
+    style: 'morning-report-v1',
+    sourceScriptSha256: hash(script),
+    cards: [],
+  });
+  writeJson(path.join(srcDir, 'subtitles.json'), { _scriptCharTimes: [] });
+  writeJson(path.join(srcDir, 'video-meta.json'), { heygenDurationSec: 12 });
+  writeJson(path.join(srcDir, 'Focusstock', 'focusstock-shots.generated.json'), []);
+  const planner = require(path.join(process.cwd(), 'scripts', 'prepared-phone-material-plan.js'));
+  planner.run([
+    '--mode=ready-to-place',
+    '--intent=' + path.join(publicDir, 'prepared-phone-material.intent.json'),
+    '--video=' + path.join(publicDir, 'prepared-phone-material.mp4'),
+    '--script=' + path.join(publicDir, 'script.txt'),
+    '--subtitles=' + path.join(srcDir, 'subtitles.json'),
+    '--video-meta=' + path.join(srcDir, 'video-meta.json'),
+    '--out=' + path.join(srcDir, 'Focusstock', 'prepared-phone-material.generated.json'),
+  ]);
+  fs.writeFileSync(process.env.SMOKE_CARRY_PREPARE_MARKER, 'complete');
+  setTimeout(() => {}, Number(process.env.SMOKE_CARRY_PREPARE_DELAY_MS || 0));
+} else if (args.includes('--render-only')) {
+  const outDir = path.join(workspace, 'out');
+  fs.mkdirSync(outDir, { recursive: true });
+  const output = path.join(outDir, 'output-focusstock.mp4');
+  try { fs.unlinkSync(output); } catch (_) {}
+  fs.copyFileSync(process.env.SMOKE_CARRY_RENDER_MP4, output);
+} else {
+  throw new Error('unsupported fake pipeline mode');
+}
+`);
+
+  const carryBaseEnv = {
+    DATA_DIR: carryWorkerDir,
+    CHIPK_CAPTURE_BIN: carryProviderEntry,
+    SMOKE_CARRY_PREPARED_MP4: carryPreparedFixture,
+    SMOKE_CARRY_RENDER_MP4: carryRenderFixture,
+    SMOKE_CARRY_SCREENSHOT: carryScreenshotFixture,
+    SMOKE_CARRY_INVOCATIONS: carryPipelineInvocations,
+    SMOKE_CARRY_PREPARE_MARKER: carryPipelineMarker,
+  };
+  child = startTestServer(carryBaseEnv);
+  const carrySeedReady = await waitForReady(child);
+  base = `http://127.0.0.1:${carrySeedReady.port}`;
+  const carryTitle = '聯一光主力觀察';
+  const carryBody = '先看主力趨勢，再看量價與籌碼結構，最後整理今天的觀察重點。';
+  const carryParent = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: 'focusstock', owner: 'carry-oneshot-smoke', title: carryTitle,
+      body: carryBody, workflowMode: 'manual-assets', controlPolicy: 'auto',
+      skipGenerate: true,
+    }),
+  });
+  await request(base, `/api/jobs/${carryParent.job.id}/upload?name=heygen.mp4`, {
+    method: 'POST', body: MP4_FIXTURE,
+  });
+  const carryBrollBytes = [];
+  for (let ordinal = 1; ordinal <= 7; ordinal += 1) {
+    const bytes = Buffer.concat([MP4_FIXTURE, freeBox(24, `carry-broll-${ordinal}`)]);
+    carryBrollBytes.push(bytes);
+    await request(base, `/api/jobs/${carryParent.job.id}/upload?name=broll${ordinal}.mp4`, {
+      method: 'POST', body: bytes,
+    });
+  }
+  await request(base, `/api/jobs/${carryParent.job.id}/submit`, { method: 'POST' });
+  await stopTestServer(child);
+
+  const carryOneShotStore = createProjectStore({
+    dataDir: carryWorkerDir,
+    nowISO: () => '2026-08-24T00:00:00.000Z',
+    idFactory: () => 'unused-carry-smoke-id',
+  });
+  const carryProject = carryOneShotStore.get(carryParent.job.projectId);
+  const carrySpeaker = carryProject.assets.find((asset) => asset.kind === 'speaker-video');
+  const carryAssets = carryBrollBytes.map((bytes) => {
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    return carryProject.assets.find((asset) => asset.kind === 'video' && asset.sha256 === digest);
+  });
+  assert.ok(carrySpeaker && carryAssets.every(Boolean));
+  const carryParentJobFile = path.join(
+    carryWorkerDir, 'jobs', carryParent.job.id, 'job.json');
+  const carryParentJob = JSON.parse(fs.readFileSync(carryParentJobFile, 'utf8'));
+  const carryScript = fs.readFileSync(path.join(
+    carryWorkerDir, 'jobs', carryParent.job.id, 'input', 'script.txt'));
+  const carryScriptSha256 = crypto.createHash('sha256').update(carryScript).digest('hex');
+  const carryIntervals = [
+    [0, 0.8], [1, 1.8], [2, 2.8], [3, 3.8], [4, 4.8], [5, 5.8], [7, 8.5],
+  ];
+  const carryCards = carryAssets.map((asset, index) => ({
+    id: `broll-${String(index + 1).padStart(2, '0')}`,
+    assetRef: asset.id,
+    assetSha256: asset.sha256,
+    startCharIdx: index * 4,
+    endCharIdx: (index * 4) + 3,
+    resolvedPlacement: {
+      startSec: carryIntervals[index][0],
+      endSec: carryIntervals[index][1],
+    },
+  }));
+  const carryParentPlacements = carryCards.map((card) => ({
+    clipId: card.id,
+    assetRef: card.assetRef,
+    assetSha256: card.assetSha256,
+    startSec: card.resolvedPlacement.startSec,
+    endSec: card.resolvedPlacement.endSec,
+    evidenceLevel: 'reconstructed-after-render',
+  }));
+  const carryParentManifest = {
+    schemaVersion: 1,
+    template: 'focusstock',
+    compositionId: 'Focusstock',
+    artifactInputs: [
+      { path: 'public/script.txt', size: carryScript.length, sha256: carryScriptSha256 },
+      { path: 'public/heygen.mp4', size: carrySpeaker.size, sha256: carrySpeaker.sha256 },
+      ...carryAssets.map((asset, index) => ({
+        path: `public/broll${index + 1}.mp4`, size: asset.size, sha256: asset.sha256,
+      })),
+    ],
+  };
+  const carryParentManifestSha256 = crypto.createHash('sha256')
+    .update(JSON.stringify(carryParentManifest)).digest('hex');
+  const carryParentOutputSource = path.join(carryWorkerDir, 'parent-output.mp4');
+  fs.writeFileSync(carryParentOutputSource,
+    Buffer.concat([FRAGMENTED_MP4_FIXTURE, freeBox(24, 'carry-parent')]));
+  const carryParentOutputBytes = fs.readFileSync(carryParentOutputSource);
+  const carryParentOutputTarget = carryOneShotStore.commitOutput({
+    projectId: carryParent.job.projectId,
+    revisionId: carryParent.job.revisionId,
+    runId: carryParent.job.id,
+    sourceFile: carryParentOutputSource,
+    name: 'output-focusstock.mp4',
+    size: carryParentOutputBytes.length,
+    sha256: crypto.createHash('sha256').update(carryParentOutputBytes).digest('hex'),
+  });
+  const carryParentOutput = {
+    name: 'output-focusstock.mp4',
+    size: carryParentOutputBytes.length,
+    sha256: crypto.createHash('sha256').update(carryParentOutputBytes).digest('hex'),
+    archive: path.relative(ROOT, carryParentOutputTarget),
+  };
+  const carryParentGraphic = {
+    schemaVersion: 1,
+    mode: 'composition-v1',
+    sourceScriptSha256: carryScriptSha256,
+    cards: carryCards,
+    provenance: {
+      level: 'reconstructed-after-render',
+      output: {
+        name: carryParentOutput.name,
+        size: carryParentOutput.size,
+        sha256: carryParentOutput.sha256,
+      },
+    },
+  };
+  const carryParentRenderEvidence = {
+    schemaVersion: 1,
+    renderInputManifestSha256: carryParentManifestSha256,
+    outputs: [{
+      name: carryParentOutput.name,
+      size: carryParentOutput.size,
+      sha256: carryParentOutput.sha256,
+    }],
+  };
+  Object.assign(carryParentJob, {
+    status: 'done', stage: 'done', finishedAt: '2026-08-24T00:00:01.000Z',
+    assetRefs: [carrySpeaker.id, ...carryAssets.map((asset) => asset.id)],
+    graphicBroll: carryParentGraphic,
+    timelinePlacements: carryParentPlacements,
+    renderInputManifest: carryParentManifest,
+    renderInputManifestSha256: carryParentManifestSha256,
+    renderEvidence: carryParentRenderEvidence,
+    outputs: [carryParentOutput],
+    archived: [carryParentOutput.archive],
+  });
+  fs.writeFileSync(carryParentJobFile, JSON.stringify(carryParentJob, null, 2));
+  carryOneShotStore.updateRevision(carryParent.job.projectId, carryParent.job.revisionId, {
+    status: 'done',
+    assetRefs: [...carryParentJob.assetRefs],
+    graphicBroll: carryParentGraphic,
+    timelinePlacements: carryParentPlacements,
+    renderInputManifest: carryParentManifest,
+    renderInputManifestSha256: carryParentManifestSha256,
+    renderEvidence: carryParentRenderEvidence,
+    outputs: [carryParentOutput],
+  });
+
+  const carryWorkerEnv = {
+    ...carryBaseEnv,
+    ENABLE_TEST_WORKER: '1',
+    TEST_PIPELINE_ENTRY: carryPipelineEntry,
+    SMOKE_CARRY_PREPARE_DELAY_MS: '3000',
+  };
+  child = startTestServer(carryWorkerEnv);
+  const carryWorkerReady = await waitForReady(child);
+  assert.equal(carryWorkerReady.workerEnabled, true);
+  base = `http://127.0.0.1:${carryWorkerReady.port}`;
+  const carryChild = await request(base, '/api/jobs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      projectId: carryParent.job.projectId,
+      parentRevisionId: carryParent.job.revisionId,
+      template: 'focusstock', owner: 'carry-oneshot-smoke', title: carryTitle,
+      body: carryBody, workflowMode: 'manual-assets', controlPolicy: 'auto',
+      materialAcquisition: {
+        policy: 'require-capture', operation: 'prepared-video', mode: 'test',
+        route: 'chipk.stock.main-force', stock: { id: '3441', name: '聯一光' },
+        presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
+        placement: { layoutId: 'focusstock-phone-portrait.v1', startSec: 7 },
+      },
+    }),
+  });
+  assert.equal(carryChild.job.focusstockBrollCarryForward.status, 'pending');
+  assert.equal(carryChild.job.skipGenerate, true);
+  assert.equal(carryChild.job.noSpeed, true);
+  await request(base, `/api/jobs/${carryChild.job.id}/submit`, { method: 'POST' });
+  await waitForJobStatus(base, carryChild.job.id, 'preparing');
+  try {
+    await waitForPath(carryPipelineMarker);
+  } catch (error) {
+    const latest = await request(base, `/api/jobs/${carryChild.job.id}`);
+    const logFile = path.join(carryWorkerDir, 'jobs', carryChild.job.id, 'log.txt');
+    const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '(no log)';
+    throw new Error(`${error.message}; status=${latest.job.status}; error=${latest.job.error || ''}`
+      + `\n${log}`);
+  }
+  const carryChildJobFile = path.join(carryWorkerDir, 'jobs', carryChild.job.id, 'job.json');
+  const preparingCarryRecord = JSON.parse(fs.readFileSync(carryChildJobFile, 'utf8'));
+  assert.match(preparingCarryRecord.workspaceRunToken,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  await stopTestServer(child);
+  const carryPrepareEvidence = path.join(carryWorkerDir, 'jobs', carryChild.job.id,
+    'pipeline', `${preparingCarryRecord.workspaceRunToken}.result.json`);
+  await waitForPath(carryPrepareEvidence, 10000);
+
+  child = startTestServer(carryWorkerEnv);
+  const carryRecoveryReady = await waitForReady(child);
+  base = `http://127.0.0.1:${carryRecoveryReady.port}`;
+  let carryDone;
+  try {
+    carryDone = await waitForJobStatus(base, carryChild.job.id, 'done', 20000);
+  } catch (error) {
+    const latest = await request(base, `/api/jobs/${carryChild.job.id}`);
+    const runRoot = path.join(carryWorkerDir, 'jobs', carryChild.job.id);
+    const logFile = path.join(runRoot, 'log.txt');
+    const planFile = path.join(runRoot, 'state', 'src', 'graphic-broll.generated.json');
+    const scriptFile = path.join(runRoot, 'state', 'public', 'script.txt');
+    const plan = fs.existsSync(planFile) ? JSON.parse(fs.readFileSync(planFile, 'utf8')) : null;
+    const scriptSha256 = fs.existsSync(scriptFile)
+      ? crypto.createHash('sha256').update(fs.readFileSync(scriptFile)).digest('hex') : null;
+    throw new Error(`${error.message}; status=${latest.job.status}; error=${latest.job.error || ''}`
+      + `; planScript=${plan?.sourceScriptSha256 || null}; stateScript=${scriptSha256}`
+      + `\n${fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '(no log)'}`);
+  }
+  assert.deepEqual(carryDone.job.focusstockBrollCarryForward.plan.cards.map((card) =>
+    card.disposition), [
+    'rendered', 'rendered', 'rendered', 'rendered', 'rendered', 'rendered',
+    'suppressed_by_prepared',
+  ]);
+  const carryTimeline = carryDone.job.timelinePlacements.filter((placement) =>
+    placement.channel === 'focusstock-broll');
+  assert.equal(carryTimeline.length, 7);
+  assert.deepEqual(carryTimeline.map((placement) => placement.disposition), [
+    'rendered', 'rendered', 'rendered', 'rendered', 'rendered', 'rendered',
+    'suppressed_by_prepared',
+  ]);
+  assert.equal(carryTimeline[6].suppressedBy, 'prepared-phone-video');
+  assert.equal(carryDone.job.renderInputManifest.options.focusstockBrollMode, 'carried-v1');
+  assert.equal(carryDone.job.graphicBroll.provenance.level, 'pre-render-manifest-v1');
+  assert.deepEqual(carryDone.job.graphicBroll.provenance.output, {
+    name: carryDone.job.outputs[0].name,
+    size: carryDone.job.outputs[0].size,
+    sha256: carryDone.job.outputs[0].sha256,
+  });
+  assert.equal(carryDone.job.focusstockBrollCarryForward.plan.parent.projectId,
+    carryChild.job.projectId);
+  assert.equal(carryDone.job.focusstockBrollCarryForward.sourceSnapshot.parent.projectId,
+    carryChild.job.projectId);
+  assert.equal(carryDone.job.recordedCompositionEvidence?.status, 'verified');
+  assert.deepEqual(carryDone.job.recordedCompositionEvidence?.renderedCardIds,
+    ['broll-01', 'broll-02', 'broll-03', 'broll-04', 'broll-05', 'broll-06']);
+  assert.deepEqual(carryDone.job.recordedCompositionEvidence?.suppressedCardIds, ['broll-07']);
+  assert.deepEqual(carryDone.job.recordedCompositionEvidence?.output,
+    carryDone.job.graphicBroll.provenance.output);
+  const carryRevision = await request(base,
+    `/api/projects/${carryChild.job.projectId}?revision=${carryChild.job.revisionId}`);
+  assert.equal(carryRevision.revision.status, 'done');
+  assert.deepEqual(carryRevision.revision.focusstockBrollCarryForward,
+    carryDone.job.focusstockBrollCarryForward);
+  assert.deepEqual(carryRevision.revision.timelinePlacements, carryDone.job.timelinePlacements);
+  assert.equal(fs.readFileSync(carryPipelineInvocations, 'utf8').trim().split('\n').length, 2);
+  assert.match(fs.readFileSync(carryPipelineInvocations, 'utf8'),
+    /--stop-before-render.*--focusstock-broll=deferred/);
+  assert.match(fs.readFileSync(carryPipelineInvocations, 'utf8'),
+    /--render-only.*--focusstock-broll=carried-v1/);
   await stopTestServer(child);
 
   for (const rel of mutableRepoPaths) {

@@ -17,6 +17,7 @@ const DEFAULT_RENDERER_FILES = [
   'package.json',
   'remotion.config.ts',
   'run.js',
+  'scripts/focusstock-broll-plan.js',
   'scripts/heygen-video-title.js',
   'scripts/prepared-phone-material-plan.js',
   'scripts/public-utils.js',
@@ -35,6 +36,11 @@ const REQUIRED_RENDERER_INPUTS = [
   ...DEFAULT_RENDERER_FILES,
   'src/index.ts',
 ];
+const FOCUSSTOCK_BROLL_SOURCE_INPUT = 'public/focusstock-broll-carry.source.json';
+const FOCUSSTOCK_BROLL_PLAN_INPUT = 'src/Focusstock/focusstock-broll.generated.json';
+const FOCUSSTOCK_BROLL_PLANNER_IDENTITY = 'scripts/focusstock-broll-plan.js';
+const FOCUSSTOCK_BROLL_LAYER_IDENTITY = 'src/Focusstock/FocusstockBrollLayer.tsx';
+const PREPARED_PHONE_PLAN_INPUT = 'src/Focusstock/prepared-phone-material.generated.json';
 
 function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -104,6 +110,102 @@ function verifyDeclaredFileFingerprints({ baseDir, expectedFiles, label = 'rende
   return true;
 }
 
+function uniqueIdentity(inputs, relativePath, label) {
+  const matches = inputs.filter((input) => input?.path === relativePath);
+  const input = matches.length === 1 ? matches[0] : null;
+  if (!input || !Number.isSafeInteger(input.size) || input.size <= 0
+      || !/^[a-f0-9]{64}$/.test(input.sha256 || ''))
+    throw new Error(`${label} identity 必須唯一：${relativePath}`);
+  return input;
+}
+
+function readCanonicalJson(baseDir, relativePath, label) {
+  let raw;
+  let value;
+  try {
+    raw = fs.readFileSync(path.join(baseDir, relativePath), 'utf8');
+    value = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${label} 無法讀取：${error.message}`);
+  }
+  if (raw !== JSON.stringify(value)) throw new Error(`${label} 不是 canonical JSON`);
+  return { raw, value };
+}
+
+function sourceCardMatchesPlan(sourceCard, planCard) {
+  if (!sourceCard || !planCard) return false;
+  const planSource = { ...planCard };
+  delete planSource.disposition;
+  delete planSource.suppressedBy;
+  return JSON.stringify(sourceCard) === JSON.stringify(planSource);
+}
+
+function verifyCarriedFocusstockInputs({ artifactRoot, artifactInputs, rendererIdentity }) {
+  const sourceInput = uniqueIdentity(
+    artifactInputs, FOCUSSTOCK_BROLL_SOURCE_INPUT, 'Focusstock B-roll carry source');
+  const planInput = uniqueIdentity(
+    artifactInputs, FOCUSSTOCK_BROLL_PLAN_INPUT, 'Focusstock B-roll generated plan');
+  const plannerIdentity = uniqueIdentity(
+    rendererIdentity, FOCUSSTOCK_BROLL_PLANNER_IDENTITY, 'Focusstock B-roll planner executable');
+  const layerIdentity = uniqueIdentity(
+    rendererIdentity, FOCUSSTOCK_BROLL_LAYER_IDENTITY, 'Focusstock B-roll renderer executable');
+  const source = readCanonicalJson(
+    artifactRoot, FOCUSSTOCK_BROLL_SOURCE_INPUT, 'Focusstock B-roll carry source');
+  const plan = readCanonicalJson(
+    artifactRoot, FOCUSSTOCK_BROLL_PLAN_INPUT, 'Focusstock B-roll generated plan');
+  try {
+    require('./focusstock-broll-carry-forward').validateFocusstockBrollCarryPlan(plan.value);
+  } catch (error) {
+    throw new Error(`Focusstock B-roll generated plan 不合法：${error.message}`);
+  }
+
+  const sourceSha256 = sha256(Buffer.from(source.raw));
+  const planSha256 = sha256(Buffer.from(plan.raw));
+  if (source.value?.schemaVersion !== 2 || source.value.mode !== 'carry-source-v1'
+      || source.value.template !== 'focusstock'
+      || source.value.timelineBasis !== plan.value.timelineBasis
+      || source.value.fps !== plan.value.fps
+      || source.value.intervalSemantics !== plan.value.intervalSemantics
+      || sourceSha256 !== sourceInput.sha256 || sourceInput.size !== Buffer.byteLength(source.raw)
+      || sourceSha256 !== plan.value.sourceSnapshotSha256
+      || planSha256 !== planInput.sha256 || planInput.size !== Buffer.byteLength(plan.raw)
+      || source.value.sourceScriptSha256 !== plan.value.sourceScriptSha256
+      || JSON.stringify(source.value.parent) !== JSON.stringify(plan.value.parent)
+      || JSON.stringify(source.value.speaker) !== JSON.stringify(plan.value.speaker)
+      || !Array.isArray(source.value.cards)
+      || source.value.cards.length !== plan.value.cards.length
+      || source.value.cards.some((card, index) => !sourceCardMatchesPlan(card, plan.value.cards[index]))) {
+    throw new Error('carried Focusstock source／plan identity 不一致');
+  }
+
+  const scriptInput = uniqueIdentity(artifactInputs, 'public/script.txt', 'Child script');
+  const speakerInput = uniqueIdentity(artifactInputs, 'public/heygen.mp4', 'Child speaker');
+  const preparedVideoInput = uniqueIdentity(
+    artifactInputs, 'public/prepared-phone-material.mp4', 'Prepared phone video');
+  const preparedPlanInput = uniqueIdentity(
+    artifactInputs, PREPARED_PHONE_PLAN_INPUT, 'Prepared phone generated plan');
+  if (scriptInput.sha256 !== plan.value.sourceScriptSha256
+      || speakerInput.sha256 !== plan.value.speaker.assetSha256
+      || speakerInput.size !== plan.value.speaker.assetSize
+      || plan.value.speaker.inputName !== 'heygen.mp4'
+      || preparedVideoInput.sha256 !== plan.value.prepared.sourceSha256
+      || preparedPlanInput.sha256 !== plan.value.prepared.planSha256) {
+    throw new Error('carried Focusstock child script／speaker／prepared identity 不一致');
+  }
+
+  const declaredPublicPaths = new Set();
+  for (const card of plan.value.cards) {
+    const relativePath = `public/${card.inputName}`;
+    if (declaredPublicPaths.has(relativePath))
+      throw new Error(`carried Focusstock B-roll input 重複：${relativePath}`);
+    declaredPublicPaths.add(relativePath);
+    const input = uniqueIdentity(artifactInputs, relativePath, 'Carried Focusstock B-roll input');
+    if (input.size !== card.assetSize || input.sha256 !== card.assetSha256)
+      throw new Error(`carried Focusstock B-roll input bytes 不符：${relativePath}`);
+  }
+  return { source: sourceInput, plan: planInput, plannerIdentity, layerIdentity };
+}
+
 function buildRenderInputManifest({
   artifactRoot,
   rendererRoot,
@@ -114,6 +216,7 @@ function buildRenderInputManifest({
   workflowMode = 'manual-assets',
   graphicBrollMode = 'disabled',
   preparedPhoneMode = 'disabled',
+  focusstockBrollMode = 'disabled',
 }) {
   if (!artifactRoot || !rendererRoot || !template || !compositionId)
     throw new Error('render input manifest 缺少 artifactRoot／rendererRoot 或必要欄位');
@@ -150,6 +253,13 @@ function buildRenderInputManifest({
   } else if (preparedPhoneMode !== 'disabled') {
     throw new Error(`render input preparedPhoneMode 不合法：${preparedPhoneMode}`);
   }
+  if (focusstockBrollMode === 'carried-v1') {
+    if (template !== 'focusstock' || preparedPhoneMode !== 'ready-to-place')
+      throw new Error('carried Focusstock B-roll 必須搭配 ready-to-place Focusstock render');
+    verifyCarriedFocusstockInputs({ artifactRoot, artifactInputs, rendererIdentity });
+  } else if (focusstockBrollMode !== 'disabled') {
+    throw new Error(`render input focusstockBrollMode 不合法：${focusstockBrollMode}`);
+  }
   const missingRenderer = REQUIRED_RENDERER_INPUTS
     .filter((relativePath) => !presentRenderer.has(relativePath));
   if (missingArtifacts.length)
@@ -167,6 +277,7 @@ function buildRenderInputManifest({
       workflowMode,
       graphicBrollMode,
       preparedPhoneMode,
+      focusstockBrollMode,
     },
     artifactInputs,
     rendererIdentity,
@@ -178,6 +289,10 @@ function buildRenderInputManifest({
 module.exports = {
   DEFAULT_COMPOSITION_FILES,
   DEFAULT_RENDERER_FILES,
+  FOCUSSTOCK_BROLL_LAYER_IDENTITY,
+  FOCUSSTOCK_BROLL_PLAN_INPUT,
+  FOCUSSTOCK_BROLL_PLANNER_IDENTITY,
+  FOCUSSTOCK_BROLL_SOURCE_INPUT,
   REQUIRED_ARTIFACT_INPUTS,
   REQUIRED_RENDERER_INPUTS,
   buildRenderInputManifest,

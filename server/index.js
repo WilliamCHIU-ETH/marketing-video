@@ -58,6 +58,7 @@ const {
   prepareJobMaterialAcquisition,
   recordPreparedPhoneReviewEditCommitIntent,
   recoverPreparedPhoneReviewEditTransaction,
+  requireFocusstockCarryCompaction,
   rollbackPreparedPhoneMaterialSelection,
   selectPreparedPhoneGraphicBroll,
   validateFocusstockVisualTimelinePlacements,
@@ -71,6 +72,13 @@ const {
 } = require('./render-input-manifest');
 const { verifyRecordedCompositionEvidence } = require('./broll-composition-evidence');
 const { attachRecordedBrollPrompts } = require('./broll-prompt-provenance');
+const {
+  FocusstockBrollCarryForwardError,
+  materializeFocusstockBrollCarryForward,
+  preflightFocusstockBrollCarryForward,
+  validateFocusstockBrollCarryPlan,
+  writeCanonicalPlan,
+} = require('./focusstock-broll-carry-forward');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -115,14 +123,12 @@ const LOCK = TEST_MODE ? path.join(DATA_DIR, '.run.lock') : path.join(ROOT, '.ru
 const WORKSPACE_OWNER_FILE = TEST_MODE
   ? path.join(DATA_DIR, '.run.owner.json')
   : path.join(ROOT, '.run.owner.json');
-// Detached recovery must never inspect the real repo workspace in TEST_MODE. Tests get a fixed,
-// DATA_DIR-scoped stand-in; production continues to use the one shared public/ workspace.
-const WORKSPACE_PUBLIC_DIR = TEST_MODE
-  ? path.join(DATA_DIR, 'workspace', 'public')
-  : path.join(ROOT, 'public');
-const WORKSPACE_OUTPUT_DIR = TEST_MODE
-  ? path.join(DATA_DIR, 'workspace', 'out')
-  : path.join(ROOT, 'out');
+// Detached recovery and prepared/carry planning must never inspect or mutate the real repo
+// workspace in TEST_MODE. Tests get one fixed DATA_DIR-scoped stand-in; production continues to
+// use the checkout's shared public/src/out workspace.
+const WORKSPACE_ROOT = TEST_MODE ? path.join(DATA_DIR, 'workspace') : ROOT;
+const WORKSPACE_PUBLIC_DIR = path.join(WORKSPACE_ROOT, 'public');
+const WORKSPACE_OUTPUT_DIR = path.join(WORKSPACE_ROOT, 'out');
 
 if (!Number.isInteger(PORT) || PORT < 0 || PORT > 65535) {
   throw new Error(`PORT 不合法：${process.env.PORT}`);
@@ -235,9 +241,15 @@ const TEMPLATES = {
 const WORKFLOW_MODES = new Set(['manual-assets', 'auto-broll']);
 const CONTROL_POLICIES = new Set(['auto', 'pause-before-render']);
 const GRAPHIC_BROLL_PLAN = 'src/graphic-broll.generated.json';
+const FOCUSSTOCK_BROLL_SOURCE_INPUT = 'focusstock-broll-carry.source.json';
+const FOCUSSTOCK_BROLL_PLAN = 'src/Focusstock/focusstock-broll.generated.json';
 
 function preparedPhoneMode(job) {
   return job.materialAcquisition?.operation === 'prepared-video' ? 'ready-to-place' : 'disabled';
+}
+
+function focusstockBrollMode(job) {
+  return job.focusstockBrollCarryForward?.status === 'compiled' ? 'carried-v1' : 'disabled';
 }
 
 function compositionIdFor(job) {
@@ -265,7 +277,7 @@ const TEMPLATE_ASSET = /^(dapan|focusstock|institution)-|^(frame|logo)\.png$|^No
 // 這些是「上一段跑完的成果」，後半段 render 完全靠它們。
 function snapshotTargets() {
   const list = ['public'];
-  const src = path.join(ROOT, 'src');
+  const src = path.join(WORKSPACE_ROOT, 'src');
   const walk = (dir, rel) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? rel + '/' + e.name : e.name;
@@ -449,6 +461,7 @@ function revisionOptionsFromJob(job) {
     workflowMode: job.workflowMode || 'manual-assets',
     controlPolicy: job.controlPolicy || 'pause-before-render',
     graphicBrollMode: job.graphicBrollMode || 'disabled',
+    focusstockBrollMode: job.focusstockBrollMode || 'disabled',
   };
 }
 
@@ -503,6 +516,7 @@ function revisionNeedsJobSync(job) {
       renderInputManifestSha256: job.renderInputManifestSha256 || null,
       renderEvidence: job.renderEvidence || null,
       focusstockVisualInputs: job.focusstockVisualInputs || [],
+      focusstockBrollCarryForward: job.focusstockBrollCarryForward || null,
     } : {}),
     ...(job.materialAcquisition ? { materialAcquisition: job.materialAcquisition } : {}),
     ...(job.materialAcquisitionResult
@@ -648,6 +662,7 @@ function saveJob(j) {
         renderInputManifestSha256: j.renderInputManifestSha256 || null,
         renderEvidence: j.renderEvidence || null,
         focusstockVisualInputs: j.focusstockVisualInputs || [],
+        focusstockBrollCarryForward: j.focusstockBrollCarryForward || null,
       } : {}),
       ...(j.materialAcquisition ? { materialAcquisition: j.materialAcquisition } : {}),
       ...(j.materialAcquisitionResult
@@ -665,6 +680,300 @@ function writeJobRecord(j) {
 }
 
 function getJob(id) { return JOBS.find((j) => j.id === id); }
+
+function carryForwardError(code, reason, message, details = null) {
+  return new FocusstockBrollCarryForwardError(code, reason, message, details);
+}
+
+function sameOutputIdentity(left, right) {
+  return left && right && left.name === right.name && left.size === right.size
+    && left.sha256 === right.sha256;
+}
+
+function carryParentJob(parentRevision) {
+  if (!parentRevision?.jobId || parentRevision.runId !== parentRevision.jobId) return null;
+  const matches = JOBS.filter((item) => item?.id === parentRevision.jobId);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function parentSelectsRecordedBroll(parentRevision, parentJob) {
+  return [parentRevision?.graphicBroll, parentJob?.graphicBroll].some((graphic) =>
+    Array.isArray(graphic?.cards) && graphic.cards.length > 0)
+    || [parentRevision?.timelinePlacements, parentJob?.timelinePlacements].some((placements) =>
+      Array.isArray(placements) && placements.some((item) =>
+        item?.channel === 'focusstock-broll' || item?.kind === 'focusstock-broll-placement'));
+}
+
+function carryOutputPathResolver(parentJob) {
+  return ({ projectId, revisionId, runId, output }) => {
+    if (parentJob?.projectId !== projectId || parentJob?.revisionId !== revisionId
+        || parentJob?.id !== runId) throw new Error('parent output owner mismatch');
+    const matches = (parentJob.outputs || []).filter((item) => sameOutputIdentity(item, output));
+    if (matches.length !== 1 || typeof matches[0].archive !== 'string' || !matches[0].archive)
+      throw new Error('parent output archive is not unique');
+    const outputRoot = fs.realpathSync(PROJECT_STORE.outputDir(projectId));
+    const candidate = path.resolve(ROOT, matches[0].archive);
+    const candidateReal = fs.realpathSync(candidate);
+    if (!isWithin(outputRoot, candidateReal)) throw new Error('parent output escaped Project');
+    return candidateReal;
+  };
+}
+
+function preflightCarryFromParent({
+  project,
+  parentRevision,
+  parentJob,
+  childScript,
+  preparedPlacement = null,
+  preparedPlanSha256 = null,
+}) {
+  return preflightFocusstockBrollCarryForward({
+    project,
+    childProjectId: project?.id,
+    explicitParentRevisionId: parentRevision?.id,
+    parentRevision,
+    parentJob,
+    childScript,
+    projectStore: PROJECT_STORE,
+    resolveOutputPath: carryOutputPathResolver(parentJob),
+    preparedPlacement,
+    preparedPlanSha256,
+  });
+}
+
+function assertStoredCarrySource(job, preflight) {
+  const record = job.focusstockBrollCarryForward;
+  const file = path.join(jobDir(job.id), 'input', FOCUSSTOCK_BROLL_SOURCE_INPUT);
+  let stat;
+  let raw;
+  try {
+    stat = fs.lstatSync(file);
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (_) {}
+  const validLifecycle = (record?.status === 'pending' && record.mode === 'pending-prepared')
+    || (record?.status === 'compiled' && record.mode === 'carried-v1');
+  if (!record || record.schemaVersion !== 1 || !validLifecycle
+      || record.sourceInputName !== FOCUSSTOCK_BROLL_SOURCE_INPUT
+      || record.sourceSnapshotSha256 !== preflight.sourceSha256
+      || JSON.stringify(record.sourceSnapshot) !== preflight.sourceCanonical
+      || !stat?.isFile() || stat.isSymbolicLink()
+      || raw !== preflight.sourceCanonical || fileSha256(file) !== preflight.sourceSha256) {
+    throw carryForwardError('parent_broll_snapshot_drifted', 'stored_source_snapshot_mismatch',
+      'Stored parent B-roll source snapshot no longer matches the verified parent');
+  }
+  return file;
+}
+
+function revalidateCarryBeforeProvider(job) {
+  if (!job.focusstockBrollCarryForward) return null;
+  const project = PROJECT_STORE.get(job.projectId);
+  const parentRevisionId = job.focusstockBrollCarryForward.parentRevisionId;
+  const parentRevision = project && PROJECT_STORE.getRevision(project.id, parentRevisionId);
+  const parentJob = carryParentJob(parentRevision);
+  let preflight;
+  try {
+    preflight = preflightCarryFromParent({
+      project,
+      parentRevision,
+      parentJob,
+      childScript: fs.readFileSync(path.join(jobDir(job.id), 'input', 'script.txt')),
+    });
+  } catch (error) {
+    throw carryForwardError('parent_broll_snapshot_drifted',
+      error.reason || error.code || 'recheck_failed',
+      `Parent B-roll changed before Provider acquisition: ${error.message}`);
+  }
+  assertStoredCarrySource(job, preflight);
+  return { project, parentRevision, parentJob, preflight };
+}
+
+function writeFinalCarryPlan(target, plan) {
+  ensureDir(path.dirname(target));
+  const temporary = path.join(
+    path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.carry`);
+  try {
+    writeCanonicalPlan(temporary, plan);
+    fs.renameSync(temporary, target);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (_) {}
+  }
+}
+
+function finalizeFocusstockBrollCarry(job, preparedCandidate) {
+  if (!job.focusstockBrollCarryForward) return null;
+  const checked = revalidateCarryBeforeProvider(job);
+  if (!preparedCandidate?.asset || !preparedCandidate?.plan)
+    throw carryForwardError('carry_plan_invalid', 'prepared_candidate_missing',
+      'Prepared phone candidate is required before B-roll disposition can be compiled');
+  const preparedPlacement = buildPreparedPhoneTimelinePlacement(
+    job, preparedCandidate.plan, preparedCandidate.asset.id);
+  const finalPreflight = preflightCarryFromParent({
+    project: checked.project,
+    parentRevision: checked.parentRevision,
+    parentJob: checked.parentJob,
+    childScript: fs.readFileSync(path.join(jobDir(job.id), 'input', 'script.txt')),
+    preparedPlacement,
+    preparedPlanSha256: job.materialAcquisitionResult?.compiledPlanSha256,
+  });
+  if (finalPreflight.sourceSha256 !== checked.preflight.sourceSha256)
+    throw carryForwardError('parent_broll_snapshot_drifted', 'source_changed_after_acquisition',
+      'Parent B-roll source changed while preparing the new Revision');
+  const materialized = materializeFocusstockBrollCarryForward({
+    preflight: finalPreflight,
+    projectStore: PROJECT_STORE,
+    materializationDirectory: path.join(jobDir(job.id), 'input'),
+  });
+  for (const item of materialized) {
+    atomicCopyVerified(item.target, path.join(WORKSPACE_PUBLIC_DIR, item.inputName), {
+      size: item.size,
+      sha256: item.sha256,
+    });
+    if (!job.assetRefs.includes(item.assetRef)) job.assetRefs.push(item.assetRef);
+  }
+  const planFile = path.join(WORKSPACE_ROOT, ...FOCUSSTOCK_BROLL_PLAN.split('/'));
+  writeFinalCarryPlan(planFile, finalPreflight.plan);
+  if (fileSha256(planFile) !== finalPreflight.planSha256)
+    throw carryForwardError('carry_plan_invalid', 'written_plan_hash_mismatch',
+      'Written Focusstock B-roll plan bytes do not match the canonical plan');
+  job.focusstockBrollCarryForward = {
+    ...job.focusstockBrollCarryForward,
+    mode: 'carried-v1',
+    status: 'compiled',
+    planFile: FOCUSSTOCK_BROLL_PLAN,
+    planSha256: finalPreflight.planSha256,
+    plan: finalPreflight.plan,
+    materialized: materialized.map(({ target: _target, ...item }) => item),
+  };
+  job.focusstockBrollMode = 'carried-v1';
+  return { preflight: finalPreflight, preparedPlacement };
+}
+
+function validateFocusstockBrollPlanForJob(job, baseDir) {
+  const file = path.join(baseDir, ...FOCUSSTOCK_BROLL_PLAN.split('/'));
+  let raw;
+  let plan;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+    plan = JSON.parse(raw);
+  } catch (error) {
+    throw carryForwardError('focusstock_broll_plan_invalid', 'plan_missing_or_invalid',
+      `Focusstock B-roll plan cannot be read: ${error.message}`);
+  }
+  if (!job.focusstockBrollCarryForward) {
+    if (plan?.schemaVersion !== 2 || plan.mode !== 'disabled'
+        || !Array.isArray(plan.cards) || plan.cards.length !== 0)
+      throw carryForwardError('focusstock_broll_plan_invalid', 'disabled_plan_not_empty',
+        'Non-carry flow must have an empty Focusstock B-roll plan');
+    return { plan, planSha256: fileSha256(file) };
+  }
+  validateFocusstockBrollCarryPlan(plan);
+  const record = job.focusstockBrollCarryForward;
+  if (record.status !== 'compiled' || record.mode !== 'carried-v1'
+      || record.planFile !== FOCUSSTOCK_BROLL_PLAN
+      || plan.parent?.projectId !== job.projectId
+      || record.sourceSnapshot?.parent?.projectId !== job.projectId
+      || record.sourceSnapshot?.parent?.projectId !== plan.parent?.projectId
+      || record.sourceSnapshot?.parent?.revisionId !== plan.parent?.revisionId
+      || record.sourceSnapshot?.parent?.runId !== plan.parent?.runId
+      || record.planSha256 !== fileSha256(file) || raw !== JSON.stringify(plan)
+      || JSON.stringify(record.plan) !== raw
+      || plan.sourceSnapshotSha256 !== record.sourceSnapshotSha256) {
+    throw carryForwardError('focusstock_broll_plan_invalid', 'job_plan_identity_mismatch',
+      'Focusstock B-roll plan does not match the Run evidence');
+  }
+  const sourceFile = path.join(baseDir, 'public', FOCUSSTOCK_BROLL_SOURCE_INPUT);
+  let sourceStat;
+  try { sourceStat = fs.lstatSync(sourceFile); } catch (_) {}
+  if (!sourceStat?.isFile() || sourceStat.isSymbolicLink()
+      || fs.readFileSync(sourceFile, 'utf8') !== JSON.stringify(record.sourceSnapshot)
+      || fileSha256(sourceFile) !== record.sourceSnapshotSha256) {
+    throw carryForwardError('focusstock_broll_render_input_drifted',
+      'source_snapshot_bytes_drifted', 'Focusstock B-roll source snapshot bytes changed');
+  }
+  for (const card of plan.cards) {
+    const publicFile = path.join(baseDir, 'public', card.inputName);
+    let stat;
+    try { stat = fs.lstatSync(publicFile); } catch (_) {}
+    if (!stat?.isFile() || stat.isSymbolicLink() || stat.size !== card.assetSize
+        || fileSha256(publicFile) !== card.assetSha256) {
+      throw carryForwardError('focusstock_broll_render_input_drifted',
+        'broll_input_bytes_drifted', `Focusstock B-roll input changed: ${card.inputName}`);
+    }
+  }
+  return { plan, planSha256: record.planSha256 };
+}
+
+function buildFocusstockBrollTimelinePlacements(plan, planSha256) {
+  validateFocusstockBrollCarryPlan(plan);
+  return plan.cards.map((card) => ({
+    kind: 'focusstock-broll-placement',
+    channel: 'focusstock-broll',
+    clipId: card.id,
+    cardId: card.id,
+    ordinal: card.ordinal,
+    assetRef: card.assetRef,
+    assetSha256: card.assetSha256,
+    assetSize: card.assetSize,
+    inputName: card.inputName,
+    timelineBasis: plan.timelineBasis,
+    fps: card.fps,
+    startCharIdx: card.startCharIdx,
+    endCharIdx: card.endCharIdx,
+    startSec: card.startSec,
+    endSec: card.endSec,
+    startFrame: card.mainStartFrame,
+    endFrame: card.mainEndFrame,
+    durationInFrames: card.mainDurationInFrames,
+    compositionOffsetFrames: card.compositionOffsetFrames,
+    compositionStartFrame: card.compositionStartFrame,
+    compositionEndFrame: card.compositionEndFrame,
+    disposition: card.disposition,
+    suppressedBy: card.suppressedBy,
+    evidenceLevel: 'pre-render-manifest-v1',
+    planSha256,
+    parentEvidenceSha256: plan.parent.evidenceSha256,
+    preparedPlanSha256: plan.prepared.planSha256,
+  }));
+}
+
+function validateFocusstockBrollTimelinePlacements(job, plan, planSha256) {
+  const expected = buildFocusstockBrollTimelinePlacements(plan, planSha256);
+  const actual = Array.isArray(job.timelinePlacements) ? job.timelinePlacements.filter((item) =>
+    item?.kind === 'focusstock-broll-placement' || item?.channel === 'focusstock-broll') : [];
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    throw carryForwardError('focusstock_broll_timeline_invalid', 'timeline_binding_drifted',
+      'Focusstock B-roll timeline placements changed');
+  return expected;
+}
+
+function buildCarriedGraphicBroll(plan, planSha256, output = null) {
+  validateFocusstockBrollCarryPlan(plan);
+  return {
+    schemaVersion: 1,
+    mode: 'composition-v1',
+    style: 'focusstock-carried-v1',
+    sourceScriptSha256: plan.sourceScriptSha256,
+    planSha256,
+    cards: plan.cards.map((card) => ({
+      id: card.id,
+      ordinal: card.ordinal,
+      assetRef: card.assetRef,
+      assetSha256: card.assetSha256,
+      assetSize: card.assetSize,
+      startCharIdx: card.startCharIdx,
+      endCharIdx: card.endCharIdx,
+      resolvedPlacement: { startSec: card.startSec, endSec: card.endSec },
+      disposition: card.disposition,
+      suppressedBy: card.suppressedBy,
+    })),
+    provenance: {
+      level: 'pre-render-manifest-v1',
+      parent: plan.parent,
+      prepared: plan.prepared,
+      ...(output ? { output } : {}),
+    },
+  };
+}
 
 const DETACHED_CAPTURE_RETRY_BASE_MS = 2000;
 const DETACHED_CAPTURE_RETRY_MAX_MS = 30000;
@@ -1022,6 +1331,45 @@ function finalizeRenderOutputs(job, evidence) {
   };
 }
 
+function successfulRenderPatch(job, finalized) {
+  let graphicBroll = job.graphicBroll;
+  if (job.focusstockBrollCarryForward) {
+    const plan = job.focusstockBrollCarryForward.plan;
+    validateFocusstockBrollCarryPlan(plan);
+    if (finalized.outputs.length !== 1)
+      throw new Error('Carried Focusstock B-roll requires one unambiguous final output');
+    const output = {
+      name: finalized.outputs[0].name,
+      size: finalized.outputs[0].size,
+      sha256: finalized.outputs[0].sha256,
+    };
+    graphicBroll = buildCarriedGraphicBroll(
+      plan, job.focusstockBrollCarryForward.planSha256, output);
+  }
+  return {
+    status: 'done',
+    pid: null,
+    error: null,
+    finishedAt: finalized.finishedAt,
+    outputs: finalized.outputs,
+    archived: finalized.archived,
+    stage: 'done',
+    failedStage: null,
+    graphicBroll,
+    timelinePlacements: job.timelinePlacements,
+    renderEvidence: {
+      schemaVersion: 1,
+      renderInputManifestSha256: job.renderInputManifestSha256 || null,
+      verifiedAt: finalized.finishedAt,
+      outputs: finalized.outputs.map((output) => ({
+        name: output.name,
+        size: output.size,
+        sha256: output.sha256,
+      })),
+    },
+  };
+}
+
 function transitionJobSafely(job, patch) {
   const previous = JSON.parse(JSON.stringify(job));
   Object.assign(job, patch);
@@ -1075,26 +1423,7 @@ function reconcileDetachedRender(job, pid) {
   let finalized;
   try {
     finalized = finalizeRenderOutputs(job, evidence);
-    transitionJobSafely(job, {
-      status: 'done',
-      pid: null,
-      error: null,
-      finishedAt: finalized.finishedAt,
-      outputs: finalized.outputs,
-      archived: finalized.archived,
-      stage: 'done',
-      failedStage: null,
-      renderEvidence: {
-        schemaVersion: 1,
-        renderInputManifestSha256: job.renderInputManifestSha256 || null,
-        verifiedAt: finalized.finishedAt,
-        outputs: finalized.outputs.map((output) => ({
-          name: output.name,
-          size: output.size,
-          sha256: output.sha256,
-        })),
-      },
-    });
+    transitionJobSafely(job, successfulRenderPatch(job, finalized));
   } catch (error) {
     let message = error.message;
     try { preserveEvidenceOutputs(job, evidence); }
@@ -1103,6 +1432,30 @@ function reconcileDetachedRender(job, pid) {
     return false;
   }
   appendLogBestEffort(job, '\n🛟 背景 render output 已驗證並保存到原 Project／Revision。\n');
+  return true;
+}
+
+function reconcileDetachedPreparedCarry(job, pid) {
+  const retryAt = Date.parse(job.detachedCaptureRetryAt || '');
+  if (Number.isFinite(retryAt) && retryAt > Date.now()) return false;
+  if (Number(job.detachedOwnerPid) !== pid) {
+    deferDetachedCapture(job, 'carried B-roll prepare workspace ownership 尚未驗證');
+    return false;
+  }
+  const evidence = readPipelineEvidence(job);
+  if (evidence.state !== 'success') {
+    deferDetachedCapture(job,
+      `carried B-roll prepare completion evidence 尚不可恢復：${evidence.message}`);
+    return false;
+  }
+  try {
+    completePreparedWorkspace(job);
+  } catch (error) {
+    deferDetachedCapture(job, `carried B-roll prepare finalize 尚未完成：${error.message}`);
+    return false;
+  }
+  appendLogBestEffort(job,
+    '\n🛟 背景準備結果已驗證；prepared phone、carried B-roll 與 render manifest 已恢復。\n');
   return true;
 }
 
@@ -1203,6 +1556,11 @@ function reconcileDetached(job) {
     appendLogBestEffort(job, '\n⏹ 背景準備流程已停止；已保留可歸屬的完成成果。\n');
     return true;
   }
+  // Carry Runs always reuse the verified parent speaker, so skipGenerate is expected. A completed
+  // stop-before-render process still needs the same prepared-phone/carry/snapshot/manifest
+  // finalization as the normal close handler; detached-done here would orphan acquired material.
+  if (fromStatus === 'preparing' && job.skipGenerate && job.focusstockBrollCarryForward)
+    return reconcileDetachedPreparedCarry(job, pid);
   // render-only and skip-generate runs cannot have bought a new speaker output. Finalize them
   // without inspecting a possibly unrelated staging copy left in the shared workspace.
   if (fromStatus !== 'preparing' || job.skipGenerate) {
@@ -1300,12 +1658,14 @@ function clearWorkspaceInputs() {
   // 標注檔要指名清掉。不能用 *.json 一律清 —— deeplinks.json 是投廣品牌素材。
   rmrf(path.join(pub, 'annotations.json'));
   rmrf(path.join(pub, 'prepared-phone-material.intent.json'));
+  rmrf(path.join(pub, FOCUSSTOCK_BROLL_SOURCE_INPUT));
 }
 
 function snapshotWorkspace(job) {
   const dst = path.join(jobDir(job.id), 'state');
   rmrf(dst);
-  for (const rel of snapshotTargets()) copyRecursive(path.join(ROOT, rel), path.join(dst, rel));
+  for (const rel of snapshotTargets())
+    copyRecursive(path.join(WORKSPACE_ROOT, rel), path.join(dst, rel));
 }
 
 function restoreWorkspace(job) {
@@ -1314,7 +1674,7 @@ function restoreWorkspace(job) {
   clearWorkspaceInputs();
   for (const rel of snapshotTargets()) {
     const from = path.join(src, rel);
-    if (fs.existsSync(from)) copyRecursive(from, path.join(ROOT, rel));
+    if (fs.existsSync(from)) copyRecursive(from, path.join(WORKSPACE_ROOT, rel));
   }
 }
 
@@ -1441,6 +1801,7 @@ function buildJobRenderInput(job, artifactRoot) {
     workflowMode: job.workflowMode || 'manual-assets',
     graphicBrollMode: job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
     preparedPhoneMode: preparedPhoneMode(job),
+    focusstockBrollMode: focusstockBrollMode(job),
   });
 }
 
@@ -1481,6 +1842,8 @@ function captureAutomationEvidence(job, preparedCandidate = null, options = {}) 
     let prepared = recompileReviewedVisualEvidence
       ? validatePreparedPhonePlanIdentityForJob(job, state)
       : validatePreparedPhonePlanForJob(job, state);
+    const carried = job.focusstockBrollCarryForward
+      ? validateFocusstockBrollPlanForJob(job, state) : null;
     if (recompileReviewedVisualEvidence && prepared.plan.mode !== 'ready-to-place')
       throw new Error('只有 ready-to-place review 可重新編譯 visual evidence');
     if (prepared.plan.mode === 'ready-to-place') {
@@ -1506,10 +1869,14 @@ function captureAutomationEvidence(job, preparedCandidate = null, options = {}) 
         existingPlacements: job.timelinePlacements || [],
         focusstockVisualPlacements: buildFocusstockVisualTimelinePlacements(
           prepared.visualEvidence, prepared.visualEvidenceSha256),
+        focusstockBrollPlacements: carried
+          ? buildFocusstockBrollTimelinePlacements(carried.plan, carried.planSha256) : [],
         preparedPlacement: buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef),
       });
     }
-    const graphicBroll = prepared.plan.mode === 'ready-to-place'
+    const graphicBroll = carried
+      ? buildCarriedGraphicBroll(carried.plan, carried.planSha256)
+      : prepared.plan.mode === 'ready-to-place'
       ? selectPreparedPhoneGraphicBroll(job.graphicBroll, generatedGraphicBroll)
       : generatedGraphicBroll;
     let renderInputManifest = null;
@@ -1559,8 +1926,16 @@ function validateReviewedPreparedPlanBaseline(job, state) {
   if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
     throw new Error('這個 Run 缺少可追溯的 render input manifest');
   const { planSha256 } = validateGraphicBrollPlanForJob(job, state);
-  if (planSha256 !== job.graphicBroll?.planSha256)
+  if (!job.focusstockBrollCarryForward && planSha256 !== job.graphicBroll?.planSha256)
     throw new Error('review 前的 graphic B-Roll plan evidence 已改變');
+  if (job.focusstockBrollCarryForward) {
+    const carried = validateFocusstockBrollPlanForJob(job, state);
+    validateFocusstockBrollTimelinePlacements(job, carried.plan, carried.planSha256);
+    if (JSON.stringify(job.graphicBroll)
+        !== JSON.stringify(buildCarriedGraphicBroll(carried.plan, carried.planSha256))) {
+      throw new Error('review 前的 carried B-Roll composition evidence 已改變');
+    }
+  }
   const prepared = validatePreparedPhonePlanForJob(job, state);
   validateFocusstockVisualTimelinePlacements(
     job, prepared.visualEvidence, prepared.visualEvidenceSha256);
@@ -1625,12 +2000,21 @@ function verifyRestoredRenderInput(job) {
   if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
     throw new Error('這個 Run 缺少可追溯的 render input manifest');
   const { planSha256: statePlanSha256 } = validateGraphicBrollPlanForJob(job, state);
-  const { planSha256: restoredPlanSha256 } = validateGraphicBrollPlanForJob(job, ROOT);
-  if (statePlanSha256 !== job.graphicBroll?.planSha256
+  const { planSha256: restoredPlanSha256 } = validateGraphicBrollPlanForJob(
+    job, WORKSPACE_ROOT);
+  if ((!job.focusstockBrollCarryForward && statePlanSha256 !== job.graphicBroll?.planSha256)
       || restoredPlanSha256 !== statePlanSha256)
     throw new Error('render retry 的 graphic B-Roll plan 已改變，拒絕重新生成或靜默替換');
+  if (job.focusstockBrollCarryForward) {
+    const stateCarried = validateFocusstockBrollPlanForJob(job, state);
+    const restoredCarried = validateFocusstockBrollPlanForJob(job, WORKSPACE_ROOT);
+    if (stateCarried.planSha256 !== restoredCarried.planSha256)
+      throw new Error('render retry 的 Focusstock B-Roll plan 已改變');
+    validateFocusstockBrollTimelinePlacements(
+      job, stateCarried.plan, stateCarried.planSha256);
+  }
   const statePrepared = validatePreparedPhonePlanForJob(job, state);
-  const restoredPrepared = validatePreparedPhonePlanForJob(job, ROOT);
+  const restoredPrepared = validatePreparedPhonePlanForJob(job, WORKSPACE_ROOT);
   const { planSha256: statePreparedSha256 } = statePrepared;
   const { planSha256: restoredPreparedSha256 } = restoredPrepared;
   if (statePreparedSha256 !== restoredPreparedSha256)
@@ -1648,7 +2032,7 @@ function verifyRestoredRenderInput(job) {
   // The renderer consumes ROOT after restore. Verify the immutable state's declared artifact set
   // byte-for-byte, while intentionally ignoring unrelated template assets restore keeps in public/.
   verifyDeclaredFileFingerprints({
-    baseDir: ROOT,
+    baseDir: WORKSPACE_ROOT,
     expectedFiles: current.manifest.artifactInputs,
     label: 'restore 後的 render artifact inputs',
   });
@@ -2058,7 +2442,8 @@ function runPipeline(job, args) {
 // ── 配圖計畫：讀取／縮圖／寫回 ──────────────
 function charTimes() {
   try {
-    return JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'subtitles.json'), 'utf-8'))._scriptCharTimes || [];
+    return JSON.parse(fs.readFileSync(
+      path.join(WORKSPACE_ROOT, 'src', 'subtitles.json'), 'utf-8'))._scriptCharTimes || [];
   } catch (_) { return []; }
 }
 
@@ -2470,6 +2855,78 @@ function tick() {
     });
 }
 
+function preparedCandidateFromDurablePartial(job) {
+  const summary = job.materialAcquisitionResult;
+  if (job.materialAcquisition?.operation !== 'prepared-video'
+      || summary?.placementStatus !== 'compiled_pending_evidence'
+      || summary.automaticTimelineUse !== false || summary.preparedArtifact?.assetRef) {
+    throw new Error('prepared phone partial finalize state 不合法');
+  }
+  const prepared = validatePreparedPhonePlanIdentityForJob(job, WORKSPACE_ROOT);
+  const project = PROJECT_STORE.get(job.projectId);
+  const matches = (project?.assets || []).filter((asset) =>
+    asset?.kind === 'video' && asset.role === 'prepared-phone-video'
+    && asset.origin === 'chipk-simulator-capture'
+    && asset.sha256 === summary.preparedArtifact.sha256
+    && asset.size === summary.preparedArtifact.size);
+  if (matches.length !== 1)
+    throw new Error('prepared phone partial finalize 無法唯一定位 Project Asset');
+  return { asset: matches[0], plan: prepared.plan };
+}
+
+function completePreparedWorkspace(job) {
+  let preparedCandidate = null;
+  if (job.materialAcquisition?.operation === 'prepared-video') {
+    const placementStatus = job.materialAcquisitionResult?.placementStatus;
+    if (placementStatus === 'pending_compile') {
+      preparedCandidate = finalizePreparedPhoneMaterial({
+        job,
+        jobDirectory: jobDir(job.id),
+        workspaceRoot: WORKSPACE_ROOT,
+        publicDirectory: WORKSPACE_PUBLIC_DIR,
+        projectStore: PROJECT_STORE,
+      });
+    } else if (placementStatus === 'compiled_pending_evidence') {
+      preparedCandidate = preparedCandidateFromDurablePartial(job);
+    } else if (placementStatus === 'compiled') {
+      validatePreparedPhoneProjectAsset({ job, projectStore: PROJECT_STORE });
+    } else {
+      throw new Error('prepared phone acquisition 尚未進入可完成的 placement 狀態');
+    }
+  }
+
+  if (job.focusstockBrollCarryForward?.status === 'pending') {
+    if (!preparedCandidate)
+      throw new Error('carried B-roll pending plan 缺少 prepared phone candidate');
+    finalizeFocusstockBrollCarry(job, preparedCandidate);
+  } else if (job.focusstockBrollCarryForward) {
+    validateFocusstockBrollPlanForJob(job, WORKSPACE_ROOT);
+  }
+
+  captureProjectAssets(job);
+  snapshotWorkspace(job);
+  captureAutomationEvidence(job, preparedCandidate);
+  job.planView = buildPlanView(job);
+  job.preparedAt = job.preparedAt || nowISO();
+  job.pid = null;
+  job.error = null;
+  delete job.detachedCaptureRetryAt;
+  delete job.detachedCaptureAttempts;
+
+  if (job.autoApprove) {
+    job.status = 'approved';
+    job.stage = 'ready-to-render';
+    job.approvedAt = job.approvedAt || nowISO();
+    job.approvedBy = job.approvedBy || '（自動出片）';
+    appendLog(job, '\n⏩ 已勾選「直接出片」，跳過人工確認\n');
+  } else {
+    job.status = 'review';
+    job.stage = 'awaiting-audit';
+  }
+  saveJob(job);
+  return preparedCandidate;
+}
+
 async function doPrepare(job) {
   job.status = 'preparing';
   job.stage = 'preparing';
@@ -2477,6 +2934,10 @@ async function doPrepare(job) {
   saveJob(job);
 
   if (job.cancelRequestedAt) throw cancelledRunError(job);
+
+  // Re-prove the immutable parent before any optional Provider can be called. A changed parent
+  // stops here; it never spends acquisition work and never silently changes the carried bytes.
+  revalidateCarryBeforeProvider(job);
 
   await prepareJobMaterialAcquisition({
     job,
@@ -2494,6 +2955,7 @@ async function doPrepare(job) {
   const args = [`--template=${job.template}`, '--stop-before-render'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
   args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
+  args.push(`--focusstock-broll=${job.focusstockBrollCarryForward ? 'deferred' : 'disabled'}`);
   if (job.brand) args.push(`--brand=${job.brand}`);
   if (job.skipGenerate) args.push('--skip-generate');
   if (job.noSpeed) args.push('--no-speed');
@@ -2501,17 +2963,7 @@ async function doPrepare(job) {
   let preparedCandidate = null;
   try {
     await runPipeline(job, args);
-    preparedCandidate = finalizePreparedPhoneMaterial({
-      job,
-      jobDirectory: jobDir(job.id),
-      workspaceRoot: ROOT,
-      publicDirectory: WORKSPACE_PUBLIC_DIR,
-      projectStore: PROJECT_STORE,
-    });
-    captureProjectAssets(job);
-    snapshotWorkspace(job);
-    captureAutomationEvidence(job, preparedCandidate);
-    job.planView = buildPlanView(job);
+    preparedCandidate = completePreparedWorkspace(job);
   } catch (error) {
     capturePaidSpeakerAfterFailure({
       job,
@@ -2529,20 +2981,6 @@ async function doPrepare(job) {
     }
     throw error;
   }
-  job.preparedAt = nowISO();
-
-  if (job.autoApprove) {
-    // 一段式：不停下來，直接接著 render
-    job.status = 'approved';
-    job.stage = 'ready-to-render';
-    job.approvedAt = nowISO();
-    job.approvedBy = '（自動出片）';
-    appendLog(job, '\n⏩ 已勾選「直接出片」，跳過人工確認\n');
-  } else {
-    job.status = 'review';
-    job.stage = 'awaiting-audit';
-  }
-  saveJob(job);
 }
 
 async function doRender(job) {
@@ -2602,6 +3040,7 @@ async function doRender(job) {
   const args = [`--template=${job.template}`, '--render-only'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
   args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
+  args.push(`--focusstock-broll=${focusstockBrollMode(job)}`);
   if (job.withAd) args.push('--with-ad');
   let evidence;
   try {
@@ -2645,26 +3084,7 @@ async function doRender(job) {
   }
   const finalized = finalizeRenderOutputs(job, evidence);
   try {
-    transitionJobSafely(job, {
-      finishedAt: finalized.finishedAt,
-      outputs: finalized.outputs,
-      archived: finalized.archived,
-      status: 'done',
-      stage: 'done',
-      pid: null,
-      error: null,
-      failedStage: null,
-      renderEvidence: {
-        schemaVersion: 1,
-        renderInputManifestSha256: job.renderInputManifestSha256 || null,
-        verifiedAt: finalized.finishedAt,
-        outputs: finalized.outputs.map((output) => ({
-          name: output.name,
-          size: output.size,
-          sha256: output.sha256,
-        })),
-      },
-    });
+    transitionJobSafely(job, successfulRenderPatch(job, finalized));
   } catch (error) {
     // A Project metadata write can fail after the immutable output was already committed. Keep a
     // Run-local verified copy before the worker gate advances, so the next job cannot erase the only
@@ -3155,12 +3575,10 @@ const server = http.createServer(async (req, res) => {
       const scriptText = buildScript({ voice: body.voice, title, body: body.body });
       let reuseAssetIds = Array.isArray(body.reuseAssetIds)
         ? [...new Set(body.reuseAssetIds.map(String))] : [];
-      const reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
+      let reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
         ? null : String(body.reuseSpeakerAssetId);
       if (workflowMode === 'auto-broll' && reuseAssetIds.length)
         return send(res, 400, { error: '自動圖卡流程不能同時帶入人工圖片或 B-Roll' });
-      if (reuseAssetIds.length > MAX_REUSED_ASSETS)
-        return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片與 B-Roll 素材` });
       if (!body.projectId && (reuseAssetIds.length || reuseSpeakerAssetId))
         return send(res, 400, { error: '建立新影片時不能引用其他專案的素材' });
       const id = newId();
@@ -3196,6 +3614,38 @@ const server = http.createServer(async (req, res) => {
         if (!parentRevision)
           return send(res, 409, { error: '來源版本不屬於這個影片專案' });
       }
+      let carryPreflight = null;
+      if (materialAcquisition?.operation === 'prepared-video' && parentRevision) {
+        const parentJob = carryParentJob(parentRevision);
+        if (parentSelectsRecordedBroll(parentRevision, parentJob)) {
+          try {
+            carryPreflight = preflightCarryFromParent({
+              project,
+              parentRevision,
+              parentJob,
+              childScript: Buffer.from(scriptText, 'utf8'),
+            });
+          } catch (error) {
+            return send(res, 409, {
+              error: `來源版本的 B-Roll 無法安全沿用：${error.message}`,
+              code: error.code || 'parent_broll_preflight_failed',
+              reason: error.reason || null,
+            });
+          }
+          const carriedRefs = new Set(carryPreflight.sourceSnapshot.cards.map(
+            (card) => card.assetRef));
+          reuseAssetIds = reuseAssetIds.filter((assetRef) => !carriedRefs.has(assetRef));
+          if (reuseSpeakerAssetId && reuseSpeakerAssetId !== carryPreflight.speakerAsset.id) {
+            return send(res, 409, {
+              error: '沿用已驗證 B-Roll 時不可替換 parent Revision 的 speaker',
+              code: 'speaker_selection_invalid',
+            });
+          }
+          reuseSpeakerAssetId = carryPreflight.speakerAsset.id;
+        }
+      }
+      if (reuseAssetIds.length > MAX_REUSED_ASSETS)
+        return send(res, 400, { error: `下一版最多可沿用 ${MAX_REUSED_ASSETS} 個圖片素材` });
       const invalidReuse = reuseAssetIds.find((assetId) => {
         const asset = (project.assets || []).find((item) => item.id === assetId);
         return !isGenericReusableAsset(asset);
@@ -3248,6 +3698,7 @@ const server = http.createServer(async (req, res) => {
             workflowMode,
             controlPolicy,
             graphicBrollMode: workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+            focusstockBrollMode: carryPreflight ? 'pending-prepared' : 'disabled',
           },
           parentRevisionId,
           ...(materialAcquisition ? { materialAcquisition } : {}),
@@ -3271,6 +3722,7 @@ const server = http.createServer(async (req, res) => {
           workflowMode,
           controlPolicy,
           graphicBrollMode: workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+          focusstockBrollMode: carryPreflight ? 'pending-prepared' : 'disabled',
           stage: 'draft',
           assetRefs: [],
           createdAssetRefs: [],
@@ -3279,10 +3731,36 @@ const server = http.createServer(async (req, res) => {
         };
         ensureDir(path.join(jobDir(job.id), 'input'));
         fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'), scriptText);
+        if (carryPreflight) {
+          atomicWriteFile(
+            path.join(jobDir(job.id), 'input', FOCUSSTOCK_BROLL_SOURCE_INPUT),
+            carryPreflight.sourceCanonical,
+          );
+          if (fileSha256(path.join(jobDir(job.id), 'input', FOCUSSTOCK_BROLL_SOURCE_INPUT))
+              !== carryPreflight.sourceSha256) {
+            throw carryForwardError('parent_broll_snapshot_drifted',
+              'stored_source_snapshot_hash_mismatch',
+              'Stored parent B-roll source snapshot hash does not match preflight');
+          }
+          job.focusstockBrollCarryForward = {
+            schemaVersion: 1,
+            status: 'pending',
+            mode: 'pending-prepared',
+            parentRevisionId: parentRevision.id,
+            sourceInputName: FOCUSSTOCK_BROLL_SOURCE_INPUT,
+            sourceSnapshotSha256: carryPreflight.sourceSha256,
+            sourceSnapshot: carryPreflight.sourceSnapshot,
+          };
+        }
         if (speakerAsset) {
           PROJECT_STORE.materializeAsset(project.id, speakerAsset.id,
             path.join(jobDir(job.id), 'input', 'heygen.mp4'));
           job.assetRefs.push(speakerAsset.id);
+        }
+        if (carryPreflight) {
+          for (const card of carryPreflight.sourceSnapshot.cards) {
+            if (!job.assetRefs.includes(card.assetRef)) job.assetRefs.push(card.assetRef);
+          }
         }
         let shotIndex = 1;
         let brollIndex = 1;
@@ -3340,6 +3818,11 @@ const server = http.createServer(async (req, res) => {
       if (job.materialAcquisition?.operation === 'prepared-video' && name !== 'heygen.mp4')
         return send(res, 409, {
           error: 'ready-to-place 不支援建立 Run 後再上傳圖片／B-Roll；圖片必須在建立時由同 Project 選取並綁定 placement',
+        });
+      if (job.focusstockBrollCarryForward && name === 'heygen.mp4')
+        return send(res, 409, {
+          error: '沿用已驗證 B-Roll 的 Run 必須保留 parent Revision 的唯一 speaker',
+          code: 'speaker_selection_invalid',
         });
       const limit = spec.limit;
       const declared = Number(req.headers['content-length'] || 0);
@@ -3689,9 +4172,11 @@ function pruneOldJobs() {
         && isWithin(PROJECT_STORE.projectsDir, path.resolve(ROOT, output.archive)));
       const isProjectRun = Boolean(j.projectId || j.revisionId || hasProjectOutputReference);
       let isCompactableProjectRun = false;
+      let compactableRevision = null;
       if (j.status === 'done' && j.projectId && j.revisionId && hasDurableOutputs) {
         const project = PROJECT_STORE.get(j.projectId);
         const revision = PROJECT_STORE.getRevision(j.projectId, j.revisionId);
+        compactableRevision = revision;
         const revisionOutputs = revision && revision.outputs;
         const projectDir = PROJECT_STORE.projectDir(j.projectId);
         const projectOutputDir = PROJECT_STORE.outputDir(j.projectId);
@@ -3729,7 +4214,11 @@ function pruneOldJobs() {
       const t = Date.parse(j.finishedAt || j.createdAt) || 0;
       const retentionExpired = idx >= KEEP_RECENT && t <= cutoff;
       if (!isCompactableProjectRun && !retentionExpired) return;
-      if (isCompactableProjectRun && j.materialAcquisition?.operation === 'prepared-video') {
+      const requiresCarryCompaction = isCompactableProjectRun
+        ? requireFocusstockCarryCompaction({ job: j, revision: compactableRevision }) : false;
+      if (isCompactableProjectRun
+          && (j.materialAcquisition?.operation === 'prepared-video'
+            || requiresCarryCompaction)) {
         const compacted = compactPreparedPhoneAcquisition({
           job: j,
           jobDirectory: jobDir(j.id),
