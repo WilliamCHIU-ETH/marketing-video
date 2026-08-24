@@ -504,7 +504,15 @@ async function main() {
   assert.match(html, /送出後不暫停，素材準備完成就直接出片/);
   assert.match(html, /本版系統生成的 B-roll/);
   assert.match(html, /成片實際畫面/);
-  assert.match(html, /看成片片段/);
+  assert.match(html, /段落總覽/);
+  assert.match(html, /Prompt 檢視器/);
+  assert.match(html, /一次查看全部 Prompt/);
+  assert.match(html, /broll-review-layout/);
+  assert.match(html, /broll-prompt-missing/);
+  assert.match(html, /prompt\.recorded \? prompt\.text : '缺失'/);
+  assert.doesNotMatch(html, /Prompt 缺失/);
+  assert.match(html, /const startSec = Math\.max\(0, placement\.startSec\)/);
+  assert.doesNotMatch(html, /placement\.startSec - 0\.3/);
   assert.match(html, /graphic B-roll 不是獨立 MP4/);
   assert.match(html, /尚無可驗證成片畫面/);
   assert.match(html, /專案素材庫/);
@@ -520,6 +528,20 @@ async function main() {
   assert.match(html, /返回 V/);
   assert.match(html, /reuseSpeakerAssetId/);
   assert.match(html, /下載專案 Avatar/);
+  assert.match(html, /<button data-v="list" class="on">影片專案<\/button>/);
+  assert.match(html, /<section id="v-list">/);
+  assert.match(html, /collapsible-card/);
+  assert.match(html, /output-list/);
+
+  const outputSectionStart = html.indexOf("} else if (job.status === 'done' && job.outputs)");
+  const outputSectionEnd = html.indexOf('\n  const canCancel =', outputSectionStart);
+  assert.ok(outputSectionStart > 0 && outputSectionEnd > outputSectionStart,
+    '必須能獨立檢查完成版成品輸出 UI');
+  assert.match(html.slice(outputSectionStart, outputSectionEnd),
+    /if \(!hasBrollEvidencePreview\(job\)\)/,
+    '只有沒有 B-roll evidence player 的完成版才顯示 fallback 成片播放器');
+  assert.match(html.slice(outputSectionStart, outputSectionEnd), /el\('video'/,
+    'manual-assets 與 legacy 完成版必須保留頁內成片播放器');
 
   const inlineScript = html.match(/<script>([\s\S]*)<\/script>/);
   assert.ok(inlineScript, '前台必須保留可解析的 inline script');
@@ -528,8 +550,11 @@ async function main() {
   const previewGateEnd = html.indexOf('\nfunction revisionTimeHelp()', previewGateStart);
   assert.ok(previewGateStart > 0 && previewGateEnd > previewGateStart,
     '必須能獨立驗證 graphic B-roll 成片預覽 evidence gate');
-  const verifiedGraphicPreviewOutput = new Function(
-    `${html.slice(previewGateStart, previewGateEnd)}\nreturn verifiedGraphicPreviewOutput;`)();
+  const previewGates = new Function(
+    `${html.slice(previewGateStart, previewGateEnd)}\nreturn {verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput, hasBrollEvidencePreview};`)();
+  const {
+    verifiedGraphicPreviewOutput, recordedCompositionPreviewOutput, hasBrollEvidencePreview,
+  } = previewGates;
   const previewFixture = {
     status: 'done', pruned: false, workflowMode: 'auto-broll',
     graphicBroll: {
@@ -550,6 +575,8 @@ async function main() {
   };
   const previewFixtureBefore = JSON.stringify(previewFixture);
   assert.equal(verifiedGraphicPreviewOutput(previewFixture), previewFixture.outputs[0]);
+  assert.equal(hasBrollEvidencePreview(previewFixture), true,
+    '已有 verified B-roll player 時不得再顯示 output fallback player');
   assert.equal(JSON.stringify(previewFixture), previewFixtureBefore, '預覽 evidence gate 必須唯讀');
   for (const mutate of [
     (fixture) => { fixture.status = 'review'; },
@@ -576,6 +603,60 @@ async function main() {
       '不完整或不相符的 evidence 不得顯示成片實際畫面');
   }
 
+  const recordedFixture = {
+    status: 'done', pruned: false, projectId: 'project-1', revisionId: 'v001',
+    renderInputManifestSha256: 'e'.repeat(64),
+    graphicBroll: {
+      schemaVersion: 1, mode: 'composition-v1',
+      sourceScriptSha256: 'a'.repeat(64), planSha256: 'b'.repeat(64),
+      cards: [{
+        id: 'broll-01', assetRef: 'asset-video-1', assetSha256: 'c'.repeat(64),
+        resolvedPlacement: { startSec: 1, endSec: 2 },
+      }],
+      provenance: {
+        level: 'reconstructed-after-render',
+        output: { name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) },
+      },
+    },
+    timelinePlacements: [{
+      clipId: 'broll-01', assetRef: 'asset-video-1', assetSha256: 'c'.repeat(64),
+      startSec: 1, endSec: 2, evidenceLevel: 'reconstructed-after-render',
+    }],
+    outputs: [{ name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) }],
+    renderEvidence: {
+      outputs: [{ name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) }],
+    },
+    recordedCompositionEvidence: {
+      status: 'verified', projectId: 'project-1', revisionId: 'v001',
+      renderInputManifestSha256: 'e'.repeat(64), cardIds: ['broll-01'],
+      output: { name: 'output.mp4', size: 123, sha256: 'd'.repeat(64) },
+    },
+  };
+  const recordedFixtureBefore = JSON.stringify(recordedFixture);
+  assert.equal(recordedCompositionPreviewOutput(recordedFixture), recordedFixture.outputs[0]);
+  assert.equal(hasBrollEvidencePreview(recordedFixture), true,
+    '已有 recorded placement player 時不得再顯示 output fallback player');
+  assert.equal(JSON.stringify(recordedFixture), recordedFixtureBefore,
+    'placement evidence gate 必須唯讀');
+  for (const mutate of [
+    (fixture) => { fixture.graphicBroll.provenance.level = 'project-asset-only'; },
+    (fixture) => { fixture.timelinePlacements = []; },
+    (fixture) => { fixture.timelinePlacements[0].assetRef = 'other-asset'; },
+    (fixture) => { fixture.timelinePlacements[0].evidenceLevel = 'selected-only'; },
+    (fixture) => { fixture.graphicBroll.cards[0].assetSha256 = 'invalid'; },
+    (fixture) => { fixture.renderEvidence.outputs[0].size = 999; },
+    (fixture) => { fixture.recordedCompositionEvidence = null; },
+    (fixture) => { fixture.recordedCompositionEvidence.projectId = 'other-project'; },
+  ]) {
+    const fixture = JSON.parse(JSON.stringify(recordedFixture));
+    mutate(fixture);
+    assert.equal(recordedCompositionPreviewOutput(fixture), null,
+      '不完整的 Project Asset／placement／Render linkage 不得顯示成片片段');
+  }
+  assert.equal(hasBrollEvidencePreview({
+    status: 'done', workflowMode: 'manual-assets',
+    outputs: [{ name: 'output.mp4', size: 123, sha256: 'e'.repeat(64) }],
+  }), false, 'manual-assets 完成版沒有 B-roll evidence player，必須使用 output fallback player');
   const invalidWorkflow = await fetch(base + '/api/jobs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
