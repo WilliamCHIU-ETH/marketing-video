@@ -1503,9 +1503,29 @@ function captureProjectAssets(job) {
     const file = path.join(publicDir, name);
     if (!fs.statSync(file).isFile() || fs.statSync(file).size === 0) continue;
     const asset = PROJECT_STORE.ingestAsset(job.projectId, file, { originalName: name, kind });
-    if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+    if (kind === 'speaker-video' && preparedPhoneMode(job) === 'ready-to-place') {
+      replaceReadyToPlaceSpeakerRef(job, PROJECT_STORE.get(job.projectId), asset);
+    } else if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
   }
   saveJob(job);
+}
+
+/**
+ * `public/heygen.mp4` is the authoritative ready-to-place speaker input. Replacing those bytes
+ * changes the selected speaker, but it does not delete historical Project Assets. Remove every
+ * superseded speaker ref first, then select the one asset whose bytes now back the Render input.
+ */
+function replaceReadyToPlaceSpeakerRef(job, project, authoritativeAsset) {
+  if (preparedPhoneMode(job) !== 'ready-to-place'
+      || !project || authoritativeAsset?.kind !== 'speaker-video'
+      || !(project.assets || []).some((asset) => asset.id === authoritativeAsset.id
+        && asset.kind === 'speaker-video')) {
+    throw new Error('ready-to-place authoritative speaker identity is invalid');
+  }
+  const speakerRefs = new Set((project.assets || [])
+    .filter((asset) => asset.kind === 'speaker-video').map((asset) => asset.id));
+  job.assetRefs = (job.assetRefs || []).filter((assetRef) => !speakerRefs.has(assetRef));
+  job.assetRefs.push(authoritativeAsset.id);
 }
 
 // ── 執行 run.js ───────────────────────────
@@ -3112,7 +3132,10 @@ const server = http.createServer(async (req, res) => {
           originalName: requestedOriginalName,
           kind: spec.kind,
         });
-        if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+        if (job.materialAcquisition?.operation === 'prepared-video'
+            && spec.kind === 'speaker-video') {
+          replaceReadyToPlaceSpeakerRef(job, PROJECT_STORE.get(job.projectId), asset);
+        } else if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
         if (!existingAssetIds.has(asset.id) && !job.createdAssetRefs.includes(asset.id))
           job.createdAssetRefs.push(asset.id);
         if (job.materialAcquisition?.operation === 'prepared-video'

@@ -1270,6 +1270,35 @@ async function main() {
   assert.deepEqual(preparedWithReusedSpeaker.job.assetRefs, [preparedSpeakerAsset.id]);
   assert.deepEqual(fs.readFileSync(path.join(DATA_DIR, 'jobs',
     preparedWithReusedSpeaker.job.id, 'input', 'heygen.mp4')), MP4_FIXTURE);
+  const firstSpeakerReplacement = await request(base,
+    `/api/jobs/${preparedWithReusedSpeaker.job.id}/upload?name=heygen.mp4`, {
+      method: 'POST', body: FRAGMENTED_MP4_FIXTURE,
+    });
+  assert.equal(firstSpeakerReplacement.asset.kind, 'speaker-video');
+  assert.notEqual(firstSpeakerReplacement.asset.id, preparedSpeakerAsset.id);
+  const secondSpeakerReplacement = await request(base,
+    `/api/jobs/${preparedWithReusedSpeaker.job.id}/upload?name=heygen.mp4`, {
+      method: 'POST', body: LATE_MOOV_MP4_FIXTURE,
+    });
+  assert.equal(secondSpeakerReplacement.asset.kind, 'speaker-video');
+  assert.notEqual(secondSpeakerReplacement.asset.id, firstSpeakerReplacement.asset.id);
+  const preparedAfterSpeakerReplacement = await request(
+    base, `/api/jobs/${preparedWithReusedSpeaker.job.id}`);
+  assert.deepEqual(preparedAfterSpeakerReplacement.job.assetRefs,
+    [secondSpeakerReplacement.asset.id],
+  'only the latest authoritative ready-to-place speaker remains selected');
+  assert.equal(preparedAfterSpeakerReplacement.job.skipGenerate, true);
+  assert.equal(preparedAfterSpeakerReplacement.job.noSpeed, true);
+  assert.deepEqual(fs.readFileSync(path.join(DATA_DIR, 'jobs',
+    preparedWithReusedSpeaker.job.id, 'input', 'heygen.mp4')), LATE_MOOV_MP4_FIXTURE);
+  const preparedReplacementProject = await request(base,
+    `/api/projects/${preparedSpeakerSeed.job.projectId}`
+      + `?revision=${preparedWithReusedSpeaker.job.revisionId}`);
+  assert.deepEqual(preparedReplacementProject.revision.assetRefs,
+    [secondSpeakerReplacement.asset.id]);
+  assert.equal(preparedReplacementProject.project.assets.filter(
+    (asset) => asset.kind === 'speaker-video').length, 3,
+  'superseded Project speaker Assets remain durable even when Revision refs are replaced');
   const preparedReusedQueued = await request(
     base, `/api/jobs/${preparedWithReusedSpeaker.job.id}/submit`, { method: 'POST' });
   assert.equal(preparedReusedQueued.job.status, 'queued');
