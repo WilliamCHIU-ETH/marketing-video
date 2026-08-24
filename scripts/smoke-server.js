@@ -3058,26 +3058,106 @@ if (args[0] === 'capabilities' && args[1] === '--json') {
 if (args[0] !== 'acquire' || args[1] !== '--request' || args[3] !== '--json')
   throw new Error('unsupported fake provider invocation');
 const request = JSON.parse(fs.readFileSync(args[2], 'utf8'));
+const preparedBytes = fs.readFileSync(process.env.SMOKE_CARRY_PREPARED_MP4);
+const screenshotBytes = fs.readFileSync(process.env.SMOKE_CARRY_SCREENSHOT);
+const capture = Buffer.from(JSON.stringify({
+  schemaVersion: 1,
+  capturedAt: '2026-08-24T00:00:00.000Z',
+  route: { id: request.target.routeId },
+  parameters: { stockid: request.target.stockId, stockname: request.target.stockName },
+  screenshot: { file: 'screenshot.png', sha256: hash(screenshotBytes) },
+  verification: {
+    expectedTexts: ['主力', request.target.stockId],
+    matchedTexts: ['主力', request.target.stockId],
+    contentTexts: {
+      expected: ['買賣家數差', request.target.stockName],
+      observed: ['買賣家數差', request.target.stockName],
+      missing: [],
+    },
+  },
+  catalogVersion: 'smoke-ready-to-place-v2',
+}));
+const profile = {
+  id: request.presentation.profileId,
+  version: 1,
+  status: 'ready_to_place',
+  canonicalSha256: 'a'.repeat(64),
+};
+const planValue = {
+  schemaVersion: 1,
+  contractVersion: request.contractVersion,
+  requestId: request.requestId,
+  operation: request.operation,
+  profile,
+  target: {
+    routeId: request.target.routeId,
+    stockId: request.target.stockId,
+    stockName: request.target.stockName,
+    mode: request.mode,
+  },
+  source: {
+    kind: 'screenshot',
+    file: 'screenshot.png',
+    sha256: hash(screenshotBytes),
+    captureManifest: { file: 'capture-manifest.json', sha256: hash(capture) },
+    width: 1,
+    height: 1,
+  },
+  timeline: { durationSeconds: 1, fps: 30, frameCount: 30 },
+  presentation: { camera: {}, interactions: [] },
+  output: { codec: 'h264', width: 16, height: 16, pixelFormat: 'yuv420p', audio: 'none' },
+  canonicalSha256: 'b'.repeat(64),
+};
+const plan = Buffer.from(JSON.stringify(planValue));
+const preparation = Buffer.from(JSON.stringify({
+  schemaVersion: 1,
+  contractVersion: request.contractVersion,
+  requestId: request.requestId,
+  status: 'ready_to_place',
+  generatedAt: '2026-08-24T00:00:01.000Z',
+  profile,
+  source: planValue.source,
+  target: planValue.target,
+  presentationPlan: {
+    file: 'presentation-plan.json',
+    sha256: hash(plan),
+    canonicalSha256: planValue.canonicalSha256,
+  },
+  output: {
+    role: 'prepared-video',
+    file: 'prepared.mp4',
+    sha256: hash(preparedBytes),
+    codec: 'h264',
+    width: 16,
+    height: 16,
+    durationSeconds: 1,
+    fps: 30,
+    pixelFormat: 'yuv420p',
+    audio: 'none',
+  },
+  tool: { id: 'smoke-fixture', version: '1', ffmpeg: 'fixture', filterSha256: 'c'.repeat(64) },
+  publication: { strategy: 'staging_directory_atomic_rename', finalDirectory: 'ready-to-place' },
+}));
 const files = {
   'prepared-video': {
-    name: 'prepared.mp4', bytes: fs.readFileSync(process.env.SMOKE_CARRY_PREPARED_MP4),
+    name: 'prepared.mp4', bytes: preparedBytes,
     kind: 'video', mimeType: 'video/mp4',
     media: { codec: 'h264', width: 16, height: 16, durationSeconds: 1 },
   },
   screenshot: {
-    name: 'screenshot.png', bytes: fs.readFileSync(process.env.SMOKE_CARRY_SCREENSHOT),
+    name: 'screenshot.png', bytes: screenshotBytes,
     kind: 'image', mimeType: 'image/png', media: { width: 1, height: 1 },
   },
   'capture-manifest': {
-    name: 'capture-manifest.json', bytes: Buffer.from('{"capture":true}'),
+    name: 'capture-manifest.json', bytes: capture,
     kind: 'json', mimeType: 'application/json',
   },
   'presentation-plan': {
-    name: 'presentation-plan.json', bytes: Buffer.from('{"profile":"ready"}'),
+    name: 'presentation-plan.json', bytes: plan,
     kind: 'json', mimeType: 'application/json',
   },
   'preparation-manifest': {
-    name: 'preparation-manifest.json', bytes: Buffer.from('{"prepared":true}'),
+    name: 'preparation-manifest.json', bytes: preparation,
     kind: 'json', mimeType: 'application/json',
   },
 };
