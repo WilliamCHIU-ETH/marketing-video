@@ -41,11 +41,15 @@ selection and persisted timeline-ready evidence. It fails if a raw fallback appe
 Provider-owned fixture must therefore emit a genuinely decodable silent H264 MP4 rather than trust
 stubbed metadata. App-local tests additionally cover stale/hash rejection and render-input binding.
 
-The App validates the outer role, path, hash, media, and result-evidence contract. The
-`capture-manifest`, `presentation-plan`, and `preparation-manifest` payloads remain Provider-owned
-opaque JSON sidecars: the App verifies and preserves their exact bytes and hashes, but does not claim
-semantic validation of their inner fields in contract v2.
-A live Simulator/session and final rendered pixels remain a separate acceptance run.
+The App validates the outer role, path, hash, media, and result-evidence contract, then parses the
+`capture-manifest`, `presentation-plan`, and `preparation-manifest` sidecars. Route／stock／request／
+profile／source／output／catalog identities and every cross-file hash must agree with the request,
+advertised profile capability, result evidence, and five artifact descriptors before the bundle is
+accepted. Missing or drifted provenance fails closed.
+
+Provider v0.3.0 does not advertise `runReadiness.vipSession=verified_before_mutation`, so
+prepared-video `mode=live` fails before Provider acquire. Synthetic conformance remains supported;
+a live Simulator/session and final rendered pixels remain a separate, blocked acceptance run.
 
 The ordinary `npm run test:material-provider` and `npm run smoke` paths remain Provider-free and do
 not require the sibling repository.
