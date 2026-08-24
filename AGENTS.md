@@ -115,8 +115,10 @@ If a ready-to-place Run reuses or uploads a completed speaker MP4, preserve thos
 When integrating another Focusstock visual branch, use
 `preparedPhoneSuppressesFocusstockVisual(startSec, endSec)`: any generic shot or graphic B-roll
 placement overlapping the prepared interval is suppressed in full. JSX stacking is not a conflict
-policy. In particular, the existing `mainforce-guide` placement must not render over or under the
-prepared clip; this semantic merge and a full render inspection are release gates.
+policy. A placement that only touches the prepared interval at an endpoint remains eligible; any
+half-open interval intersection suppresses the whole placement. Its producer, renderer consumer,
+and disposition evidence must be integrated together, with full render inspection as that branch's
+release gate.
 
 With no `materialAcquisition` intent, the existing provider-free flow must remain unchanged;
 `disable-capture` must not probe the provider.

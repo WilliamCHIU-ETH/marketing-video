@@ -165,7 +165,7 @@ API `body` 的 raw string index，因為標點、空白、標記與發音替換�
 ```json
 {
   "layoutId": "focusstock-phone-portrait.v1",
-  "startSec": 53.85
+  "startSec": 12.5
 }
 ```
 

@@ -41,9 +41,9 @@ ChipK Capture   = 可拔除的 Simulator 素材取得工具
 - 不對 ready-to-place 手機 clip 再做 crop／trim／loop／變速／內部運鏡。
 - Ready-to-place interval 是 `prepared-phone-video` 的 exclusive visual ownership。任何
   `focusstock-shots` 或 `focusstock-broll` placement 只要與它有交集，就整段 suppress，
-  不以 JSX layer order 遮蓋、也不把任一素材裁短。現有 Focusstock graphic-B-roll branch
+  不以 JSX layer order 遮蓋、也不把任一素材裁短。未來 Focusstock visual branch 做
   semantic merge 時必須呼叫 `preparedPhoneSuppressesFocusstockVisual(startSec, endSec)`；
-  `07-mainforce-guide.mp4` 的 53.85–59.04 秒與 prepared interval 重疊時必須被排除。
+  只在端點相接的 placement 保留，half-open interval 有交集就整段排除。
 
 Marketing Video 不直接操作 `simctl`、OCR、Deep Link 或 Simulator gestures。
 

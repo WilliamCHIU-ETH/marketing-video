@@ -713,29 +713,30 @@ test('fractional seconds are suppressed when renderer-rounded frames overlap pre
   }]);
 });
 
-test('Focusstock visual contract keeps endpoint-touching B-roll and suppresses a full overlap', () => {
-  const priorClip = focusstockVisualFrameInterval(43.8, 53.85);
-  const mainforceGuide = focusstockVisualFrameInterval(53.85, 59.04);
-  const prepared = { startFrame: 1616, endFrame: 1766 };
-  assert.deepEqual(priorClip, {
+test('Focusstock visual contract keeps endpoint-touching placements and suppresses a full overlap', () => {
+  const endpointTouching = focusstockVisualFrameInterval(1, 2);
+  const overlapping = focusstockVisualFrameInterval(2, 3);
+  const prepared = { startFrame: 60, endFrame: 75 };
+  assert.deepEqual(endpointTouching, {
     fps: 30,
-    startFrame: 1314,
-    endFrame: 1616,
-    durationInFrames: 302,
+    startFrame: 30,
+    endFrame: 60,
+    durationInFrames: 30,
   });
-  assert.deepEqual(mainforceGuide, {
+  assert.deepEqual(overlapping, {
     fps: 30,
-    startFrame: 1616,
-    endFrame: 1772,
-    durationInFrames: 156,
+    startFrame: 60,
+    endFrame: 90,
+    durationInFrames: 30,
   });
   assert.equal(halfOpenFrameIntervalsOverlap(
-    priorClip.startFrame, priorClip.endFrame, prepared.startFrame, prepared.endFrame), false,
-  'B-roll 06 endpoint only touches prepared start and remains rendered');
+    endpointTouching.startFrame, endpointTouching.endFrame,
+    prepared.startFrame, prepared.endFrame), false,
+  'an endpoint-only touch remains rendered');
   assert.equal(halfOpenFrameIntervalsOverlap(
-    mainforceGuide.startFrame, mainforceGuide.endFrame,
+    overlapping.startFrame, overlapping.endFrame,
     prepared.startFrame, prepared.endFrame), true,
-  '07-mainforce-guide begins at prepared frame 1616 and is suppressed in full');
+  'a half-open interval intersection is suppressed in full');
 });
 
 test('Focusstock visual timeline placements are an exact evidence-bound retry contract', (t) => {
