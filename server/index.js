@@ -39,6 +39,7 @@ const {
   buildRenderInputManifest,
   verifyDeclaredFileFingerprints,
 } = require('./render-input-manifest');
+const { attachRecordedBrollPrompts } = require('./broll-prompt-provenance');
 
 const ROOT = path.resolve(__dirname, '..');
 try { require('dotenv').config({ path: path.join(ROOT, '.env'), quiet: true }); } catch (_) {}
@@ -2489,7 +2490,7 @@ function sendFile(req, res, file, download, downloadName) {
   fs.createReadStream(file).pipe(res);
 }
 
-function publicJob(j) {
+function publicJob(j, options = {}) {
   const {
     pid, pendingEdits, autoPlan, createdAssetRefs,
     workspaceRunPid, workspaceRunStatus, workspaceRunStartedAt, workspaceRunToken,
@@ -2500,13 +2501,31 @@ function publicJob(j) {
     manifest: _manifest, archived: _archived, outputs = [],
     ...rest
   } = j;
-  return {
+  const safe = {
     ...rest,
     ...(migration ? { migration: publicMigration(migration) } : {}),
     outputs: outputs.map(publicOutput),
     stage: readPipelineStage(j) || rest.stage || null,
     queuePosition: queuePosition(j),
   };
+  if (options.includeBrollPrompts && j.projectId && safe.graphicBroll
+      && Array.isArray(safe.graphicBroll.cards)) {
+    try {
+      safe.graphicBroll = attachRecordedBrollPrompts({
+        projectDir: PROJECT_STORE.projectDir(j.projectId),
+        graphicBroll: safe.graphicBroll,
+      });
+    } catch (_) {
+      safe.graphicBroll = {
+        ...safe.graphicBroll,
+        cards: safe.graphicBroll.cards.map((card) => ({
+          ...card,
+          prompt: { status: 'missing' },
+        })),
+      };
+    }
+  }
+  return safe;
 }
 
 function publicProject(project) {
@@ -2910,7 +2929,7 @@ const server = http.createServer(async (req, res) => {
           saveJob(job);
         } catch (_) {}
       }
-      return send(res, 200, { job: publicJob(job) });
+      return send(res, 200, { job: publicJob(job, { includeBrollPrompts: true }) });
     }
 
     // 句子清單：交給 auto-shot.js 算（--sentences），確保前台看到的句子
