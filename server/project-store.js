@@ -20,6 +20,11 @@ function extensionForMediaType(mediaType) {
   return MEDIA_TYPES[mediaType] && MEDIA_TYPES[mediaType].extension;
 }
 
+function isGenericReusableAsset(asset) {
+  return !!asset && ['image', 'video'].includes(asset.kind)
+    && asset.role !== 'prepared-phone-video';
+}
+
 const ISO_IMAGE_BRANDS = new Set(['avif', 'avis', 'heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1']);
 const ISO_VIDEO_BRANDS = new Set([
   'isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'avc1', 'mp41', 'mp42',
@@ -899,26 +904,39 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
     return { deletedProject: false, removedAssetIds: removed.map((item) => item.id) };
   }
 
-  function ingestAsset(projectId, sourceFile, { originalName, kind = 'image' }) {
+  function ingestAsset(projectId, sourceFile, {
+    originalName,
+    kind = 'image',
+    role = null,
+    origin = null,
+  }) {
     const project = get(projectId);
     if (!project) throw new Error('找不到影片專案');
     if (!['image', 'video', 'speaker-video'].includes(kind)) throw new Error('素材類型不合法');
+    if (role != null && role !== 'prepared-phone-video') throw new Error('素材角色不合法');
+    if (origin != null && origin !== 'chipk-simulator-capture') throw new Error('素材來源不合法');
+    if ((role || origin) && (kind !== 'video' || role !== 'prepared-phone-video'
+        || origin !== 'chipk-simulator-capture')) throw new Error('素材角色與來源不相容');
     const media = inspectMediaFile(sourceFile);
     if (!media) throw new Error('不支援或無法辨識的素材格式');
     const expectedKind = kind === 'speaker-video' ? 'video' : kind;
     if (media.kind !== expectedKind) throw new Error('素材內容與指定類型不一致');
     const sha256 = hashFile(sourceFile);
     const ext = media.extension;
-    let asset = project.assets.find((item) => item.sha256 === sha256 && item.kind === kind);
+    let asset = project.assets.find((item) => item.sha256 === sha256 && item.kind === kind
+      && (item.role || null) === role && (item.origin || null) === origin);
     if (!asset) {
       const relativePath = path.join('assets', `${sha256}${ext}`);
       const target = path.join(projectDir(projectId), relativePath);
       // Project asset 是 durable immutable source；不要與仍可能被 pipeline 覆寫的
       // public/ 或 job input 共用 inode。Run 期間允許暫時副本，清掉 Run 後只留這份。
       if (!fs.existsSync(target)) fs.copyFileSync(sourceFile, target);
+      const identityRole = role || kind;
       asset = {
-        id: `asset-${kind.replace(/[^a-z0-9]+/g, '-')}-${sha256.slice(0, 16)}`,
+        id: `asset-${identityRole.replace(/[^a-z0-9]+/g, '-')}-${sha256.slice(0, 16)}`,
         kind,
+        ...(role ? { role } : {}),
+        ...(origin ? { origin } : {}),
         mediaType: media.mediaType,
         originalName: safeOriginalName(originalName, `素材${ext}`),
         sha256,
@@ -1088,4 +1106,9 @@ function createProjectStore({ dataDir, nowISO, idFactory }) {
   };
 }
 
-module.exports = { createProjectStore, extensionForMediaType, inspectMediaFile };
+module.exports = {
+  createProjectStore,
+  extensionForMediaType,
+  inspectMediaFile,
+  isGenericReusableAsset,
+};

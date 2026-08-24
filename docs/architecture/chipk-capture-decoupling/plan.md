@@ -1,6 +1,6 @@
 # Marketing Video × ChipK Capture 解耦計畫
 
-Status: `IMPLEMENTED — PROVIDER v0.2.0 RELEASED AND PINNED`
+Status: `V1 IMPLEMENTED; V2 READY-TO-PLACE CONTRACT RELEASED; LIVE E2E NOT YET PROVEN`
 
 Last verified: `2026-08-21 Asia/Taipei`
 
@@ -11,11 +11,11 @@ Last verified: `2026-08-21 Asia/Taipei`
 Marketing Video 是能獨立完成影片的核心產品；ChipK Simulator Capture 是獨立、可選安裝、可替換的素材 provider。
 
 ```text
-Marketing Video = 影片工作流、素材編排與交付
+Marketing Video = 影片工作流、scene container／timeline placement 與交付
 ChipK Capture   = 可拔除的 Simulator 素材取得工具
 
 沒有 Capture：Marketing Video 仍可使用既有素材完成 E2E
-接上 Capture：Marketing Video 可要求 fresh PNG 或 raw recording
+接上 Capture：Marketing Video 可要求 fresh PNG、raw recording，或已完成手機內部呈現的 ready-to-place clip
 ```
 
 只保留兩個 repositories：
@@ -37,7 +37,13 @@ ChipK Capture   = 可拔除的 Simulator 素材取得工具
 - `ChipKCaptureCliAdapter`；只做 child process／JSON 轉譯，不 import Capture source。
 - caller-owned job-scoped acquisition directory，以及回傳素材的路徑、hash、MIME 與媒體規格驗證。
 - 將通過驗證的素材 ingest 為 Project Asset。
-- fallback、Zoom、HyperFrames、字幕、品牌、正式剪輯與交付 QA。
+- fallback、字幕、品牌、scene container、timeline placement、正式組裝與交付 QA。
+- 不對 ready-to-place 手機 clip 再做 crop／trim／loop／變速／內部運鏡。
+- Ready-to-place interval 是 `prepared-phone-video` 的 exclusive visual ownership。任何
+  `focusstock-shots` 或 `focusstock-broll` placement 只要與它有交集，就整段 suppress，
+  不以 JSX layer order 遮蓋、也不把任一素材裁短。未來 Focusstock visual branch 做
+  semantic merge 時必須呼叫 `preparedPhoneSuppressesFocusstockVisual(startSec, endSec)`；
+  只在端點相接的 placement 保留，half-open interval 有交集就整段排除。
 
 Marketing Video 不直接操作 `simctl`、OCR、Deep Link 或 Simulator gestures。
 
@@ -47,6 +53,7 @@ Marketing Video 不直接操作 `simctl`、OCR、Deep Link 或 Simulator gesture
 - ChipK Capture skill、route catalog、stock directory 與 route ranking。
 - Simulator／App preflight、session evidence、導航與 readiness checks。
 - Screenshot、raw recording、actions／manifest 與 acquisition evidence。
+- 手機內部的 focus、zoom、gesture emphasis、hold、safe framing，以及完整 ready-to-place MP4。
 - 自己的 unit、contract 與 Simulator E2E tests。
 
 Capture 不認識 Marketing Video 的 Project、Revision、Remotion、HyperFrames、HeyGen、fallback 或 final delivery，也不 import 或寫入 Marketing Video source。

@@ -68,7 +68,11 @@ Keep code, configuration, documentation, and sanitized fixtures in this reposito
 
 New user-visible video work follows `Project → Revision → Run`. Do not create a new Project merely to iterate V1 into V2. Runs may remain isolated in their own folders, but users should manage the Project and its revisions rather than runtime folders.
 
-Project Assets distinguish `image`, general B-Roll `video`, and `speaker-video`. Never infer the role from the file extension alone, and never reuse a `speaker-video` as B-Roll. The current automatic OCR／shot-planning path consumes images; storing and previewing B-Roll does not by itself prove that the clip is edited into the rendered output.
+Project Assets distinguish `image`, general B-Roll `video`, `speaker-video`, and provider-originated
+`prepared-phone-video`. Never infer the role from the file extension alone, and never reuse a
+`speaker-video` as B-Roll. General B-Roll being stored or previewed still does not prove timeline
+use. A `prepared-phone-video` is selected only after its placement compiles and is tied to Run render
+evidence; it is not an editable raw recording.
 
 ## Optional ChipK Capture provider
 
@@ -78,10 +82,46 @@ Simulator/session rules, and standalone tests belong in
 provider behavior. Do not copy provider implementation back into this repository.
 
 Marketing Video owns only the `MaterialAcquisitionPort`, CLI/JSON adapter, fallback policy,
-caller-owned job acquisition directory, result verification, Project Asset ingest, and downstream
-editing. It must not import provider source or directly operate `simctl`, Deep Links, OCR, sessions,
-or gestures. With no `materialAcquisition` intent, the existing provider-free flow must remain
-unchanged; `disable-capture` must not probe the provider.
+caller-owned job acquisition directory, result verification, Project Asset ingest, and the scene
+container／timeline placement. Capture owns every phone-local presentation decision, including
+focus, zoom, gesture emphasis, hold timing, safe framing, and preparation of the complete phone
+clip. Marketing Video must play that clip once at 1x without crop, trim, loop, speed change, or
+internal transform. It must not import provider source or directly operate `simctl`, Deep Links,
+OCR, sessions, or gestures.
+
+When a user simply asks to put a ChipK phone screen into a video, agents must default to the stable
+ready-to-place path: `require-capture` + operation `prepared-video` + a supported
+`presentation.profileId` + an explicit Marketing-owned placement. Do not default to acquire-only,
+raw recording, screenshot ingest, or a silent raw/existing-asset fallback. The first supported slice
+is `chipk.stock.main-force`, stock `3441`／`聯一光`, profile
+`chipk.stock-main-force-portrait.v1`, layout `focusstock-phone-portrait.v1`; use the exact job JSON
+in `docs/operator-runbook.md`. Creating the job only leaves a draft: agents must read the returned
+`job.id` and call `POST /api/jobs/:id/submit`, then verify the response is queued. Requests outside
+that declared slice, including `withAd: true`, fail closed rather than being silently improvised.
+A placement should normally use a unique phrase from the current script; the server resolves it with
+the same cleaner as subtitle alignment. Never calculate `startCharIdx` from the raw API body, and use
+`startSec` only when the user explicitly supplies the timing.
+A later Revision must reacquire this ready-to-place intent and placement; never carry the previous
+`prepared-phone-video` forward as general B-Roll.
+The current Focusstock slice may also select existing image assets owned by the same Project in the
+initial `POST /api/jobs`. Every selected image must resolve through the generated Focusstock shot
+plan and the same subtitle char timeline used by the renderer. Input bytes, hashes, resolved runs,
+actual renderer frame intervals, and each run's `rendered`／`suppressed_by_prepared` disposition are
+fail-closed evidence. Creating a
+ready-to-place draft and then uploading more images or generic video is unsupported; generic video
+B-Roll also remains unsupported until its real placement consumer is integrated.
+If a ready-to-place Run reuses or uploads a completed speaker MP4, preserve those exact bytes:
+`skipGenerate` and `noSpeed` are mandatory; only a newly generated speaker may use the normal speed path.
+When integrating another Focusstock visual branch, use
+`preparedPhoneSuppressesFocusstockVisual(startSec, endSec)`: any generic shot or graphic B-roll
+placement overlapping the prepared interval is suppressed in full. JSX stacking is not a conflict
+policy. A placement that only touches the prepared interval at an endpoint remains eligible; any
+half-open interval intersection suppresses the whole placement. Its producer, renderer consumer,
+and disposition evidence must be integrated together, with full render inspection as that branch's
+release gate.
+
+With no `materialAcquisition` intent, the existing provider-free flow must remain unchanged;
+`disable-capture` must not probe the provider.
 
 ## Safe validation
 

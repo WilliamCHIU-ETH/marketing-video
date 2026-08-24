@@ -113,6 +113,18 @@ if (GRAPHIC_BROLL_MODE === "card-v1" && TEMPLATE !== "default") {
   console.error("❌ card-v1 目前只支援 default / MarketingVideo 版型");
   process.exit(1);
 }
+const PREPARED_PHONE_ARG = process.argv.find((arg) => arg.startsWith("--prepared-phone="));
+const PREPARED_PHONE_MODE = PREPARED_PHONE_ARG
+  ? PREPARED_PHONE_ARG.slice("--prepared-phone=".length)
+  : "disabled";
+if (!["disabled", "ready-to-place"].includes(PREPARED_PHONE_MODE)) {
+  console.error(`❌ 不認得的 prepared phone mode：${PREPARED_PHONE_MODE}`);
+  process.exit(1);
+}
+if (PREPARED_PHONE_MODE === "ready-to-place" && TEMPLATE !== "focusstock") {
+  console.error("❌ ready-to-place phone material 目前只支援 focusstock 版型");
+  process.exit(1);
+}
 
 const WORKSPACE_STAGE_FILE = process.env.WORKSPACE_STAGE_FILE || null;
 const WORKSPACE_CANCEL_FILE = process.env.WORKSPACE_CANCEL_FILE || null;
@@ -306,6 +318,14 @@ function runBackground(cmd, label) {
       resolve({ ok: !err, label, cmd, stdout: stdout || "", stderr: stderr || "", err });
     });
   });
+}
+
+function stagedFocusstockImages() {
+  const pub = resolve(PROJECT_DIR, "public");
+  if (!existsSync(pub)) return [];
+  return require("fs").readdirSync(pub)
+    .filter((name) => /^shot\d{1,3}\.(?:png|jpe?g)$/i.test(name))
+    .sort();
 }
 
 /**
@@ -1196,6 +1216,13 @@ async function main() {
         "--out=src/graphic-broll.generated.json",
       ], { cwd: PROJECT_DIR, stdio: "inherit" });
     }
+    if (PREPARED_PHONE_MODE === "disabled") {
+      execFileSync(process.execPath, [
+        "scripts/prepared-phone-material-plan.js",
+        "--mode=disabled",
+        "--out=src/Focusstock/prepared-phone-material.generated.json",
+      ], { cwd: PROJECT_DIR, stdio: "inherit" });
+    }
     log("▶️  --render-only：沿用現有 public/ 與配圖計畫，直接 render");
     renderTemplate();
     return;
@@ -1308,6 +1335,9 @@ async function main() {
       const tail = r.stdout.trim().split("\n").slice(-6).join("\n");
       log("✅ 版面偵測完成（與生成平行）：\n" + tail);
     } else {
+      if (PREPARED_PHONE_MODE === "ready-to-place" && stagedFocusstockImages().length > 0) {
+        throw new Error("ready-to-place 圖片分析失敗，不能沿用舊 OCR／shot plan：" + r.err.message);
+      }
       log("⚠️ 版面偵測失敗，沿用既有 regions（影片照樣出）。");
       log("   若要聚焦/高亮對位正確，Mac 請先安裝一次：brew install tesseract tesseract-lang");
     }
@@ -1358,6 +1388,9 @@ function prepareShots() {
     try {
       run("npm run auto-shot");
     } catch (e) {
+      if (PREPARED_PHONE_MODE === "ready-to-place" && stagedFocusstockImages().length > 0) {
+        throw new Error("ready-to-place 圖片 auto-shot 失敗，無法建立可驗證 placement：" + e.message);
+      }
       log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
     }
   } else {
@@ -1387,6 +1420,16 @@ function prepareShots() {
     "--script=public/script.txt",
     "--subtitles=src/subtitles.json",
     "--out=src/graphic-broll.generated.json",
+  ], { cwd: PROJECT_DIR, stdio: "inherit" });
+  execFileSync(process.execPath, [
+    "scripts/prepared-phone-material-plan.js",
+    `--mode=${PREPARED_PHONE_MODE}`,
+    "--intent=public/prepared-phone-material.intent.json",
+    "--video=public/prepared-phone-material.mp4",
+    "--script=public/script.txt",
+    "--subtitles=src/subtitles.json",
+    "--video-meta=src/video-meta.json",
+    "--out=src/Focusstock/prepared-phone-material.generated.json",
   ], { cwd: PROJECT_DIR, stdio: "inherit" });
   reportStage("prepared");
 }

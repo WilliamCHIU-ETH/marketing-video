@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "fps": 30,
+  "mergeGapSec": 2,
+  "frameInterval": {
+    "start": "round-start-sec-times-fps",
+    "duration": "max-one-round-duration-sec-times-fps",
+    "semantics": "half-open"
+  }
+}

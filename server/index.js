@@ -31,10 +31,40 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
-const { createProjectStore, extensionForMediaType, inspectMediaFile } = require('./project-store');
+const {
+  createProjectStore,
+  extensionForMediaType,
+  inspectMediaFile,
+  isGenericReusableAsset,
+} = require('./project-store');
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
-const { normalizeMaterialAcquisitionIntent } = require('./material-acquisition');
-const { prepareJobMaterialAcquisition } = require('./material-acquisition-runtime');
+const {
+  normalizeMaterialAcquisitionIntent,
+  resolvePreparedVideoPlacement,
+} = require('./material-acquisition');
+const {
+  PREPARED_PLAN,
+  REVIEW_EDIT_TRANSACTION,
+  beginPreparedPhoneReviewEditTransaction,
+  buildFocusstockVisualConflictEvidence,
+  buildFocusstockVisualTimelinePlacements,
+  buildPreparedPhoneTimelinePlacement,
+  compileReviewedFocusstockVisualEvidence,
+  compactPreparedPhoneAcquisition,
+  commitPreparedPhoneMaterialSelection,
+  finalizePreparedPhoneMaterial,
+  finalizePreparedPhoneReviewEditTransaction,
+  mergePreparedPhoneTimelineChannels,
+  prepareJobMaterialAcquisition,
+  recordPreparedPhoneReviewEditCommitIntent,
+  recoverPreparedPhoneReviewEditTransaction,
+  rollbackPreparedPhoneMaterialSelection,
+  selectPreparedPhoneGraphicBroll,
+  validateFocusstockVisualTimelinePlacements,
+  validatePreparedFocusstockAssetRefs,
+  validatePreparedPhonePlacementMath,
+  validatePreparedPhoneProjectAsset,
+} = require('./material-acquisition-runtime');
 const {
   buildRenderInputManifest,
   verifyDeclaredFileFingerprints,
@@ -205,6 +235,10 @@ const TEMPLATES = {
 const WORKFLOW_MODES = new Set(['manual-assets', 'auto-broll']);
 const CONTROL_POLICIES = new Set(['auto', 'pause-before-render']);
 const GRAPHIC_BROLL_PLAN = 'src/graphic-broll.generated.json';
+
+function preparedPhoneMode(job) {
+  return job.materialAcquisition?.operation === 'prepared-video' ? 'ready-to-place' : 'disabled';
+}
 
 function compositionIdFor(job) {
   if (job.template === 'default') return 'MarketingVideo';
@@ -394,7 +428,7 @@ function ownedJobDir(id) {
 
 function ownedJobPayloadDir(id, subdir) {
   const dir = ownedJobDir(id);
-  if (!dir || !/^(input|state|thumbs|out|pipeline)$/.test(subdir)) return null;
+  if (!dir || !/^(input|state|thumbs|out|pipeline|acquisition)$/.test(subdir)) return null;
   const target = path.join(dir, subdir);
   if (!fs.existsSync(target)) return target;
   try {
@@ -406,9 +440,34 @@ function ownedJobPayloadDir(id, subdir) {
   }
 }
 
+function revisionOptionsFromJob(job) {
+  return {
+    skipGenerate: !!job.skipGenerate,
+    noSpeed: !!job.noSpeed,
+    withAd: !!job.withAd,
+    autoApprove: !!job.autoApprove,
+    workflowMode: job.workflowMode || 'manual-assets',
+    controlPolicy: job.controlPolicy || 'pause-before-render',
+    graphicBrollMode: job.graphicBrollMode || 'disabled',
+  };
+}
+
+function preparedReviewRevision(job) {
+  const revision = job.projectId && job.revisionId
+    ? PROJECT_STORE.getRevision(job.projectId, job.revisionId) : null;
+  if (!revision || revision.projectId !== job.projectId
+      || revision.jobId !== job.id || revision.runId !== job.id) {
+    const error = new Error('review edit 的 Project／Revision ownership 不一致');
+    error.code = 'review_edit_transaction_ambiguous';
+    throw error;
+  }
+  return revision;
+}
+
 function revisionNeedsJobSync(job) {
   if (!job.projectId || !job.revisionId) return false;
-  if (!['review', 'done', 'failed', 'cancelled', 'detached-done'].includes(job.status)) return false;
+  if (!['draft', 'queued', 'review', 'done', 'failed', 'cancelled', 'detached-done']
+    .includes(job.status)) return false;
   let revision;
   try { revision = PROJECT_STORE.getRevision(job.projectId, job.revisionId); }
   catch (_) { return false; }
@@ -423,6 +482,7 @@ function revisionNeedsJobSync(job) {
     status: job.status,
     owner: job.owner,
     title: job.title,
+    options: revisionOptionsFromJob(job),
     assetRefs: job.assetRefs || [],
     files: job.files || [],
     outputs: job.outputs || [],
@@ -442,6 +502,7 @@ function revisionNeedsJobSync(job) {
       renderInputManifest: job.renderInputManifest || null,
       renderInputManifestSha256: job.renderInputManifestSha256 || null,
       renderEvidence: job.renderEvidence || null,
+      focusstockVisualInputs: job.focusstockVisualInputs || [],
     } : {}),
     ...(job.materialAcquisition ? { materialAcquisition: job.materialAcquisition } : {}),
     ...(job.materialAcquisitionResult
@@ -461,6 +522,7 @@ function revisionNeedsJobSync(job) {
 function loadJobs() {
   const out = [];
   const recovered = [];
+  const reviewTransactions = [];
   for (const entry of fs.readdirSync(JOBS_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
     const id = entry.name;
@@ -468,6 +530,40 @@ function loadJobs() {
       const j = JSON.parse(fs.readFileSync(jobFile(id), 'utf-8'));
       if (j.id !== id) continue;
       let recoveryChanged = false;
+      try {
+        if (fs.existsSync(path.join(jobDir(j.id), REVIEW_EDIT_TRANSACTION))) {
+          const outcome = recoverPreparedPhoneReviewEditTransaction({
+            job: j,
+            jobDirectory: jobDir(j.id),
+            revision: preparedReviewRevision(j),
+          });
+          const committed = outcome.action === 'commit_confirmed';
+          j.status = committed ? 'approved' : 'review';
+          j.stage = committed ? 'ready-to-render' : 'awaiting-audit';
+          j.error = committed ? null
+            : '上次人工修改在提交完成前中止；已恢復修改前版本，可用同一 Run 重新確認。';
+          j.failedStage = null;
+          reviewTransactions.push({
+            job: j,
+            transactionId: outcome.transactionId,
+            expected: committed ? 'target' : 'baseline',
+          });
+          recoveryChanged = true;
+        }
+      } catch (error) {
+        if (String(error.code || '').startsWith('review_edit_transaction_')) {
+          // Unknown plan/evidence bytes are intentionally not synchronized to the Revision. Keep
+          // the marker and expose a fail-closed in-memory state for explicit recovery.
+          j.status = 'failed';
+          j.stage = 'rendering';
+          j.failedStage = 'rendering';
+          j.error = `人工修改 transaction 無法安全判定：${error.message}`;
+          j.reviewEditRecoveryBlocked = true;
+          out.push(j);
+          continue;
+        }
+        throw error;
+      }
       // 伺服器上次是在跑到一半被關掉的。
       // run.js 是 detached 的，所以它很可能還活著 —— 那就不是「中斷」，
       // 是「在背景繼續跑」。標成失敗會讓人以為 HeyGen 點數白花了（其實沒有）。
@@ -503,6 +599,7 @@ function loadJobs() {
   return {
     jobs: out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
     recovered,
+    reviewTransactions,
   };
 }
 
@@ -511,16 +608,26 @@ let JOBS = startupJobs.jobs;
 // 一般 restart 不刷新 Project；只有 detached recovery 改變狀態，或偵測到 job-first
 // 半完成 transition 時，才同步回 Revision／Project summary。
 startupJobs.recovered.forEach(saveJob);
+startupJobs.reviewTransactions.forEach(({ job, transactionId, expected }) => {
+  finalizePreparedPhoneReviewEditTransaction({
+    job,
+    jobDirectory: jobDir(job.id),
+    revision: preparedReviewRevision(job),
+    transactionId,
+    expected,
+  });
+});
 
 function saveJob(j) {
   writeJobRecord(j);
   if (j.projectId && j.revisionId) {
-    PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
+    const updatedRevision = PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
       jobId: j.id,
       runId: j.id,
       status: j.status,
       owner: j.owner,
       title: j.title,
+      options: revisionOptionsFromJob(j),
       assetRefs: j.assetRefs || [],
       files: j.files || [],
       outputs: j.outputs || [],
@@ -540,11 +647,13 @@ function saveJob(j) {
         renderInputManifest: j.renderInputManifest || null,
         renderInputManifestSha256: j.renderInputManifestSha256 || null,
         renderEvidence: j.renderEvidence || null,
+        focusstockVisualInputs: j.focusstockVisualInputs || [],
       } : {}),
       ...(j.materialAcquisition ? { materialAcquisition: j.materialAcquisition } : {}),
       ...(j.materialAcquisitionResult
         ? { materialAcquisitionResult: j.materialAcquisitionResult } : {}),
     });
+    if (!updatedRevision) throw new Error('Project／Revision job state 無法同步');
   }
 }
 
@@ -1190,6 +1299,7 @@ function clearWorkspaceInputs() {
   }
   // 標注檔要指名清掉。不能用 *.json 一律清 —— deeplinks.json 是投廣品牌素材。
   rmrf(path.join(pub, 'annotations.json'));
+  rmrf(path.join(pub, 'prepared-phone-material.intent.json'));
 }
 
 function snapshotWorkspace(job) {
@@ -1247,6 +1357,77 @@ function validateGraphicBrollPlanForJob(job, baseDir) {
   return { plan, planSha256: fileSha256(file) };
 }
 
+function validatePreparedPhonePlanIdentityForJob(job, baseDir) {
+  const file = path.join(baseDir, ...PREPARED_PLAN.split('/'));
+  let plan;
+  try { plan = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { throw new Error(`prepared phone plan 無法解析：${error.message}`); }
+  const expectedMode = preparedPhoneMode(job);
+  if (!plan || plan.schemaVersion !== 1 || plan.mode !== expectedMode
+      || plan.template !== 'focusstock' || plan.timelineBasis !== 'focusstock-main-v1')
+    throw new Error(`prepared phone plan contract 不符（預期 ${expectedMode}）`);
+  if (expectedMode === 'disabled') {
+    if (plan.source !== null || plan.presentation !== null || plan.placement !== null
+        || plan.visualOwnership !== null)
+      throw new Error('disabled prepared phone plan 必須是空計畫');
+    return { plan, planSha256: fileSha256(file) };
+  }
+  const result = job.materialAcquisitionResult;
+  const source = plan.source;
+  const placement = plan.placement;
+  const ownership = plan.visualOwnership;
+  const pendingEvidence = result?.placementStatus === 'compiled_pending_evidence'
+    && result.automaticTimelineUse === false && !result.preparedArtifact?.assetRef;
+  const committed = result?.placementStatus === 'compiled'
+    && result.automaticTimelineUse === true && !!result.preparedArtifact?.assetRef;
+  if (job.template !== 'focusstock' || !result || (!pendingEvidence && !committed)
+      || result.compiledPlanFile !== PREPARED_PLAN
+      || result.compiledPlanSha256 !== fileSha256(file)
+      || plan.contractVersion !== 2 || plan.requestId !== result.requestId
+      || plan.presentation?.profileId !== job.materialAcquisition.presentation?.profileId
+      || !ownership || ownership.owner !== 'prepared-phone-video'
+      || ownership.conflictPolicy !== 'suppress-entire-overlapping-placement'
+      || JSON.stringify(ownership.suppressedChannels)
+        !== JSON.stringify(['focusstock-shots', 'focusstock-broll'])
+      || !source || source.fileName !== 'prepared-phone-material.mp4'
+      || source.artifactRole !== 'prepared-video'
+      || source.sha256 !== result.preparedArtifact.sha256
+      || source.size !== result.preparedArtifact.size
+      || !placement || placement.layoutId !== job.materialAcquisition.placement?.layoutId
+      || !Number.isFinite(placement.startSec) || placement.startSec < 0
+      || !Number.isFinite(placement.endSec) || placement.endSec <= placement.startSec
+      || !Number.isInteger(placement.durationInFrames) || placement.durationInFrames < 1
+      || placement.playbackRate !== 1 || placement.muted !== true
+      || placement.objectFit !== 'contain' || placement.crop !== 'none'
+      || placement.trim !== 'none' || placement.loop !== false)
+    throw new Error('ready-to-place prepared phone plan 與 Run evidence 不一致');
+  const video = path.join(baseDir, 'public', source.fileName);
+  if (!fs.existsSync(video) || fileSha256(video) !== source.sha256)
+    throw new Error('prepared phone plan 指向的 MP4 bytes 已改變');
+  validatePreparedPhonePlacementMath(plan, video);
+  return { plan, planSha256: fileSha256(file) };
+}
+
+function validatePreparedPhonePlanForJob(job, baseDir) {
+  const prepared = validatePreparedPhonePlanIdentityForJob(job, baseDir);
+  if (prepared.plan.mode !== 'ready-to-place') return prepared;
+  const result = job.materialAcquisitionResult;
+  const visualEvidence = buildFocusstockVisualConflictEvidence({
+    job, workspaceRoot: baseDir, preparedPlan: prepared.plan,
+  });
+  if (!SHA256_HEX.test(result.focusstockVisualEvidenceSha256 || '')
+      || visualEvidence.sha256 !== result.focusstockVisualEvidenceSha256
+      || JSON.stringify(visualEvidence.evidence)
+        !== JSON.stringify(result.focusstockVisualEvidence)) {
+    throw new Error('ready-to-place Focusstock visual conflict evidence 已改變');
+  }
+  return {
+    ...prepared,
+    visualEvidence: visualEvidence.evidence,
+    visualEvidenceSha256: visualEvidence.sha256,
+  };
+}
+
 function buildJobRenderInput(job, artifactRoot) {
   return buildRenderInputManifest({
     artifactRoot,
@@ -1259,49 +1440,205 @@ function buildJobRenderInput(job, artifactRoot) {
     withAd: !!job.withAd,
     workflowMode: job.workflowMode || 'manual-assets',
     graphicBrollMode: job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled',
+    preparedPhoneMode: preparedPhoneMode(job),
   });
 }
 
-function captureAutomationEvidence(job) {
-  const state = path.join(jobDir(job.id), 'state');
-  const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
-  job.graphicBroll = {
-    schemaVersion: plan.schemaVersion,
-    mode: plan.mode,
-    style: plan.style,
-    sourceScriptSha256: plan.sourceScriptSha256,
-    planSha256,
-    cards: plan.cards,
+function captureAutomationEvidence(job, preparedCandidate = null, options = {}) {
+  const recompileReviewedVisualEvidence = options.recompileReviewedVisualEvidence === true;
+  const reviewEditTransaction = options.reviewEditTransaction || null;
+  const previous = {
+    assetRefs: [...(job.assetRefs || [])],
+    materialAcquisitionResult: JSON.parse(JSON.stringify(job.materialAcquisitionResult || null)),
+    graphicBroll: job.graphicBroll,
+    timelinePlacements: job.timelinePlacements,
+    renderInputManifest: job.renderInputManifest,
+    renderInputManifestSha256: job.renderInputManifestSha256,
+    pendingEdits: job.pendingEdits,
   };
-  job.timelinePlacements = plan.cards.map((card) => ({
-    cardId: card.id,
-    startCharIdx: card.startCharIdx,
-    endCharIdx: card.endCharIdx,
-    startSec: card.resolvedPlacement.startSec,
-    endSec: card.resolvedPlacement.endSec,
-  }));
-  if (job.workflowMode === 'auto-broll') {
-    const renderInput = buildJobRenderInput(job, state);
-    job.renderInputManifest = renderInput.manifest;
-    job.renderInputManifestSha256 = renderInput.sha256;
-  } else {
-    // Legacy manual review 會在準備後修改 shot plan；M02A 不替它宣稱一份 pre-edit
-    // manifest 是實際 render input。Automation-first Run 才使用 immutable manifest gate。
-    job.renderInputManifest = null;
-    job.renderInputManifestSha256 = null;
+  try {
+    if ((recompileReviewedVisualEvidence && preparedCandidate)
+        || Boolean(reviewEditTransaction) !== recompileReviewedVisualEvidence) {
+      throw new Error('reviewed visual evidence transaction contract 不完整');
+    }
+    const state = path.join(jobDir(job.id), 'state');
+    const { plan, planSha256 } = validateGraphicBrollPlanForJob(job, state);
+    const generatedGraphicBroll = {
+      schemaVersion: plan.schemaVersion,
+      mode: plan.mode,
+      style: plan.style,
+      sourceScriptSha256: plan.sourceScriptSha256,
+      planSha256,
+      cards: plan.cards,
+    };
+    let timelinePlacements = plan.cards.map((card) => ({
+      cardId: card.id,
+      startCharIdx: card.startCharIdx,
+      endCharIdx: card.endCharIdx,
+      startSec: card.resolvedPlacement.startSec,
+      endSec: card.resolvedPlacement.endSec,
+    }));
+    let prepared = recompileReviewedVisualEvidence
+      ? validatePreparedPhonePlanIdentityForJob(job, state)
+      : validatePreparedPhonePlanForJob(job, state);
+    if (recompileReviewedVisualEvidence && prepared.plan.mode !== 'ready-to-place')
+      throw new Error('只有 ready-to-place review 可重新編譯 visual evidence');
+    if (prepared.plan.mode === 'ready-to-place') {
+      validatePreparedFocusstockAssetRefs({
+        job, projectStore: PROJECT_STORE, workspaceRoot: state,
+      });
+      if (recompileReviewedVisualEvidence) {
+        const visualEvidence = compileReviewedFocusstockVisualEvidence({
+          job, workspaceRoot: state, preparedPlan: prepared.plan,
+        });
+        job.materialAcquisitionResult.focusstockVisualEvidence = visualEvidence.evidence;
+        job.materialAcquisitionResult.focusstockVisualEvidenceSha256 = visualEvidence.sha256;
+        prepared = {
+          ...prepared,
+          visualEvidence: visualEvidence.evidence,
+          visualEvidenceSha256: visualEvidence.sha256,
+        };
+      }
+      const assetRef = preparedCandidate?.asset?.id
+        || job.materialAcquisitionResult?.preparedArtifact?.assetRef;
+      if (!assetRef) throw new Error('prepared phone Project Asset 尚未通過候選 ingest');
+      timelinePlacements = mergePreparedPhoneTimelineChannels({
+        existingPlacements: job.timelinePlacements || [],
+        focusstockVisualPlacements: buildFocusstockVisualTimelinePlacements(
+          prepared.visualEvidence, prepared.visualEvidenceSha256),
+        preparedPlacement: buildPreparedPhoneTimelinePlacement(job, prepared.plan, assetRef),
+      });
+    }
+    const graphicBroll = prepared.plan.mode === 'ready-to-place'
+      ? selectPreparedPhoneGraphicBroll(job.graphicBroll, generatedGraphicBroll)
+      : generatedGraphicBroll;
+    let renderInputManifest = null;
+    let renderInputManifestSha256 = null;
+    if (job.workflowMode === 'auto-broll' || preparedPhoneMode(job) === 'ready-to-place') {
+      const renderInput = buildJobRenderInput(job, state);
+      renderInputManifest = renderInput.manifest;
+      renderInputManifestSha256 = renderInput.sha256;
+    }
+    job.graphicBroll = graphicBroll;
+    job.timelinePlacements = timelinePlacements;
+    job.renderInputManifest = renderInputManifest;
+    job.renderInputManifestSha256 = renderInputManifestSha256;
+    if (preparedCandidate?.asset) {
+      const committedPlacement = commitPreparedPhoneMaterialSelection({
+        job, asset: preparedCandidate.asset, plan: prepared.plan, projectStore: PROJECT_STORE,
+      });
+      job.timelinePlacements[job.timelinePlacements.length - 1] = committedPlacement;
+    }
+    if (reviewEditTransaction) {
+      recordPreparedPhoneReviewEditCommitIntent({
+        job,
+        jobDirectory: jobDir(job.id),
+        transactionId: reviewEditTransaction.transactionId,
+      });
+    }
+    saveJob(job);
+  } catch (error) {
+    if (preparedCandidate?.asset) rollbackPreparedPhoneMaterialSelection(job);
+    job.assetRefs = previous.assetRefs;
+    job.materialAcquisitionResult = previous.materialAcquisitionResult;
+    job.graphicBroll = previous.graphicBroll;
+    job.timelinePlacements = previous.timelinePlacements;
+    job.renderInputManifest = previous.renderInputManifest;
+    job.renderInputManifestSha256 = previous.renderInputManifestSha256;
+    job.pendingEdits = previous.pendingEdits;
+    try { saveJob(job); } catch (_) {}
+    throw error;
+  }
+}
+
+function validateReviewedPreparedPlanBaseline(job, state) {
+  validatePreparedFocusstockAssetRefs({
+    job, projectStore: PROJECT_STORE, workspaceRoot: state,
+  });
+  validatePreparedPhoneProjectAsset({ job, projectStore: PROJECT_STORE });
+  if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
+    throw new Error('這個 Run 缺少可追溯的 render input manifest');
+  const { planSha256 } = validateGraphicBrollPlanForJob(job, state);
+  if (planSha256 !== job.graphicBroll?.planSha256)
+    throw new Error('review 前的 graphic B-Roll plan evidence 已改變');
+  const prepared = validatePreparedPhonePlanForJob(job, state);
+  validateFocusstockVisualTimelinePlacements(
+    job, prepared.visualEvidence, prepared.visualEvidenceSha256);
+  const current = buildJobRenderInput(job, state);
+  if (current.sha256 !== job.renderInputManifestSha256
+      || JSON.stringify(current.manifest) !== JSON.stringify(job.renderInputManifest)) {
+    throw new Error('review 前的 render inputs 與 manifest 不一致');
+  }
+  return prepared;
+}
+
+function settlePreparedReviewEditFailure(job, transaction, originalError) {
+  try {
+    const outcome = recoverPreparedPhoneReviewEditTransaction({
+      job,
+      jobDirectory: jobDir(job.id),
+      revision: preparedReviewRevision(job),
+    });
+    if (!outcome || outcome.transactionId !== transaction.transactionId)
+      throw new Error('找不到原 review edit transaction');
+    if (outcome.action === 'commit_confirmed') {
+      finalizePreparedPhoneReviewEditTransaction({
+        job,
+        jobDirectory: jobDir(job.id),
+        revision: preparedReviewRevision(job),
+        transactionId: transaction.transactionId,
+        expected: 'target',
+      });
+      return 'commit_confirmed';
+    }
+    job.status = 'review';
+    job.stage = 'awaiting-audit';
+    job.failedStage = null;
+    job.error = `人工修改未套用，已恢復修改前版本：${originalError.message}`;
+    saveJob(job);
+    finalizePreparedPhoneReviewEditTransaction({
+      job,
+      jobDirectory: jobDir(job.id),
+      revision: preparedReviewRevision(job),
+      transactionId: transaction.transactionId,
+      expected: 'baseline',
+    });
+    appendLogBestEffort(job, `\n⚠️ ${job.error}\n`);
+    return 'baseline_restored';
+  } catch (recoveryError) {
+    const error = new Error(`人工修改 transaction 尚未安全收斂：${originalError.message}`
+      + `；recovery：${recoveryError.message}`);
+    error.code = 'REVIEW_EDIT_RECOVERY_REQUIRED';
+    throw error;
   }
 }
 
 function verifyRestoredRenderInput(job) {
-  if (job.workflowMode !== 'auto-broll') return null;
+  if (job.workflowMode !== 'auto-broll' && preparedPhoneMode(job) !== 'ready-to-place') return null;
+  const state = path.join(jobDir(job.id), 'state');
+  if (preparedPhoneMode(job) === 'ready-to-place') {
+    validatePreparedFocusstockAssetRefs({
+      job, projectStore: PROJECT_STORE, workspaceRoot: state,
+    });
+    validatePreparedPhoneProjectAsset({ job, projectStore: PROJECT_STORE });
+  }
   if (!SHA256_HEX.test(job.renderInputManifestSha256 || '') || !job.renderInputManifest)
     throw new Error('這個 Run 缺少可追溯的 render input manifest');
-  const state = path.join(jobDir(job.id), 'state');
   const { planSha256: statePlanSha256 } = validateGraphicBrollPlanForJob(job, state);
   const { planSha256: restoredPlanSha256 } = validateGraphicBrollPlanForJob(job, ROOT);
   if (statePlanSha256 !== job.graphicBroll?.planSha256
       || restoredPlanSha256 !== statePlanSha256)
     throw new Error('render retry 的 graphic B-Roll plan 已改變，拒絕重新生成或靜默替換');
+  const statePrepared = validatePreparedPhonePlanForJob(job, state);
+  const restoredPrepared = validatePreparedPhonePlanForJob(job, ROOT);
+  const { planSha256: statePreparedSha256 } = statePrepared;
+  const { planSha256: restoredPreparedSha256 } = restoredPrepared;
+  if (statePreparedSha256 !== restoredPreparedSha256)
+    throw new Error('render retry 的 prepared phone plan 已改變');
+  if (preparedPhoneMode(job) === 'ready-to-place') {
+    validateFocusstockVisualTimelinePlacements(
+      job, statePrepared.visualEvidence, statePrepared.visualEvidenceSha256);
+  }
   // Rebuild the same two-root identity as prepare: immutable Run artifacts + the actual checkout.
   // This catches both state tampering and renderer/package-lock drift without ever snapshotting code.
   const current = buildJobRenderInput(job, state);
@@ -1336,9 +1673,29 @@ function captureProjectAssets(job) {
     const file = path.join(publicDir, name);
     if (!fs.statSync(file).isFile() || fs.statSync(file).size === 0) continue;
     const asset = PROJECT_STORE.ingestAsset(job.projectId, file, { originalName: name, kind });
-    if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+    if (kind === 'speaker-video' && preparedPhoneMode(job) === 'ready-to-place') {
+      replaceReadyToPlaceSpeakerRef(job, PROJECT_STORE.get(job.projectId), asset);
+    } else if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
   }
   saveJob(job);
+}
+
+/**
+ * `public/heygen.mp4` is the authoritative ready-to-place speaker input. Replacing those bytes
+ * changes the selected speaker, but it does not delete historical Project Assets. Remove every
+ * superseded speaker ref first, then select the one asset whose bytes now back the Render input.
+ */
+function replaceReadyToPlaceSpeakerRef(job, project, authoritativeAsset) {
+  if (preparedPhoneMode(job) !== 'ready-to-place'
+      || !project || authoritativeAsset?.kind !== 'speaker-video'
+      || !(project.assets || []).some((asset) => asset.id === authoritativeAsset.id
+        && asset.kind === 'speaker-video')) {
+    throw new Error('ready-to-place authoritative speaker identity is invalid');
+  }
+  const speakerRefs = new Set((project.assets || [])
+    .filter((asset) => asset.kind === 'speaker-video').map((asset) => asset.id));
+  job.assetRefs = (job.assetRefs || []).filter((assetRef) => !speakerRefs.has(assetRef));
+  job.assetRefs.push(authoritativeAsset.id);
 }
 
 // ── 執行 run.js ───────────────────────────
@@ -1630,7 +1987,7 @@ function runPipeline(job, args) {
     const pipelineEntry = TEST_PIPELINE_ENTRY || 'run.js';
     // Persist the job-specific token before spawn. It is only intent until run.js writes the same
     // token into the workspace-owner marker after acquiring .run.lock.
-    writeJobRecord(job);
+    saveJob(job);
     appendLog(job, `\n$ node ${path.basename(pipelineEntry)} ${args.join(' ')}\n`);
     const logPath = path.join(jobDir(job.id), 'log.txt');
     ensureDir(path.dirname(logPath));
@@ -2074,6 +2431,17 @@ function tick() {
         }
         return;
       }
+      if (e.code === 'REVIEW_EDIT_RECOVERY_REQUIRED') {
+        // Do not guess which evidence is durable and do not synchronize either side. The journal
+        // remains the only authority for the next restart/retry recovery pass.
+        job.status = 'failed';
+        job.stage = 'rendering';
+        job.failedStage = 'rendering';
+        job.error = e.message;
+        job.reviewEditRecoveryBlocked = true;
+        appendLogBestEffort(job, `\n❌ ${job.error}\n`);
+        return;
+      }
       const failedStage = job.status === 'rendering' ? 'rendering' : 'preparing';
       job.status = 'failed';
       job.stage = failedStage;
@@ -2125,15 +2493,24 @@ async function doPrepare(job) {
 
   const args = [`--template=${job.template}`, '--stop-before-render'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
+  args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
   if (job.brand) args.push(`--brand=${job.brand}`);
   if (job.skipGenerate) args.push('--skip-generate');
   if (job.noSpeed) args.push('--no-speed');
   if (job.withAd) args.push('--with-ad');
+  let preparedCandidate = null;
   try {
     await runPipeline(job, args);
+    preparedCandidate = finalizePreparedPhoneMaterial({
+      job,
+      jobDirectory: jobDir(job.id),
+      workspaceRoot: ROOT,
+      publicDirectory: WORKSPACE_PUBLIC_DIR,
+      projectStore: PROJECT_STORE,
+    });
     captureProjectAssets(job);
     snapshotWorkspace(job);
-    captureAutomationEvidence(job);
+    captureAutomationEvidence(job, preparedCandidate);
     job.planView = buildPlanView(job);
   } catch (error) {
     capturePaidSpeakerAfterFailure({
@@ -2148,7 +2525,7 @@ async function doPrepare(job) {
       // plan is never treated as valid evidence, but the snapshot remains auditable/recoverable.
       try { captureProjectAssets(job); } catch (_) {}
       try { snapshotWorkspace(job); } catch (_) {}
-      try { captureAutomationEvidence(job); } catch (_) {}
+      try { captureAutomationEvidence(job, preparedCandidate); } catch (_) {}
     }
     throw error;
   }
@@ -2171,21 +2548,65 @@ async function doPrepare(job) {
 async function doRender(job) {
   job.status = 'rendering';
   job.stage = 'rendering';
-  saveJob(job);
 
-  restoreWorkspace(job);
   if (job.pendingEdits && job.pendingEdits.length) {
-    applyPlanEdits(job, job.pendingEdits);
+    const recompileReviewedVisualEvidence = preparedPhoneMode(job) === 'ready-to-place';
+    let reviewEditTransaction = null;
+    if (recompileReviewedVisualEvidence) {
+      // Prove that the immutable snapshot and every recorded identity were still canonical before
+      // applying the user's explicit review edits. Only the synchronously edited visual plan may
+      // then receive replacement derived evidence.
+      validateReviewedPreparedPlanBaseline(job, path.join(jobDir(job.id), 'state'));
+      reviewEditTransaction = beginPreparedPhoneReviewEditTransaction({
+        job,
+        jobDirectory: jobDir(job.id),
+        revision: preparedReviewRevision(job),
+      });
+    }
+    try {
+      applyPlanEdits(job, job.pendingEdits);
+      // The review UI edits the immutable Run snapshot. Rebuild every derived placement and render
+      // input identity from those reviewed bytes before restoring them into the shared renderer.
+      // Otherwise the supported pause-before-render flow compares a new plan to its old manifest and
+      // fails closed even though the edit itself was valid.
+      captureAutomationEvidence(job, null, {
+        recompileReviewedVisualEvidence,
+        reviewEditTransaction,
+      });
+      if (reviewEditTransaction) {
+        // Once the target evidence is durable, leave a restartable handoff before removing the
+        // journal. The next durable rendering state is written by runPipeline together with its
+        // workspace intent token.
+        job.status = 'approved';
+        job.stage = 'ready-to-render';
+        saveJob(job);
+        finalizePreparedPhoneReviewEditTransaction({
+          job,
+          jobDirectory: jobDir(job.id),
+          revision: preparedReviewRevision(job),
+          transactionId: reviewEditTransaction.transactionId,
+          expected: 'target',
+        });
+      }
+    } catch (error) {
+      if (!reviewEditTransaction) throw error;
+      const outcome = settlePreparedReviewEditFailure(job, reviewEditTransaction, error);
+      if (outcome === 'baseline_restored') return;
+    }
     appendLog(job, `\n✏️  已套用 ${job.corrections ? job.corrections.length : 0} 項人工修正\n`);
   }
+  restoreWorkspace(job);
   verifyRestoredRenderInput(job);
   if (job.cancelRequestedAt) throw cancelledRunError(job);
 
   const args = [`--template=${job.template}`, '--render-only'];
   args.push(`--graphic-broll=${job.workflowMode === 'auto-broll' ? 'card-v1' : 'disabled'}`);
+  args.push(`--prepared-phone=${preparedPhoneMode(job)}`);
   if (job.withAd) args.push('--with-ad');
   let evidence;
   try {
+    job.status = 'rendering';
+    job.stage = 'rendering';
     evidence = await runPipeline(job, args);
   } catch (error) {
     if (error.code === 'RUN_CANCELLED' && error.pipelineEvidence) {
@@ -2698,11 +3119,26 @@ const server = http.createServer(async (req, res) => {
       if (!CONTROL_POLICIES.has(controlPolicy))
         return send(res, 400, { error: 'controlPolicy 不合法' });
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
+      if (materialAcquisition?.operation === 'prepared-video' && body.template !== 'focusstock')
+        return send(res, 400, { error: 'ready-to-place 手機素材目前只支援焦點股日報' });
+      if (materialAcquisition?.operation === 'prepared-video' && !!body.withAd)
+        return send(res, 400, { error: 'ready-to-place 手機素材目前不支援 Focusstock 廣告版' });
       if (workflowMode === 'auto-broll' && body.template !== 'default')
         return send(res, 400, { error: '自動圖卡 V1 目前只支援投廣模板（MarketingVideo）' });
       if (workflowMode === 'auto-broll' && materialAcquisition)
         return send(res, 400, { error: '自動圖卡流程只接受講稿與 Avatar MP4，不接受額外素材擷取' });
       if (!body.body || !body.body.trim()) return send(res, 400, { error: '腳本是空的' });
+      const placementScriptText = buildScript({
+        voice: body.voice, title: body.title, body: body.body,
+      });
+      if (materialAcquisition?.operation === 'prepared-video') {
+        try {
+          materialAcquisition = resolvePreparedVideoPlacement(
+            materialAcquisition, placementScriptText);
+        } catch (error) {
+          return send(res, 400, { error: error.message });
+        }
+      }
       const parentRevisionId = body.parentRevisionId == null || body.parentRevisionId === ''
         ? null : String(body.parentRevisionId);
       if (parentRevisionId && !body.projectId)
@@ -2716,7 +3152,8 @@ const server = http.createServer(async (req, res) => {
       const title = String(body.title || '').split('\n')
         .map((l) => (tcfg.wrap ? l.trim() : l.trim().slice(0, tcfg.per))).filter(Boolean)
         .slice(0, tcfg.lines).join('\n');
-      const reuseAssetIds = Array.isArray(body.reuseAssetIds)
+      const scriptText = buildScript({ voice: body.voice, title, body: body.body });
+      let reuseAssetIds = Array.isArray(body.reuseAssetIds)
         ? [...new Set(body.reuseAssetIds.map(String))] : [];
       const reuseSpeakerAssetId = body.reuseSpeakerAssetId == null || body.reuseSpeakerAssetId === ''
         ? null : String(body.reuseSpeakerAssetId);
@@ -2743,6 +3180,15 @@ const server = http.createServer(async (req, res) => {
           owner: (body.owner || '').trim() || '未署名',
         });
       }
+      // A prepared phone clip belongs to one compiled placement. Iteration must reacquire a new
+      // ready-to-place clip/placement instead of silently carrying the prior Revision's clip as B-roll.
+      const priorPreparedReuse = reuseAssetIds.find((assetId) => {
+        const asset = (project.assets || []).find((item) => item.id === assetId);
+        return asset?.role === 'prepared-phone-video';
+      });
+      if (priorPreparedReuse) return send(res, 400, {
+        error: `素材 ${priorPreparedReuse} 是上一版 prepared 手機素材；必須重新取得本版 Capture placement`,
+      });
       let parentRevision = null;
       if (parentRevisionId) {
         try { parentRevision = PROJECT_STORE.getRevision(project.id, parentRevisionId); }
@@ -2752,9 +3198,18 @@ const server = http.createServer(async (req, res) => {
       }
       const invalidReuse = reuseAssetIds.find((assetId) => {
         const asset = (project.assets || []).find((item) => item.id === assetId);
-        return !asset || !['image', 'video'].includes(asset.kind);
+        return !isGenericReusableAsset(asset);
       });
-      if (invalidReuse) return send(res, 400, { error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用` });
+      if (invalidReuse) return send(res, 400, {
+        error: `素材 ${invalidReuse} 不可作為圖片或 B-Roll 重用；prepared 手機素材只能由 Capture placement 選用`,
+      });
+      if (materialAcquisition?.operation === 'prepared-video') {
+        const unsupportedVideo = reuseAssetIds.find((assetId) =>
+          (project.assets || []).find((item) => item.id === assetId)?.kind === 'video');
+        if (unsupportedVideo) return send(res, 409, {
+          error: `ready-to-place 尚未支援一般影片 B-Roll placement（素材 ${unsupportedVideo}）；本版只接受同 Project 圖片`,
+        });
+      }
       const speakerAsset = reuseSpeakerAssetId
         ? (project.assets || []).find((item) => item.id === reuseSpeakerAssetId) : null;
       if (reuseSpeakerAssetId && (!speakerAsset || speakerAsset.kind !== 'speaker-video'))
@@ -2765,6 +3220,13 @@ const server = http.createServer(async (req, res) => {
         if (!speakerMedia || speakerMedia.mediaType !== 'video/mp4')
           return send(res, 422, { error: `講者 Avatar ${speakerAsset.id} 已損毀或不是 MP4，請重新加入` });
       }
+      // A ready-to-place Run that starts from an existing Project speaker must render those exact
+      // durable bytes. Re-speeding would create a second speaker identity after prepare and make
+      // Revision selection ambiguous. Newly generated speakers still follow the normal speed path.
+      const preservePreparedSpeakerBytes = materialAcquisition?.operation === 'prepared-video'
+        && !!speakerAsset;
+      const skipGenerate = workflowMode === 'auto-broll' || !!body.skipGenerate || !!speakerAsset;
+      const noSpeed = !!body.noSpeed || preservePreparedSpeakerBytes;
       let revision;
       let job;
       try {
@@ -2779,8 +3241,8 @@ const server = http.createServer(async (req, res) => {
             voice: String(body.voice || ''),
           },
           options: {
-            skipGenerate: workflowMode === 'auto-broll' || !!body.skipGenerate || !!speakerAsset,
-            noSpeed: !!body.noSpeed,
+            skipGenerate,
+            noSpeed,
             withAd: !!body.withAd,
             autoApprove: controlPolicy === 'auto',
             workflowMode,
@@ -2801,8 +3263,8 @@ const server = http.createServer(async (req, res) => {
           title,
           status: 'draft', // 上傳完檔案才轉 queued
           createdAt: nowISO(),
-          skipGenerate: workflowMode === 'auto-broll' || !!body.skipGenerate || !!speakerAsset,
-          noSpeed: !!body.noSpeed,
+          skipGenerate,
+          noSpeed,
           withAd: !!body.withAd,
           brand,
           autoApprove: controlPolicy === 'auto',
@@ -2812,11 +3274,11 @@ const server = http.createServer(async (req, res) => {
           stage: 'draft',
           assetRefs: [],
           createdAssetRefs: [],
+          focusstockVisualInputs: [],
           ...(materialAcquisition ? { materialAcquisition } : {}),
         };
         ensureDir(path.join(jobDir(job.id), 'input'));
-        fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'),
-          buildScript({ voice: body.voice, title, body: body.body }));
+        fs.writeFileSync(path.join(jobDir(job.id), 'input', 'script.txt'), scriptText);
         if (speakerAsset) {
           PROJECT_STORE.materializeAsset(project.id, speakerAsset.id,
             path.join(jobDir(job.id), 'input', 'heygen.mp4'));
@@ -2826,6 +3288,8 @@ const server = http.createServer(async (req, res) => {
         let brollIndex = 1;
         for (const assetId of reuseAssetIds) {
           const asset = (project.assets || []).find((item) => item.id === assetId);
+          if (!isGenericReusableAsset(asset))
+            throw new Error(`素材 ${assetId} 不可由一般素材流程 materialize`);
           let ext = extensionForMediaType(asset.mediaType);
           if (!ext) {
             const originalExt = path.extname(asset.originalName || '').toLowerCase();
@@ -2838,6 +3302,16 @@ const server = http.createServer(async (req, res) => {
           PROJECT_STORE.materializeAsset(project.id, assetId,
             path.join(jobDir(job.id), 'input', name));
           job.assetRefs.push(assetId);
+          if (materialAcquisition?.operation === 'prepared-video') {
+            job.focusstockVisualInputs.push({
+              kind: 'image',
+              assetRef: asset.id,
+              inputName: name,
+              sha256: asset.sha256,
+              size: asset.size,
+              mediaType: asset.mediaType,
+            });
+          }
         }
       } catch (error) {
         rmrf(jobDir(id));
@@ -2863,6 +3337,10 @@ const server = http.createServer(async (req, res) => {
       if (!spec) return send(res, 400, { error: '不允許的上傳檔名' });
       if (job.workflowMode === 'auto-broll' && name !== 'heygen.mp4')
         return send(res, 409, { error: '自動圖卡流程只接受 Avatar MP4，不接受人工 B-Roll 素材' });
+      if (job.materialAcquisition?.operation === 'prepared-video' && name !== 'heygen.mp4')
+        return send(res, 409, {
+          error: 'ready-to-place 不支援建立 Run 後再上傳圖片／B-Roll；圖片必須在建立時由同 Project 選取並綁定 placement',
+        });
       const limit = spec.limit;
       const declared = Number(req.headers['content-length'] || 0);
       if (declared > limit) return send(res, 413, { error: `上傳檔案超過 ${Math.round(limit / 1048576)} MB 上限` });
@@ -2878,9 +3356,19 @@ const server = http.createServer(async (req, res) => {
           originalName: requestedOriginalName,
           kind: spec.kind,
         });
-        if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
+        if (job.materialAcquisition?.operation === 'prepared-video'
+            && spec.kind === 'speaker-video') {
+          replaceReadyToPlaceSpeakerRef(job, PROJECT_STORE.get(job.projectId), asset);
+        } else if (!job.assetRefs.includes(asset.id)) job.assetRefs.push(asset.id);
         if (!existingAssetIds.has(asset.id) && !job.createdAssetRefs.includes(asset.id))
           job.createdAssetRefs.push(asset.id);
+        if (job.materialAcquisition?.operation === 'prepared-video'
+            && spec.kind === 'speaker-video') {
+          // Uploaded speaker bytes are already a completed Project Asset. Keep them byte-stable
+          // through prepare instead of paid regeneration or the fixed-template 125% rewrite.
+          job.skipGenerate = true;
+          job.noSpeed = true;
+        }
         saveJob(job);
         responseAsset = publicAsset(asset);
       }
@@ -3045,6 +3533,8 @@ const server = http.createServer(async (req, res) => {
         return send(res, 409, { error: 'failed-stage retry 目前只開放 automation-first Run' });
       if (job.status !== 'failed' || !['preparing', 'rendering'].includes(job.failedStage))
         return send(res, 409, { error: '這個 Run 沒有可重試的失敗 stage' });
+      if (job.reviewEditRecoveryBlocked)
+        return send(res, 409, { error: '人工修改 transaction 狀態不明，不能自動重試' });
       if (job.cancelRequestedAt)
         return send(res, 409, { error: '已要求停止的 Run 不可重試' });
       if (job.failedStage === 'rendering') {
@@ -3182,6 +3672,7 @@ function pruneOldJobs() {
           || typeof j.id !== 'string' || !RUN_ID.test(j.id)
           || !terminalStatuses.has(j.status) || !ownedJobDir(j.id)
           || (j.outputs !== undefined && !Array.isArray(j.outputs))) return;
+      if (fs.existsSync(path.join(jobDir(j.id), REVIEW_EDIT_TRANSACTION))) return;
       const outputs = Array.isArray(j.outputs) ? j.outputs : [];
       if (outputs.some((output) => !output || typeof output !== 'object' || Array.isArray(output)
           || typeof output.name !== 'string' || !output.name
@@ -3238,6 +3729,20 @@ function pruneOldJobs() {
       const t = Date.parse(j.finishedAt || j.createdAt) || 0;
       const retentionExpired = idx >= KEEP_RECENT && t <= cutoff;
       if (!isCompactableProjectRun && !retentionExpired) return;
+      if (isCompactableProjectRun && j.materialAcquisition?.operation === 'prepared-video') {
+        const compacted = compactPreparedPhoneAcquisition({
+          job: j,
+          jobDirectory: jobDir(j.id),
+          projectStore: PROJECT_STORE,
+          archiveRoot: ROOT,
+          durableOutputFiles: verifiedOutputs,
+          saveJob,
+          writeJobRecord,
+          nowISO,
+        });
+        if (!compacted?.compacted) return;
+        freed += compacted.bytesFreed;
+      }
       for (const sub of ['input', 'state', 'thumbs']) {
         const d = ownedJobPayloadDir(j.id, sub);
         if (!d) continue;
@@ -3249,6 +3754,13 @@ function pruneOldJobs() {
       if (hasDurableOutputs) {
         const d = ownedJobPayloadDir(j.id, 'out');
         if (canRemoveRunOutputDir(d, outputs, verifiedOutputs)) {
+          freed += dirSize(d);
+          rmrf(d);
+        }
+      }
+      if (retentionExpired && !isCompactableProjectRun) {
+        const d = ownedJobPayloadDir(j.id, 'acquisition');
+        if (d) {
           freed += dirSize(d);
           rmrf(d);
         }

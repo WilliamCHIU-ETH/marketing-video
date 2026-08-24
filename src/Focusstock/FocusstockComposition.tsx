@@ -18,12 +18,17 @@ import {
   VIDEO_WIDTH,
   VIDEO_HEIGHT,
   VIDEO_FPS,
+  focusstockVisualFrameInterval,
   secToFrame,
 } from './focusstock-timeline';
 import { Subtitles } from '../Subtitles';
 import { ShotFocusImage } from '../ShotFocus';
 import videoMeta from '../video-meta.json';
 import focusstockAssets from './focusstock-assets.generated.json';
+import {
+  PreparedPhoneMaterialLayer,
+  preparedPhoneSuppressesFocusstockVisual,
+} from './PreparedPhoneMaterialLayer';
 
 /**
  * 焦點股日報 composition（直式 1080×1920）。
@@ -128,15 +133,22 @@ export const FocusstockComposition: React.FC = () => {
         {/* 截圖段：全螢幕切換（v1，FOCUSSTOCK_SHOTS 目前為空） */}
         {/* 截圖段：連續使用同一張圖的片段已合併成 run，
             圖片全程留在畫面上、只有黃框移動，不會圖→人→圖地閃。 */}
-        {FOCUSSTOCK_SHOT_RUNS.map((run, idx) => {
-          const from = secToFrame(run.startSec);
-          const durationInFrames = Math.max(1, secToFrame(run.endSec - run.startSec));
+        {FOCUSSTOCK_SHOT_RUNS.filter((run) =>
+          !preparedPhoneSuppressesFocusstockVisual(run.startSec, run.endSec)).map((run, idx) => {
+          const interval = focusstockVisualFrameInterval(run.startSec, run.endSec);
           return (
-            <Sequence key={`run-${idx}`} from={from} durationInFrames={durationInFrames}>
+            <Sequence
+              key={`run-${idx}`}
+              from={interval.startFrame}
+              durationInFrames={interval.durationInFrames}
+            >
               <ShotFocusImage run={run} width={VIDEO_WIDTH} height={VIDEO_HEIGHT} fps={VIDEO_FPS} />
             </Sequence>
           );
         })}
+
+        {/* Capture 已完成手機內部的焦點、縮放與呈現；這裡只負責 scene container 與 placement。 */}
+        <PreparedPhoneMaterialLayer />
 
         {/* 字幕層：沿用同一套（底部置中、未修改） */}
         <Subtitles />
