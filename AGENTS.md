@@ -103,6 +103,15 @@ the same cleaner as subtitle alignment. Never calculate `startCharIdx` from the 
 `startSec` only when the user explicitly supplies the timing.
 A later Revision must reacquire this ready-to-place intent and placement; never carry the previous
 `prepared-phone-video` forward as general B-Roll.
+The current Focusstock slice may also select existing image assets owned by the same Project in the
+initial `POST /api/jobs`. Every selected image must resolve through the generated Focusstock shot
+plan and the same subtitle char timeline used by the renderer. Input bytes, hashes, resolved runs,
+actual renderer frame intervals, and each run's `rendered`／`suppressed_by_prepared` disposition are
+fail-closed evidence. Creating a
+ready-to-place draft and then uploading more images or generic video is unsupported; generic video
+B-Roll also remains unsupported until its real placement consumer is integrated.
+If a ready-to-place Run reuses or uploads a completed speaker MP4, preserve those exact bytes:
+`skipGenerate` and `noSpeed` are mandatory; only a newly generated speaker may use the normal speed path.
 When integrating another Focusstock visual branch, use
 `preparedPhoneSuppressesFocusstockVisual(startSec, endSec)`: any generic shot or graphic B-roll
 placement overlapping the prepared interval is suppressed in full. JSX stacking is not a conflict

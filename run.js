@@ -320,6 +320,14 @@ function runBackground(cmd, label) {
   });
 }
 
+function stagedFocusstockImages() {
+  const pub = resolve(PROJECT_DIR, "public");
+  if (!existsSync(pub)) return [];
+  return require("fs").readdirSync(pub)
+    .filter((name) => /^shot\d{1,3}\.(?:png|jpe?g)$/i.test(name))
+    .sort();
+}
+
 /**
  * 依版型啟動「圖片分析」（OCR 版面偵測）。在呼叫 HeyGen 之前就啟動，好處有二：
  *   ① 省時間：跟 HeyGen 生成平行跑，等影片的空檔就把 OCR 做完。
@@ -1327,6 +1335,9 @@ async function main() {
       const tail = r.stdout.trim().split("\n").slice(-6).join("\n");
       log("✅ 版面偵測完成（與生成平行）：\n" + tail);
     } else {
+      if (PREPARED_PHONE_MODE === "ready-to-place" && stagedFocusstockImages().length > 0) {
+        throw new Error("ready-to-place 圖片分析失敗，不能沿用舊 OCR／shot plan：" + r.err.message);
+      }
       log("⚠️ 版面偵測失敗，沿用既有 regions（影片照樣出）。");
       log("   若要聚焦/高亮對位正確，Mac 請先安裝一次：brew install tesseract tesseract-lang");
     }
@@ -1377,6 +1388,9 @@ function prepareShots() {
     try {
       run("npm run auto-shot");
     } catch (e) {
+      if (PREPARED_PHONE_MODE === "ready-to-place" && stagedFocusstockImages().length > 0) {
+        throw new Error("ready-to-place 圖片 auto-shot 失敗，無法建立可驗證 placement：" + e.message);
+      }
       log("⚠️ 自動配圖失敗（不影響出片，只是這支不會插圖）：" + e.message);
     }
   } else {

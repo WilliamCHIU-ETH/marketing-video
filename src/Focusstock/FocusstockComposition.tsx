@@ -18,6 +18,7 @@ import {
   VIDEO_WIDTH,
   VIDEO_HEIGHT,
   VIDEO_FPS,
+  focusstockVisualFrameInterval,
   secToFrame,
 } from './focusstock-timeline';
 import { Subtitles } from '../Subtitles';
@@ -134,10 +135,13 @@ export const FocusstockComposition: React.FC = () => {
             圖片全程留在畫面上、只有黃框移動，不會圖→人→圖地閃。 */}
         {FOCUSSTOCK_SHOT_RUNS.filter((run) =>
           !preparedPhoneSuppressesFocusstockVisual(run.startSec, run.endSec)).map((run, idx) => {
-          const from = secToFrame(run.startSec);
-          const durationInFrames = Math.max(1, secToFrame(run.endSec - run.startSec));
+          const interval = focusstockVisualFrameInterval(run.startSec, run.endSec);
           return (
-            <Sequence key={`run-${idx}`} from={from} durationInFrames={durationInFrames}>
+            <Sequence
+              key={`run-${idx}`}
+              from={interval.startFrame}
+              durationInFrames={interval.durationInFrames}
+            >
               <ShotFocusImage run={run} width={VIDEO_WIDTH} height={VIDEO_HEIGHT} fps={VIDEO_FPS} />
             </Sequence>
           );

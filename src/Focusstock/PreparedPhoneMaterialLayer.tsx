@@ -7,6 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import generatedPlan from './prepared-phone-material.generated.json';
+import { focusstockVisualFrameInterval } from './focusstock-timeline';
 
 type ReadyPlan = {
   schemaVersion: 1;
@@ -93,9 +94,10 @@ export function preparedPhoneSuppressesFocusstockVisual(startSec: number, endSec
     throw new Error('Focusstock visual placement is invalid');
   }
   const plan = readyPlan();
+  const interval = focusstockVisualFrameInterval(startSec, endSec);
   return plan !== null
-    && startSec < plan.placement.endSec
-    && endSec > plan.placement.startSec;
+    && interval.startFrame < plan.placement.endFrame
+    && interval.endFrame > plan.placement.startFrame;
 }
 
 /**

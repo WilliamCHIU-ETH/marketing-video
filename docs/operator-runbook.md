@@ -179,6 +179,18 @@ Capture 交付的 MP4 內部已完成手機內的焦點、縮放、強調與 hol
 建立下一個 Revision 時，上一版的 `prepared-phone-video` 不會作為一般 B-Roll 沿用；
 下一版若仍需要手機畫面，Agent 必須重新送出 ready-to-place intent 與本版 placement。
 
+同一個 ready-to-place Run 可以在建立時用 `reuseAssetIds` 選取該 Project 已有的圖片。
+每張圖片都必須由 `focusstock-shots.generated.json` 透過同一份字幕字元時間軸解出 placement；
+系統會以 renderer 相同的 2 秒規則合併連續同圖 runs，再用 renderer 實際採用的 half-open
+frame interval 將與 prepared 區間相交的整個 run 標成 `suppressed_by_prepared`，其餘標成
+`rendered`。任一圖片未被引用、
+來源不屬於選取素材、char index 無法解時，整個 Run 停止。ready-to-place 草稿建立後不接受
+追加圖片或影片；一般影片 B-Roll 尚未接上可驗證的 Focusstock placement，因此也不能與這條
+路徑同時選用。
+
+ready-to-place 若沿用或上傳既有講者 MP4，系統會固定 `skipGenerate=true` 與 `noSpeed=true`，
+避免重新付費生成或把已完成的 Project Asset 再次轉速成另一份 bytes；本輪新生成的講者不受此限制。
+
 ## 歷史資料盤點
 
 ```bash
