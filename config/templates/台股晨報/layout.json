@@ -1,0 +1,57 @@
+{
+  "$comment": [
+    "台股晨報版型的版位定義。這是唯一來源 —— Remotion 與 HyperFrames 都該讀這份，",
+    "不要在 composition 或 build-main.mjs 裡重打一次數字。",
+    "2026-08-25 建立。動機：header 的座標在 auditor-format / armC / 鼎元 三支片之間",
+    "抄了三次、padding 與 line-height 各飄一次，而 broll 與 caption 因為 SKILL.md 有寫、",
+    "三支片位元組完全相同。有規格的不飄，沒家的才飄。"
+  ],
+  "templateId": "tw-morning-report",
+  "label": "台股晨報",
+  "canvas": { "width": 1080, "height": 1920, "fps": 30 },
+
+  "assets": {
+    "headerOverlay": "header-overlay-v2.png",
+    "introFrame": "intro-frame.jpg",
+    "bgm": "BGM.mp3"
+  },
+
+  "colors": {
+    "brandBlue": "#0152F5",
+    "stageBg": "#06111f",
+    "captionBg": "rgba(6,17,31,.88)"
+  },
+
+  "header": {
+    "$comment": "header-overlay-v2.png 是 1080×1920 全幅 RGBA，白框以分隔線切成左右兩格。數值沿用 FocusstockComposition.tsx 的 FS_LAYOUT（使用者拍板）。",
+    "dateFormat": "MMDD",
+    "$dateFormatNote": "2026-08-11 使用者統一：三個版型日期一律 MMDD 無斜線（0810），不插斜線、不斜體。FocusstockComposition.tsx 兩個呼叫端都傳 italic={false}。",
+    "date":  { "top": 197, "left": 62,  "width": 258, "fontSize": 86,  "color": "#0152F5" },
+    "label": { "top": 183, "left": 332, "width": 625, "height": 142, "fontSize": 112, "color": "#0152F5" }
+  },
+
+  "intro": {
+    "$comment": "開場卡，疊在 intro-frame.jpg 上。HyperFrames 線目前沒有開場卡，先定義起來。",
+    "date":  { "top": 440,  "left": 0,   "width": 1080, "fontSize": 250, "color": "#ffffff" },
+    "label": { "top": 730,  "left": 112, "width": 856,  "height": 234, "fontSize": 150 },
+    "title": { "top": 1010, "fontSize": 142, "color": "#ffd400" }
+  },
+
+  "broll": {
+    "$comment": "已驗證值（PROD-003 與 BATCH-01A 兩條獨立產線收斂到同一組）。auditor-format / armC / 鼎元 三支片位元組相同，不要動。",
+    "left": 55, "top": 470, "width": 970, "height": 740,
+    "borderRadius": 32, "boxShadow": "0 22px 56px rgba(1,8,18,.38)"
+  },
+
+  "caption": {
+    "left": 60, "top": 1390, "width": 960, "height": 250,
+    "paddingTop": 20, "fontSize": 48, "borderRadius": 22
+  },
+
+  "keepClear": {
+    "$comment": "B-roll 與任何疊圖都不得侵入的區域。",
+    "header":  { "top": 0,    "bottom": 380  },
+    "caption": { "top": 1390, "bottom": 1640 },
+    "keyNumber": { "top": 1350, "bottom": 1680 }
+  }
+}
