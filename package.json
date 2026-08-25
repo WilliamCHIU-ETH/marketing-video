@@ -12,6 +12,7 @@
     "studio": "npm run dev:server",
     "doctor": "node scripts/doctor.js",
     "doctor:full": "node scripts/doctor.js --full",
+    "material": "node scripts/material.js",
     "smoke": "node scripts/smoke-server.js",
     "migrate:legacy": "node scripts/migrate-legacy-jobs.js",
     "test:legacy-migration": "node --test scripts/migrate-legacy-jobs.test.js",
