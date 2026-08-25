@@ -3553,6 +3553,15 @@ const server = http.createServer(async (req, res) => {
       if (!CONTROL_POLICIES.has(controlPolicy))
         return send(res, 400, { error: 'controlPolicy 不合法' });
       if (!TEMPLATES[body.template]) return send(res, 400, { error: '版型不對' });
+      // enabled:false 的版型 renderer 還沒接上（compositionIdFor 會 throw）。前台的版型選單
+      // 已經濾掉它們（public/index.html:993），但 API 沒擋——直接 POST 會建出 Project／Revision／Job
+      // 並排進佇列，等 worker 才失敗，留下使用者看得到、注定失敗的產品資料。這裡在建立任何東西之前擋掉。
+      // P5 讓 tw-morning-report 正式上線時，要一併把它的 enabled 打開，否則會擋到自己。
+      if (TEMPLATES[body.template].enabled === false)
+        return send(res, 400, {
+          error: `版型「${TEMPLATES[body.template].label}」還不能建立影片：renderer 尚未接上`,
+          code: 'template_not_enabled', template: body.template,
+        });
       if (materialAcquisition?.operation === 'prepared-video' && body.template !== 'focusstock')
         return send(res, 400, { error: 'ready-to-place 手機素材目前只支援焦點股日報' });
       if (materialAcquisition?.operation === 'prepared-video' && !!body.withAd)
