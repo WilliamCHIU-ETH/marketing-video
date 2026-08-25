@@ -12,6 +12,7 @@ const {
   acquireOptionalMaterial,
   buildCaptureRequest,
   normalizeMaterialAcquisitionIntent,
+  readyToPlaceLiveReadinessCode,
   validateCaptureResult,
 } = require('../server/material-acquisition');
 
@@ -194,13 +195,55 @@ test('capability version mismatch falls back or fails closed before acquire', as
   assert.equal(acquireCalls, 0);
 });
 
-test('completed screenshot bundle becomes fresh only after full validation', async (t) => {
+test('ready-to-place live lock gate fails closed before the existing VIP readiness gate', () => {
+  const liveRequest = { contractVersion: 2, mode: 'live' };
+  const verifiedCapabilities = {
+    runReadiness: { vipSession: 'verified_before_mutation' },
+  };
+  const missingFlag = { ...PROVIDER_LOCK };
+  delete missingFlag.readyToPlaceLiveEnabled;
+  assert.equal(
+    readyToPlaceLiveReadinessCode(liveRequest, verifiedCapabilities, missingFlag),
+    'provider_ready_to_place_live_disabled',
+  );
+  assert.equal(
+    readyToPlaceLiveReadinessCode(liveRequest, verifiedCapabilities, {
+      ...PROVIDER_LOCK, readyToPlaceLiveEnabled: false,
+    }),
+    'provider_ready_to_place_live_disabled',
+  );
+  assert.equal(
+    readyToPlaceLiveReadinessCode(liveRequest, {}, {
+      ...PROVIDER_LOCK, readyToPlaceLiveEnabled: true,
+    }),
+    'provider_live_readiness_unverified',
+  );
+  assert.equal(
+    readyToPlaceLiveReadinessCode(liveRequest, verifiedCapabilities, {
+      ...PROVIDER_LOCK, readyToPlaceLiveEnabled: true,
+    }),
+    null,
+  );
+  assert.equal(readyToPlaceLiveReadinessCode(
+    { contractVersion: 1, mode: 'live' }, verifiedCapabilities, missingFlag), null);
+});
+
+test('completed v1 screenshot follows the 0.3.1 lock while v2 live stays disabled', async (t) => {
   const { request, result } = fixture(t);
-  const value = await acquireOptionalMaterial({ request, provider: provider(result) });
+  let acquireCalls = 0;
+  const value = await acquireOptionalMaterial({
+    request,
+    provider: {
+      capabilities: async () => CAPABILITIES,
+      acquire: async () => { acquireCalls += 1; return result; },
+    },
+  });
+  assert.equal(PROVIDER_LOCK.readyToPlaceLiveEnabled, false);
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
   assert.equal(value.providerVersion, LOCKED_TOOL_VERSION);
+  assert.equal(acquireCalls, 1);
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
 });

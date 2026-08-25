@@ -1752,6 +1752,16 @@ function assertSafeCtaTarget(file) {
     fail('CTA output target is unsafe', 'project_output_invalid');
 }
 
+function ensureSafeCtaDestination(projectRoot) {
+  const assetsDirectory = ensureOwnedDirectory(projectRoot, 'assets');
+  const ctaDirectory = ensureOwnedDirectory(assetsDirectory, 'cta');
+  const assetFile = path.join(ctaDirectory, CTA_ASSET_NAME);
+  const provenanceFile = path.join(ctaDirectory, CTA_PROVENANCE_NAME);
+  assertSafeCtaTarget(assetFile);
+  assertSafeCtaTarget(provenanceFile);
+  return { assetsDirectory, ctaDirectory, assetFile, provenanceFile };
+}
+
 function writePrivateStagingFile(directory, name, bytes, token) {
   const file = path.join(directory, `.${name}.${token}.tmp`);
   fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
@@ -1849,6 +1859,7 @@ async function captureCtaMaterial({
   if (typeof requestId !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(requestId))
     fail('CTA acquisition request ID is invalid', 'invalid_request');
+  const preflightDestination = ensureSafeCtaDestination(projectRoot);
   const acquisitionDirectory = fs.mkdtempSync(
     path.join(projectRoot, '.capture-cta-acquisition-'));
   fs.chmodSync(acquisitionDirectory, 0o700);
@@ -1873,10 +1884,14 @@ async function captureCtaMaterial({
         || crypto.createHash('sha256').update(pngBytes).digest('hex') !== artifact.sha256) {
       fail('Validated CTA screenshot changed before materialization', 'materialization_failed');
     }
-    const assetsDirectory = ensureOwnedDirectory(projectRoot, 'assets');
-    const ctaDirectory = ensureOwnedDirectory(assetsDirectory, 'cta');
-    const assetFile = path.join(ctaDirectory, CTA_ASSET_NAME);
-    const provenanceFile = path.join(ctaDirectory, CTA_PROVENANCE_NAME);
+    const destination = ensureSafeCtaDestination(projectRoot);
+    if (destination.assetsDirectory !== preflightDestination.assetsDirectory
+        || destination.ctaDirectory !== preflightDestination.ctaDirectory
+        || destination.assetFile !== preflightDestination.assetFile
+        || destination.provenanceFile !== preflightDestination.provenanceFile) {
+      fail('CTA output destination changed after preflight', 'project_output_invalid');
+    }
+    const { ctaDirectory, assetFile, provenanceFile } = destination;
     const acquiredAt = nowISO();
     if (typeof acquiredAt !== 'string' || !Number.isFinite(Date.parse(acquiredAt)))
       fail('CTA acquisition timestamp is invalid', 'materialization_failed');

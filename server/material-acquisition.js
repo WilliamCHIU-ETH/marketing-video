@@ -586,6 +586,18 @@ async function fallbackResult(fallback, request, reason, provider = null) {
   };
 }
 
+function readyToPlaceLiveReadinessCode(
+  request, capabilities, providerLock = PROVIDER_LOCK,
+) {
+  if (request?.contractVersion !== READY_TO_PLACE_CONTRACT_VERSION
+      || request.mode !== 'live') return null;
+  if (providerLock?.readyToPlaceLiveEnabled !== true)
+    return 'provider_ready_to_place_live_disabled';
+  if (capabilities?.runReadiness?.vipSession !== 'verified_before_mutation')
+    return 'provider_live_readiness_unverified';
+  return null;
+}
+
 async function acquireOptionalMaterial({
   policy = 'prefer-capture', request, provider = null, fallback = null,
 }) {
@@ -621,10 +633,8 @@ async function acquireOptionalMaterial({
     readinessCode = 'provider_not_production_ready';
   else if (!(contractCapability = findContractCapability(capabilities, request)))
     readinessCode = 'provider_operation_unsupported';
-  else if (request.contractVersion === READY_TO_PLACE_CONTRACT_VERSION
-      && request.mode === 'live'
-      && capabilities?.runReadiness?.vipSession !== 'verified_before_mutation')
-    readinessCode = 'provider_live_readiness_unverified';
+  else
+    readinessCode = readyToPlaceLiveReadinessCode(request, capabilities);
   if (readinessCode) {
     if (selectedPolicy === 'require-capture')
       fail('Required material provider is not ready', readinessCode, { providerId });
@@ -663,6 +673,7 @@ module.exports = {
   buildCaptureRequest,
   normalizeMaterialAcquisitionIntent,
   normalizePolicy,
+  readyToPlaceLiveReadinessCode,
   resolvePreparedVideoPlacement,
   validateCaptureResult,
 };

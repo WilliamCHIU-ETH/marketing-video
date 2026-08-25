@@ -90,7 +90,9 @@ function failedMessage(code) {
 function outcomeForError(error) {
   const code = typeof error?.code === 'string' && error.code
     ? error.code : 'capture_cta_failed';
-  if (error?.details?.status === 'human_action_required' || HUMAN_ACTION_CODE.test(code)) {
+  const typedStatus = error?.details?.status;
+  if (typedStatus === 'human_action_required'
+      || (typedStatus == null && HUMAN_ACTION_CODE.test(code))) {
     return {
       exitCode: 3,
       payload: {

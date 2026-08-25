@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { outcomeForError } = require('./material');
 
 const APP_ROOT = path.resolve(
   process.env.MARKETING_VIDEO_TEST_APP_ROOT || path.join(__dirname, '..'));
@@ -368,13 +369,16 @@ test('Marketing command rejects relative Projects and every provider-facing flag
   }
 });
 
-test('Project-owned destination rejects a cta directory symlink that escapes the Project', (t) => {
+test('Project-owned destination rejects a cta directory symlink before provider acquire', (t) => {
   const fx = fixture(t, { symlinkCtaOutside: true });
   const result = runMaterial(fx, commandArgs(fx.project));
   assert.notEqual(result.status, 0);
   assert.equal(typedOutput(result).status, 'failed');
   assert.deepEqual(fs.readdirSync(fx.outside), []);
   assert.equal(fs.lstatSync(path.join(fx.project, 'assets', 'cta')).isSymbolicLink(), true);
+  const calls = readEvents(fx.log).filter((event) => event.type === 'call');
+  assert.equal(calls.filter((event) => event.args[0] === 'acquire').length, 0);
+  assert.deepEqual(calls, [], 'unsafe destination must fail before capabilities or acquire');
 });
 
 test('a completed provider envelope cannot bypass PNG hash verification', (t) => {
@@ -400,6 +404,20 @@ test('provider unavailable and exact-version mismatch both fail closed before Pr
       assert.equal(events.some((event) => event.type === 'call' && event.args[0] === 'acquire'), false);
     });
   }
+});
+
+test('an explicit failed status cannot be reclassified by an authentication error code', () => {
+  const outcome = outcomeForError({
+    code: 'authentication_failed',
+    details: { status: 'failed' },
+  });
+  assert.equal(outcome.exitCode, 1);
+  assert.equal(outcome.payload.status, 'failed');
+  assert.notEqual(outcome.payload.status, 'human_action_required');
+
+  const untyped = outcomeForError({ code: 'authentication_failed' });
+  assert.equal(untyped.exitCode, 3);
+  assert.equal(untyped.payload.status, 'human_action_required');
 });
 
 test('human_action_required stays typed, actionable, and never becomes completed', (t) => {

@@ -52,6 +52,12 @@ function incompatible(value) {
   );
 }
 
+test('consumer lock keeps ready-to-place live disabled pending provider attestation', () => {
+  assert.equal(PROVIDER_LOCK.readyToPlaceLiveEnabled, false);
+  assert.equal(PROVIDER_LOCK.release.commit, null);
+  assert.equal(PROVIDER_LOCK.release.status, 'pending-provider-attestation');
+});
+
 test('legacy operations and v1/v2 schema fields retain the frozen capability shape', () => {
   const value = clone(CAPABILITIES);
   const before = clone(value);
