@@ -1211,6 +1211,9 @@ async function main() {
   // lock 會在 exit 時刪除；owner marker 則保留到下一個 run.js 取得工作區時覆寫。
   // server 重啟後藉由 job-specific token 判斷 public/ 目前究竟屬於哪一支工作。
   writeFileSync(ownerFile, JSON.stringify(ownership));
+  // 這條 process 樹已經持有 .run.lock。下面會 spawn parse-script 等腳本
+  // （scripts/workspace-lock.js 也搶同一把鎖），讓它們認得出來、不要再搶一次。
+  process.env.MV_WORKSPACE_LOCK_HELD = "1";
   enterStage(RENDER_ONLY ? "rendering" : "preparing");
   // 被終止（關終端機=SIGHUP、Ctrl+C=SIGINT、kill=SIGTERM）時也清 .run.lock。
   // 注意：這不會讓生成繼續——關視窗 run.js 一樣會死、新 heygen.mp4 不會下載；

@@ -22,6 +22,10 @@ const {
   cleanBodyWithIndex,
 } = require('./script-utils');
 
+// 這支腳本寫進全域路徑（src/*.generated.json、public/），兩個 session 同時跑會靜默互蓋。
+// 跟 run.js 共用同一把鎖（app/.run.lock）。
+require('./workspace-lock').acquire('parse-script');
+
 const ROOT = path.resolve(__dirname, '..');
 const SCRIPT_PATH = path.join(ROOT, 'public', 'script.txt');
 const OUTPUT_PATH = path.join(ROOT, 'src', 'overlays.generated.json');
