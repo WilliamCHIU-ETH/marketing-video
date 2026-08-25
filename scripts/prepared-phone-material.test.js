@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const test = require('node:test');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 const { createProjectStore, isGenericReusableAsset } = require('../server/project-store');
 const {
   acquireOptionalMaterial,
@@ -63,11 +64,12 @@ const MP4 = Buffer.from(
   'base64');
 
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
 
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.3.0',
+  toolVersion: LOCKED_TOOL_VERSION,
   productionReady: true,
   operations: ['screenshot', 'record'],
   contractCapabilities: [
@@ -204,7 +206,7 @@ function writeBundle(request) {
   return {
     contractVersion: 2,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: LOCKED_TOOL_VERSION },
     status: 'completed',
     artifacts: Object.entries(files).map(([role, value]) => ({
       role,

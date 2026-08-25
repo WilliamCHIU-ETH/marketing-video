@@ -83,6 +83,6 @@ test('Agent-facing routing exposes only the Marketing capture-cta command', () =
   const normalized = files.map((file) => fs.readFileSync(file, 'utf8'))
     .join('\n').replace(/\\\s*\n/g, ' ').replace(/\s+/g, ' ');
   assert.match(normalized,
-    /npm --prefix \/Users\/chiu\/Developer\/marketing-video\/app run material -- capture-cta --project \S+ --stock-id \S+ --json/,
+    /npm --silent --prefix \/Users\/chiu\/Developer\/marketing-video\/app run material -- capture-cta --project \S+ --stock-id \S+ --json/,
     'routing must publish the frozen Marketing-owned command');
 });

@@ -5,16 +5,19 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 const {
   CaptureCliAdapterError,
   createChipKCaptureCliAdapter,
   probeChipKCaptureCli,
 } = require('../server/chipk-capture-cli-adapter');
 
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
+const MISMATCH_TOOL_VERSION = `${LOCKED_TOOL_VERSION}-mismatch`;
 const capabilities = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.3.0',
+  toolVersion: LOCKED_TOOL_VERSION,
   productionReady: true,
   operations: ['screenshot', 'record'],
   contractCapabilities: [
@@ -80,7 +83,7 @@ test('acquire writes a private request file and invokes the locked CLI shape', a
     return callback(null, JSON.stringify({
       contractVersion: 1,
       requestId: request.requestId,
-      provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+      provider: { id: 'chipk-simulator-capture', toolVersion: LOCKED_TOOL_VERSION },
       status: 'completed',
       artifacts: [],
     }), '');
@@ -97,7 +100,7 @@ test('typed non-completed result on provider exit 3 is returned to the Port', as
   const runner = (_command, _args, _options, callback) => callback(error, JSON.stringify({
     contractVersion: 1,
     requestId: 'req-human',
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: LOCKED_TOOL_VERSION },
     status: 'human_action_required',
     artifacts: [],
     error: { code: 'vip_session_required' },
@@ -174,7 +177,7 @@ test('capability version mismatch is rejected by the exact consumer lock', async
   await assert.rejects(
     () => probeChipKCaptureCli({
       runner: (_c, _a, _o, cb) => cb(null,
-        JSON.stringify({ ...capabilities, toolVersion: '0.2.0' }), ''),
+        JSON.stringify({ ...capabilities, toolVersion: MISMATCH_TOOL_VERSION }), ''),
     }),
     (error) => error instanceof CaptureCliAdapterError
       && error.code === 'provider_version_incompatible',

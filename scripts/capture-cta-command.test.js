@@ -10,6 +10,9 @@ const test = require('node:test');
 
 const APP_ROOT = path.resolve(
   process.env.MARKETING_VIDEO_TEST_APP_ROOT || path.join(__dirname, '..'));
+const PROVIDER_LOCK = require(path.join(
+  APP_ROOT, 'config', 'chipk-capture-provider.lock.json'));
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
   'base64');
@@ -30,6 +33,10 @@ const adapterPath = path.join(
 const adapter = require(adapterPath);
 const originalCreate = adapter.createChipKCaptureCliAdapter;
 const originalProbe = adapter.probeChipKCaptureCli;
+const providerLock = require(path.join(
+  process.env.CTA_TEST_APP_ROOT, 'config', 'chipk-capture-provider.lock.json'));
+const lockedToolVersion = providerLock.toolVersion;
+const mismatchedToolVersion = lockedToolVersion + '-mismatch';
 const scenario = process.env.CTA_FAKE_SCENARIO || 'success';
 const logFile = process.env.CTA_FAKE_LOG;
 const png = Buffer.from(
@@ -44,7 +51,8 @@ function capabilities() {
   return {
     schemaVersion: 1,
     providerId: 'chipk-simulator-capture',
-    toolVersion: scenario === 'version-mismatch' ? '0.3.1' : '0.3.0',
+    toolVersion: scenario === 'version-mismatch'
+      ? mismatchedToolVersion : lockedToolVersion,
     productionReady: true,
     operations: ['screenshot', 'record'],
     contractCapabilities: [
@@ -91,7 +99,7 @@ function runner(command, args, _options, callback) {
       const result = {
         contractVersion: 1,
         requestId: request.requestId,
-        provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+        provider: { id: 'chipk-simulator-capture', toolVersion: lockedToolVersion },
         status: 'human_action_required',
         artifacts: [],
         evidence: { readiness: 'vip_session_required' },
@@ -115,7 +123,7 @@ function runner(command, args, _options, callback) {
     const result = {
       contractVersion: 1,
       requestId: request.requestId,
-      provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+      provider: { id: 'chipk-simulator-capture', toolVersion: lockedToolVersion },
       status: 'completed',
       artifacts: [
         {
@@ -285,7 +293,7 @@ test('Marketing command accepts an absolute Project and stockId through the Port
 
   assert.deepEqual(output.evidence, {
     providerId: 'chipk-simulator-capture',
-    toolVersion: '0.3.0',
+    toolVersion: LOCKED_TOOL_VERSION,
     contractVersion: 1,
     stockId: '2426',
   });
@@ -297,7 +305,7 @@ test('Marketing command accepts an absolute Project and stockId through the Port
   assert.equal(provenance.bytes, PNG.length);
   assert.equal(provenance.absolutePath, assetPath);
   assert.equal(provenance.providerId, 'chipk-simulator-capture');
-  assert.equal(provenance.toolVersion, '0.3.0');
+  assert.equal(provenance.toolVersion, LOCKED_TOOL_VERSION);
   assert.equal(provenance.contractVersion, 1);
   assert.equal(provenance.routeId, 'chipk.stock.realtime');
   assert.equal(provenance.operation, 'screenshot');

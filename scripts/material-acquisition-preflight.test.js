@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 const {
   MaterialAcquisitionError,
   acquireOptionalMaterial,
@@ -14,13 +15,15 @@ const {
   validateCaptureResult,
 } = require('../server/material-acquisition');
 
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
+const MISMATCH_TOOL_VERSION = `${LOCKED_TOOL_VERSION}-mismatch`;
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
   'base64');
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.3.0',
+  toolVersion: LOCKED_TOOL_VERSION,
   productionReady: true,
   operations: ['screenshot', 'record'],
   contractCapabilities: [
@@ -66,7 +69,7 @@ function fixture(t) {
   const result = {
     contractVersion: 1,
     requestId: request.requestId,
-    provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+    provider: { id: 'chipk-simulator-capture', toolVersion: LOCKED_TOOL_VERSION },
     status: 'completed',
     artifacts: [
       {
@@ -175,7 +178,7 @@ test('capability version mismatch falls back or fails closed before acquire', as
   const { request, result } = fixture(t);
   let acquireCalls = 0;
   const mismatched = {
-    capabilities: async () => ({ ...CAPABILITIES, toolVersion: '0.2.0' }),
+    capabilities: async () => ({ ...CAPABILITIES, toolVersion: MISMATCH_TOOL_VERSION }),
     acquire: async () => { acquireCalls += 1; return result; },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: mismatched });
@@ -197,7 +200,7 @@ test('completed screenshot bundle becomes fresh only after full validation', asy
   assert.equal(value.status, 'acquired');
   assert.equal(value.evidenceLevel, 'fresh_capture');
   assert.equal(value.contractVersion, 1);
-  assert.equal(value.providerVersion, '0.3.0');
+  assert.equal(value.providerVersion, LOCKED_TOOL_VERSION);
   assert.deepEqual(value.acquisitionEvidence, { synthetic: true });
   assert.equal(value.material.find((item) => item.role === 'screenshot').size, PNG.length);
 });
@@ -206,7 +209,7 @@ test('result version drift follows prefer fallback and require fail-closed polic
   const { request, result } = fixture(t);
   const drifted = {
     ...result,
-    provider: { ...result.provider, toolVersion: '0.2.0' },
+    provider: { ...result.provider, toolVersion: MISMATCH_TOOL_VERSION },
   };
   const preferred = await acquireOptionalMaterial({ request, provider: provider(drifted) });
   assert.equal(preferred.status, 'fallback');
@@ -224,7 +227,7 @@ test('result envelope is closed and bound to request/provider/status/error invar
   const { request, result } = fixture(t);
   const badValues = [
     { ...result, requestId: 'other' },
-    { ...result, provider: { id: 'other', toolVersion: '0.3.0' } },
+    { ...result, provider: { id: 'other', toolVersion: LOCKED_TOOL_VERSION } },
     { ...result, evidence: [] },
     { ...result, error: { code: 'x', message: 'x', retryable: false } },
     { ...result, extra: true },

@@ -2,15 +2,17 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 const {
   CaptureCliAdapterError,
   validateProviderCapabilities,
 } = require('../server/chipk-capture-cli-adapter');
 
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
 const CAPABILITIES = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.3.0',
+  toolVersion: LOCKED_TOOL_VERSION,
   productionReady: true,
   operations: ['screenshot', 'record'],
   contractCapabilities: [
