@@ -68,7 +68,7 @@ Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo r
 | `MINIMAX_API_KEY` | MiniMax fallback | 否 |
 | `MINIMAX_GROUP_ID` | MiniMax fallback | 否 |
 | `OPENAI_API_KEY` | 選用的 AI 生圖／判圖腳本 | 否 |
-| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.3.0` executable 絕對路徑 | 否 |
+| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.3.1` executable 絕對路徑；只開放 contract v1，v2 live 仍關閉 | 否 |
 | `WHISPER_MODEL_PATH` | 本機 whisper.cpp 模型；預設 `.cache/whisper/ggml-base-q5_1.bin` | 僅 ASR |
 | `WHISPER_MODEL_SHA256` | 模型校驗碼；換自訂模型時必須同步設定 | 僅 ASR |
 | `WHISPER_THREADS` | CPU thread 數；預設 `4` | 僅 ASR |
@@ -97,28 +97,74 @@ artifact 實際通過 App 的 bytes／hash／media validator、Run staging、pla
 Project Asset／Revision selection 與 timeline-ready evidence。任何 raw fallback 都會使 gate
 失敗；synthetic driver 必須交付可實際解碼的無音軌 H264 MP4，不接受只宣告 media metadata。
 
-目前 runtime lock 是 Provider ID `chipk-simulator-capture`、tool version `0.3.0`。舊的
-screenshot／record 仍使用 contract v1；ready-to-place 使用 contract v2，並必須從
-`contractCapabilities` 的 v2 entry 精確選到已支援的 presentation profile 與
-`stockIds: ["3441"]`。正式 Provider release 為 annotated `v0.3.0`，解參照後固定指向
-`586fbe7414ab0c25d78ae6e462887fe72030e0a7`；CLI runtime 只驗可觀測的
-ID／contract／tool version，不宣稱能在執行時驗證 Git metadata。
+目前 runtime lock 的 Provider ID 是 `chipk-simulator-capture`，tool version 是 `0.3.1`，
+但能力必須分 contract 判斷：
 
-v0.3.0 尚未廣告 `runReadiness.vipSession=verified_before_mutation`。因此目前只允許
-capabilities／preflight／synthetic conformance；`mode=live` prepared-video 會在呼叫 Provider
-acquire 前以 `provider_live_readiness_unverified` fail closed。不得把 active
-`CHIPK_CAPTURE_BIN` 指向此版本執行 live acquire，也不得降級成 screenshot／raw recording。
+- contract v1 的 screenshot／record 使用 `0.3.1`，通過既有 policy 與 artifact validation 後可用；晨報 CTA 實機擷取屬此路徑。
+- contract v2 的 ready-to-place 仍須精確選取 `contractCapabilities` v2 entry、presentation profile 與 `stockIds: ["3441"]`，但 `readyToPlaceLiveEnabled: false` 明確關閉所有 live prepared-video acquisition。Synthetic conformance 不受影響。
 
-### Agent 預設：把 ChipK 手機畫面放進影片
+lock 的 release 欄位是 tag `v0.3.1`、commit `null`、status
+`pending-provider-attestation`，不得解讀為 release identity 已驗證。Provider CLI 對
+Marketing Video 只揭露 `capabilities` 與 `acquire` 兩個命令，不揭露 release commit；
+Marketing Video 也不進 provider repo 取 Git metadata。只有 Provider owner 或 release CI
+交付含 tag、commit、binary digest 的不可變 release manifest 後，status 才可改為 `released`。
 
-使用者只描述「把 ChipK 的某個手機畫面放進影片」時，Agent 預設要形成
-ready-to-place intent，不是只擷圖、只取 raw recording，也不是先存成一般
-B-Roll 再人工剪輯。這條路徑一律 `require-capture`；Provider／profile／hash／placement
-任一條件不成立就停止，不 fallback 成 raw 或既有圖片。
+Provider `0.3.1` 確實廣告 `runReadiness.vipSession=verified_before_mutation`，但這不會打開
+v2 live。App 會先以 `readyToPlaceLiveEnabled` 做 contract-specific gate；目前的 `false` 使
+`mode=live` prepared-video 在 Provider acquire 前以
+`provider_ready_to_place_live_disabled` fail closed。不得用 Provider readiness、版本相符或
+profile 存在作為開啟理由，也不得降級成 screenshot／raw recording。
 
-第一個已支援的垂直切片是 Focusstock workflow 的「聯一光 3441 主力頁」。
-以下是 live cutover gate 未來解除後的正式 shape（標題與講稿仍由當次影片提供）；目前
-v0.3.0 不得送出此 live acquisition：
+### 確認 v2 live 仍被關閉
+
+從 repo root 執行以下唯讀檢查與 Provider-free 測試；不要送真實 live job 來測 gate：
+
+```bash
+node - <<'NODE'
+const lock = require('./config/chipk-capture-provider.lock.json');
+if (lock.readyToPlaceLiveEnabled !== false) process.exit(1);
+console.log('readyToPlaceLiveEnabled=false');
+NODE
+npm run test:material-provider
+```
+
+第一段必須輸出 `readyToPlaceLiveEnabled=false`。測試必須證明：即使 `0.3.1` capabilities
+廣告 VIP session readiness，v2 live 仍回
+`provider_ready_to_place_live_disabled`，且 Provider acquire 呼叫次數是 0。欄位缺少或
+不是布林 `true` 時也必須 fail closed；只有正式 cutover 把它設成 `true` 後，流程才可繼續
+接受既有 VIP session readiness gate。
+
+### 緊急退回 0.3.0
+
+1. 先停止 server 與 worker，避免同時存在兩套 consumer lock。
+2. 將 `config/chipk-capture-provider.lock.json` 的 `toolVersion` 改回 `0.3.0`，並把 release 一起改回：
+
+   ```json
+   {
+     "tag": "v0.3.0",
+     "commit": "586fbe7414ab0c25d78ae6e462887fe72030e0a7",
+     "status": "released"
+   }
+   ```
+
+3. 保持 `readyToPlaceLiveEnabled: false`，並讓 `CHIPK_CAPTURE_BIN` 與 lock 一起切回相符的 `0.3.0` executable；不得用環境變數繞過版本檢查。
+4. 重跑 `npm run test:material-provider`、`npm run doctor` 與 `npm run smoke`，通過後才重啟服務；版本化文件要與 rollback commit 一起更新。
+
+rollback 會同步撤回 `0.3.1` 的 contract v1 CTA 實機擷取能力；退回後必須把 CTA live capture
+視為不可用並明確回報，不得讓 `0.3.1` binary 對著 `0.3.0` lock 執行，也不得以生成圖冒充。
+contract v2 live 前後都維持關閉。
+
+### Agent 路由：v2 live 目前不可用
+
+目前 `readyToPlaceLiveEnabled: false`。使用者只描述「把 ChipK 的某個手機畫面放進影片」
+時，Agent 必須明確回報 v2 live 尚未開放，不得建立或送出 live prepared-video request，
+也不得 fallback 成 raw、screenshot 或既有圖片。正式 v2 cutover 審查通過並把 flag 設為
+`true` 後，預設才是形成 `require-capture` 的 ready-to-place intent，而不是只取 raw
+recording 或先存成一般 B-Roll；Provider／profile／hash／placement 任一條件不成立仍須停止。
+
+第一個規劃中的垂直切片是 Focusstock workflow 的「聯一光 3441 主力頁」。以下 JSON 是
+v2 live cutover 未來解除後的正式 shape（標題與講稿仍由當次影片提供），不是目前可執行的
+操作；即使 Provider 是 `0.3.1`，flag 為 false 時也不得送出：
 
 ```json
 {
@@ -147,7 +193,10 @@ v0.3.0 不得送出此 live acquisition：
 }
 ```
 
-`POST /api/jobs` 只建立 `status: "draft"` 的 Project／Revision／Run，不會自行開始。
+上述 JSON 在 `readyToPlaceLiveEnabled: false` 時不得 POST 或 submit。以下建立、送出、
+placement 與 playback 步驟只適用於 flag 經正式 cutover 改為 `true` 之後。
+
+cutover 後，`POST /api/jobs` 只建立 `status: "draft"` 的 Project／Revision／Run，不會自行開始。
 Agent 必須從 response 讀出 `job.id`，再完成第二個 request：
 
 ```http
