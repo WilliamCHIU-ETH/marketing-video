@@ -555,7 +555,7 @@ async function minimaxTTS(text, voiceId = MINIMAX_VOICE_ID) {
 // 與 main() 內的 120%），守門條件對不上，institution／focusstock 被連續加速兩次
 // （1.25 × 1.2 ≒ 1.5 倍），講話斷句被壓爛。現在改成共用這個函式 + 模組層旗標把關：
 // 就算未來又有人多加一個呼叫點，第二次也會被擋下並印警告，而不是靜默 compounding。
-const SPEED_FACTOR = 1.25;
+const SPEED_FACTOR = 1.2;   // 2026-08-25: 25fps × 1.2 = 30 整除，1.25 會產生 31.25fps 丟影格。改此值必須同步改 晨報講稿時長換算表.md
 let speedApplied = false;
 
 function speedUpHeygen(heygenPath, whoLabel) {
