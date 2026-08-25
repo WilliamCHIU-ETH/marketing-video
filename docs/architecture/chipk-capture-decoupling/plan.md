@@ -21,7 +21,7 @@ ChipK Capture   = 可拔除的 Simulator 素材取得工具
 只保留兩個 repositories：
 
 1. `/Users/chiu/Developer/marketing-video/app`：Marketing Video repo。
-2. `/Users/chiu/Developer/marketing-video/chipk-simulator-capture`：self-contained Capture repo。
+2. `/Users/chiu/Developer/chipk-simulator-capture`：self-contained Capture repo（sibling，不在 marketing-video 底下）。
 
 本輪不拆第三個 core repo，不建立 HTTP service、daemon、plugin marketplace 或通用多 App DSL。
 
