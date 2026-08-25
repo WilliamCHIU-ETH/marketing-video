@@ -988,8 +988,10 @@ async function boot() {
   ADMIN = !!h.admin;
   $('#navFix').hidden = !ADMIN;
   $('#advBox').hidden = !ADMIN;
-  $('#tpl').replaceChildren(...Object.entries(TPLS).map(([k, t]) =>
-    el('div', { class: k === tpl ? 'on' : '', onclick: () => {
+  // enabled:false 的版型只用來查標籤（既有專案的分類名），不進版型選單 ——
+  // 它的 renderer 還沒接上，讓人點得到就是讓人建一支必然失敗的影片。
+  $('#tpl').replaceChildren(...Object.entries(TPLS).filter(([, t]) => t.enabled !== false).map(([k, t]) =>
+    el('div', { class: k === tpl ? 'on' : '', 'data-tpl': k, onclick: () => {
       if (workflowMode === 'auto-broll' && k !== 'default')
         return alert('自動圖卡 V1 目前只支援投廣模板；如要選其他版型，請先切換成「使用我提供的素材」。');
       if (activeProject && k !== activeProject.template)
@@ -1003,8 +1005,9 @@ async function boot() {
   setInterval(poll, 3000);
 }
 function boot2() {
-  document.querySelectorAll('#tpl div').forEach((d, i) =>
-    d.classList.toggle('on', Object.keys(TPLS)[i] === tpl));
+  // 用 data-tpl 比對，不用位置索引 —— 選單已經濾掉 enabled:false，位置和 TPLS 的鍵序不再一致。
+  document.querySelectorAll('#tpl div').forEach((d) =>
+    d.classList.toggle('on', d.dataset.tpl === tpl));
   $('#wrapWithAd').style.display = TPLS[tpl].flags.includes('with-ad') ? 'flex' : 'none';
   // 投廣模板要再選品牌（起漲K線／籌碼K線）—— 外框、logo、片尾、BGM 都不一樣
   const showBrands = !!TPLS[tpl].brands && BRANDS.length > 0;

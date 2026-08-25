@@ -205,6 +205,20 @@ const TEMPLATES = {
     // 只是這裡不宣告 with-ad，前台就不會畫那個勾選框。要恢復把 'with-ad' 加回來即可。
     flags: [],
   },
+  // 2026-08-25：晨報產線（docx → 講稿 → HeyGen → ASR 切段 → HyperFrames 逐格 B-roll）的專案分類。
+  // 這條線不走 Remotion，成片在 project 目錄裡自行組裝，renderer 還沒接上 ——
+  // enabled:false 讓前台只拿它查標籤，不會出現在「建立影片」的版型選單裡。
+  // 要接 renderer 時看 worktrees/app-tw-morning-report（分支 codex/tw-morning-report-template）。
+  'tw-morning-report': {
+    title: { lines: 1, per: 14, wrap: true, where: '開場第一秒' },
+    label: '台股晨報',
+    hint: '',
+    enabled: false,
+    outputs: [],
+    plan: null,
+    planKind: 'shots',
+    flags: [],
+  },
   dapan: {
     title: { lines: 2, per: 9, wrap: true, where: '直式：開場第一秒　／　橫式：右側面板全程顯示' },
     label: '大盤小報',
