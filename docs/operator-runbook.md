@@ -154,6 +154,44 @@ rollback 會同步撤回 `0.3.1` 的 contract v1 CTA 實機擷取能力；退回
 視為不可用並明確回報，不得讓 `0.3.1` binary 對著 `0.3.0` lock 執行，也不得以生成圖冒充。
 contract v2 live 前後都維持關閉。
 
+### CTA 擷取的兩個入口：人用 npm，agent 直呼 node
+
+同一支 command 有兩種呼叫方式，**用途不同，不要混用**。
+
+人（operator、手動除錯）：
+
+```bash
+npm run material -- capture-cta --project <absolute-project-path> --stock-id <stock-id> --json
+```
+
+保留這條是為了可發現性——`npm run` 列得出來。
+
+Agent（Capture subagent、任何程式化呼叫）一律直呼：
+
+```bash
+node /Users/chiu/Developer/marketing-video/app/scripts/material.js \
+  capture-cta --project <absolute-project-path> --stock-id <stock-id> --json
+```
+
+**理由是 stdout 的所有權。** 這個介面的契約是「stdout 是可解析的 JSON」，而 npm 從未承諾
+stdout 乾淨：`--silent` 只壓住當前這一版的 lifecycle banner，未來 npm 改版、使用者的
+`loglevel` 設定、或任何 lifecycle hook 都能重新注入非 JSON，靜默弄壞每一個呼叫端。
+直呼 node 讓 stdout 完全由 Marketing 的 command 擁有。這不繞過 Port／Adapter，只繞過 npm。
+
+直呼不依賴 cwd：`scripts/material.js` 的 require 是檔案相對的，從任何目錄執行結果相同。
+
+#### exit code 與輸出的對應（呼叫端必須分開處理）
+
+| exit | 意義 | stdout | stderr |
+|---|---|---|---|
+| 0 | 成功 | 單一 JSON，`status: completed` | 空 |
+| 1 | 執行期失敗 | 單一 JSON，`status: failed` | 空 |
+| 3 | 需要人工處理 | 單一 JSON，`status: human_action_required` | 空 |
+| 2 | **參數錯誤** | **空** | 純文字錯誤訊息 ＋ usage |
+
+exit 2 是唯一沒有 JSON 的情況。呼叫端不可以只做 `JSON.parse(stdout)` 就當成功失敗判斷，
+要先看 exit code；exit 2 時去讀 stderr。
+
 ### Agent 路由：v2 live 目前不可用
 
 目前 `readyToPlaceLiveEnabled: false`。使用者只描述「把 ChipK 的某個手機畫面放進影片」

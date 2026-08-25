@@ -18,7 +18,8 @@ class MaterialCommandError extends Error {
 }
 
 function usage() {
-  return 'Usage: npm run material -- capture-cta --project <absolute-project-path> --stock-id <stock-id> --json';
+  return 'Usage (agent): node /Users/chiu/Developer/marketing-video/app/scripts/material.js capture-cta --project <absolute-project-path> --stock-id <stock-id> --json'
+    + '\n       (human): npm run material -- capture-cta --project <abs> --stock-id <id> --json';
 }
 
 function optionValue(argv, index, flag) {
