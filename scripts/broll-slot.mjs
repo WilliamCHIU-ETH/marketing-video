@@ -88,6 +88,58 @@ export function validateManifestIdentity({ project, revision, output, fileEviden
   return true;
 }
 
+export function traceRevisionLineage(revisions, startRevisionId) {
+  if (!Array.isArray(revisions)) throw new Error('Revision lineage 輸入不合法');
+  const byId = new Map(revisions.map((revision) => [revision.id, revision]));
+  if (byId.size !== revisions.length) throw new Error('Revision lineage ID 重複');
+  const chain = [];
+  const seen = new Set();
+  let currentId = normalizeRevisionId(startRevisionId);
+  while (currentId) {
+    if (seen.has(currentId)) throw new Error(`Revision lineage cycle：${currentId}`);
+    seen.add(currentId);
+    const revision = byId.get(currentId);
+    if (!revision) throw new Error(`Revision lineage 缺 ${currentId}`);
+    chain.push(currentId);
+    currentId = revision.parentRevisionId ? normalizeRevisionId(revision.parentRevisionId) : null;
+  }
+  return chain;
+}
+
+export function resolveLineageSource({
+  revisionChain,
+  slotId,
+  fileName,
+  sourcesByRevision,
+  fallbackSlotsByRevision = {},
+}) {
+  const slot = normalizeSlot(slotId);
+  if (!Array.isArray(revisionChain) || revisionChain.length === 0)
+    throw new Error('Revision lineage chain 不可為空');
+  for (const revisionId of revisionChain) {
+    const fallbackSlots = fallbackSlotsByRevision[revisionId] || [];
+    if (fallbackSlots.includes(slot)) continue;
+    const candidate = (sourcesByRevision[revisionId] || []).find((item) => item.fileName === fileName);
+    if (candidate) return { revisionId, sourcePath: candidate.sourcePath };
+  }
+  return null;
+}
+
+export function validatePromptSnapshotIdentity(rows) {
+  if (!Array.isArray(rows) || rows.length !== 12) throw new Error('prompt snapshot 必須正好 12 格');
+  const ids = new Set();
+  for (const row of rows) {
+    const slotId = normalizeSlot(row.slotId);
+    if (ids.has(slotId)) throw new Error(`prompt snapshot slotId 重複：${slotId}`);
+    ids.add(slotId);
+    if (!Buffer.isBuffer(row.workingBytes) || !Buffer.isBuffer(row.snapshotBytes))
+      throw new Error(`prompt snapshot ${slotId} 缺 byte evidence`);
+    if (!row.workingBytes.equals(row.snapshotBytes))
+      throw new Error(`prompt snapshot ${slotId} 與工作副本 byte 不一致`);
+  }
+  return true;
+}
+
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   if (!['prepare', 'finish'].includes(command)) throw new Error('子命令必須是 prepare 或 finish');
@@ -198,6 +250,162 @@ function copyDirectoryFiles(source, target) {
   }
 }
 
+function listRegularFiles(dir, extension) {
+  if (!fs.existsSync(dir)) return [];
+  assertDirectory(dir);
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.name.toLowerCase().endsWith(extension))
+    .map((entry) => {
+      const file = path.join(dir, entry.name);
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(`lineage source 不是一般檔案：${file}`);
+      return file;
+    })
+    .sort();
+}
+
+function detectLegacyLineage(projectDir, project) {
+  const lineageFile = path.join(projectDir, 'revision-artifacts', 'lineage.json');
+  let lineage = {};
+  if (fs.existsSync(lineageFile)) {
+    assertRegularFile(lineageFile, 'revision-artifacts/lineage.json');
+    lineage = readJson(lineageFile);
+    if (!lineage || Array.isArray(lineage) || typeof lineage !== 'object')
+      throw new Error('revision-artifacts/lineage.json 格式不合法');
+  }
+  let changed = false;
+  for (const summary of project.revisions || []) {
+    const artifactRoot = path.join(projectDir, 'revision-artifacts', summary.id);
+    if (fs.existsSync(artifactRoot) || lineage[summary.id]) continue;
+    const revisionFile = path.join(projectDir, 'revisions', `${summary.id}.json`);
+    assertRegularFile(revisionFile, `${summary.id}.json`);
+    const revision = readJson(revisionFile);
+    if (revision.visualForm !== 'card') continue;
+    const legacyRoot = `archive-card-v${Number(summary.number)}`;
+    const compositions = `${legacyRoot}/compositions`;
+    const renders = `${legacyRoot}/renders`;
+    const compositionsDir = safeProjectPath(projectDir, compositions, `${summary.id} legacy compositions`);
+    const rendersDir = safeProjectPath(projectDir, renders, `${summary.id} legacy renders`);
+    if (listRegularFiles(compositionsDir, '.html').length !== 12
+        || listRegularFiles(rendersDir, '.mp4').length !== 12) continue;
+    lineage[summary.id] = { sourceRoot: legacyRoot, compositions, renders };
+    changed = true;
+  }
+  if (changed || fs.existsSync(lineageFile)) writeJson(lineageFile, lineage);
+  return {
+    lineage,
+    lineageFile: fs.existsSync(lineageFile) ? lineageFile : null,
+    lineageSha256: fs.existsSync(lineageFile) ? hashFile(lineageFile) : null,
+  };
+}
+
+function loadRevisionLineage(projectDir, project, baseRevision) {
+  const revisions = [];
+  const seen = new Set();
+  let current = baseRevision;
+  while (current) {
+    if (seen.has(current.id)) throw new Error(`Revision lineage cycle：${current.id}`);
+    seen.add(current.id);
+    revisions.push(current);
+    if (!current.parentRevisionId) break;
+    const parentId = normalizeRevisionId(current.parentRevisionId);
+    const summary = project.revisions?.find((item) => item.id === parentId);
+    if (!summary) throw new Error(`Project summary 缺 lineage parent ${parentId}`);
+    const file = path.join(projectDir, 'revisions', `${parentId}.json`);
+    assertRegularFile(file, `${parentId}.json`);
+    const parent = readJson(file);
+    if (parent.id !== parentId || parent.number !== summary.number || parent.status !== 'done')
+      throw new Error(`${parentId} lineage identity 不一致`);
+    current = parent;
+  }
+  const chain = traceRevisionLineage(revisions, baseRevision.id);
+  return { revisions, chain };
+}
+
+function collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState) {
+  const { chain } = loadRevisionLineage(projectDir, project, base.revision);
+  const sourcesByRevision = {};
+  const fallbackSlotsByRevision = {};
+  for (const revisionId of chain) {
+    const sources = [];
+    const artifactRoot = path.join(projectDir, 'revision-artifacts', revisionId);
+    const compositionsDir = path.join(artifactRoot, 'compositions');
+    for (const file of listRegularFiles(compositionsDir, '.html')) {
+      sources.push({
+        fileName: path.basename(file),
+        sourcePath: path.relative(projectDir, file).split(path.sep).join('/'),
+      });
+    }
+    const legacy = lineageState.lineage[revisionId];
+    if (legacy) {
+      const sourceRoot = safeProjectPath(projectDir, legacy.sourceRoot, `${revisionId} lineage sourceRoot`);
+      const legacyCompositions = safeProjectPath(
+        projectDir,
+        legacy.compositions,
+        `${revisionId} lineage compositions`,
+      );
+      const legacyRenders = safeProjectPath(projectDir, legacy.renders, `${revisionId} lineage renders`);
+      if (!isInside(sourceRoot, legacyCompositions) || !isInside(sourceRoot, legacyRenders))
+        throw new Error(`${revisionId} lineage path 不在 sourceRoot`);
+      if (listRegularFiles(legacyCompositions, '.html').length !== 12
+          || listRegularFiles(legacyRenders, '.mp4').length !== 12)
+        throw new Error(`${revisionId} lineage legacy source 不再是 12 HTML／12 render`);
+      for (const file of listRegularFiles(legacyCompositions, '.html')) {
+        sources.push({
+          fileName: path.basename(file),
+          sourcePath: path.relative(projectDir, file).split(path.sep).join('/'),
+        });
+      }
+    }
+    sourcesByRevision[revisionId] = sources;
+
+    const stateFile = path.join(artifactRoot, STATE_FILE);
+    if (fs.existsSync(stateFile)) {
+      assertRegularFile(stateFile, `${revisionId}/${STATE_FILE}`);
+      const state = readJson(stateFile);
+      if (state.anchorKind === 'render-wrapper-fallback' && state.slot)
+        fallbackSlotsByRevision[revisionId] = [normalizeSlot(state.slot)];
+    }
+  }
+
+  const rows = artifacts.resolved.map((item) => {
+    const fileName = item.name.replace(/\.mp4$/i, '.html');
+    const resolved = resolveLineageSource({
+      revisionChain: chain,
+      slotId: item.slotId,
+      fileName,
+      sourcesByRevision,
+      fallbackSlotsByRevision,
+    });
+    if (!resolved) return { slotId: item.slotId, fileName, sourceRevisionId: null, sourcePath: null, sourceSha256: null };
+    const sourceFile = safeProjectPath(projectDir, resolved.sourcePath, `slot ${item.slotId} lineage HTML`);
+    assertRegularFile(sourceFile, `slot ${item.slotId} lineage HTML`);
+    return {
+      slotId: item.slotId,
+      fileName,
+      sourceRevisionId: resolved.revisionId,
+      sourcePath: resolved.sourcePath,
+      sourceSha256: hashFile(sourceFile),
+    };
+  });
+  return { chain, rows, fallbackSlotsByRevision };
+}
+
+function collectWorkingPrompts(projectDir, provenance) {
+  const rows = [...provenance.slots]
+    .sort((a, b) => a.slotId.localeCompare(b.slotId))
+    .map((slot) => {
+      const promptPath = `slots/${normalizeSlot(slot.slotId)}/prompt.txt`;
+      const file = safeProjectPath(projectDir, promptPath, `slot ${slot.slotId} working prompt`);
+      const stat = assertRegularFile(file, `slot ${slot.slotId} working prompt`);
+      const sha256 = hashFile(file);
+      if (sha256 !== slot.promptSha256)
+        throw new Error(`slot ${slot.slotId} 工作 prompt 不等於 base provenance；先修正 canonical working copy`);
+      return { slotId: slot.slotId, promptPath, sha256, size: stat.size };
+    });
+  if (rows.length !== 12) throw new Error('working prompt 必須正好 12 格');
+  return rows;
+}
+
 function command(commandName, args, { cwd = APP_DIR, logFile = null, allowFailure = false } = {}) {
   const result = spawnSync(commandName, args, {
     cwd,
@@ -289,8 +497,7 @@ function resolveBaseArtifacts(projectDir, base, slot) {
   assertRegularFile(avatarFile, 'base avatar');
   assertDirectory(assetsDir, 'base assets');
   assertRegularFile(hyperframesFile, 'base hyperframes.json');
-  const anchorSource = path.join(artifactRoot, 'compositions', target.name.replace(/\.mp4$/i, '.html'));
-  return { resolved, target, artifactRoot, mainFile, avatarFile, assetsDir, hyperframesFile, anchorSource };
+  return { resolved, target, artifactRoot, mainFile, avatarFile, assetsDir, hyperframesFile };
 }
 
 function makeRenderAnchorHtml({ slot, duration, width, height, anchorName }) {
@@ -314,6 +521,9 @@ function prepare(options) {
     throw new Error(`${targetRevisionId} output 已存在，拒絕覆寫`);
 
   const artifacts = resolveBaseArtifacts(projectDir, base, options.slot);
+  const lineageState = detectLegacyLineage(projectDir, project);
+  const sourceLineage = collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState);
+  const workingPromptRows = collectWorkingPrompts(projectDir, base.provenance);
   const targetProbe = ffprobe(artifacts.target.source);
   const expectedDurationSec = Number((
     artifacts.target.card.resolvedPlacement.endSec - artifacts.target.card.resolvedPlacement.startSec
@@ -336,17 +546,18 @@ function prepare(options) {
     console.log(`slot ${item.slotId} sha256 ${item.sha256}`);
   }
 
-  const promptPath = path.join(workdir, 'slots', options.slot, 'prompt.txt');
-  fs.mkdirSync(path.dirname(promptPath), { recursive: true });
-  fs.writeFileSync(promptPath, artifacts.target.provenance.promptText, 'utf8');
-
+  const promptRow = workingPromptRows.find((row) => row.slotId === options.slot);
+  const promptPath = safeProjectPath(projectDir, promptRow.promptPath, 'target working prompt');
+  const targetSource = sourceLineage.rows.find((row) => row.slotId === options.slot);
   let anchorHtml = null;
   let anchorKind = null;
   let anchorRender = null;
+  let lineageResolvedFrom = targetSource?.sourcePath || null;
   if (options.mode === 'anchor') {
     anchorHtml = path.join(workdir, 'compositions', artifacts.target.name.replace(/\.mp4$/i, '.html'));
-    if (fs.existsSync(artifacts.anchorSource)) {
-      copyFile(artifacts.anchorSource, anchorHtml);
+    if (targetSource?.sourcePath) {
+      const sourceHtml = safeProjectPath(projectDir, targetSource.sourcePath, 'target lineage HTML');
+      copyFile(sourceHtml, anchorHtml, targetSource.sourceSha256);
       anchorKind = 'source-html';
     } else {
       const anchorName = `anchor-slot${options.slot}.mp4`;
@@ -360,11 +571,12 @@ function prepare(options) {
         anchorName,
       }), 'utf8');
       anchorKind = 'render-wrapper-fallback';
+      lineageResolvedFrom = null;
     }
   }
 
   const state = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'prepared',
     preparedAt: new Date().toISOString(),
     projectId: project.id,
@@ -386,8 +598,16 @@ function prepare(options) {
     expectedDurationSec,
     targetRenderName: artifacts.target.name,
     targetBaseOutputSha256: artifacts.target.sha256,
-    promptPath: path.relative(projectDir, promptPath),
+    promptPath: promptRow.promptPath,
     promptSha256Before: hashFile(promptPath),
+    workingPromptRows,
+    revisionLineage: sourceLineage.chain,
+    sourceHtmlRows: sourceLineage.rows,
+    lineageFile: lineageState.lineageFile
+      ? path.relative(projectDir, lineageState.lineageFile).split(path.sep).join('/')
+      : null,
+    lineageSha256: lineageState.lineageSha256,
+    lineageResolvedFrom,
     anchorHtml: anchorHtml ? path.relative(projectDir, anchorHtml) : null,
     anchorKind,
     anchorRender: anchorRender ? path.relative(projectDir, anchorRender) : null,
@@ -401,12 +621,104 @@ function prepare(options) {
     slot: options.slot,
     anchorHtml,
     anchorKind,
-    promptPath,
+    lineageResolvedFrom,
+    promptPath: promptRow.promptPath,
     expectedDurationSec,
     nextCommand,
   };
   console.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+function materializeCompositionSnapshots(projectDir, workdir, state, artifacts, targetSlot) {
+  if (!Array.isArray(state.sourceHtmlRows) || state.sourceHtmlRows.length !== 12)
+    throw new Error('prepared state 缺 12 格 source HTML lineage');
+  const compositionsDir = path.join(workdir, 'compositions');
+  const fallbackSlots = [];
+  for (const row of state.sourceHtmlRows) {
+    const item = artifacts.resolved.find((candidate) => candidate.slotId === row.slotId);
+    if (!item) throw new Error(`source HTML lineage 多出 slot ${row.slotId}`);
+    const destination = path.join(compositionsDir, row.fileName);
+    if (row.slotId === targetSlot) {
+      assertRegularFile(destination, `slot ${row.slotId} agent HTML`);
+      if (state.anchorKind === 'render-wrapper-fallback') fallbackSlots.push(row.slotId);
+      continue;
+    }
+    if (row.sourcePath) {
+      const source = safeProjectPath(projectDir, row.sourcePath, `slot ${row.slotId} lineage HTML`);
+      if (hashFile(source) !== row.sourceSha256)
+        throw new Error(`slot ${row.slotId} lineage HTML 在 prepare 後改變`);
+      copyFile(source, destination, row.sourceSha256);
+      continue;
+    }
+    const probe = ffprobe(item.source);
+    const duration = Number((
+      item.card.resolvedPlacement.endSec - item.card.resolvedPlacement.startSec
+    ).toFixed(4));
+    const anchorName = `anchor-slot${row.slotId}.mp4`;
+    copyFile(item.source, path.join(workdir, 'assets', anchorName), item.sha256);
+    fs.writeFileSync(destination, makeRenderAnchorHtml({
+      slot: row.slotId,
+      duration,
+      width: probe.width,
+      height: probe.height,
+      anchorName,
+    }), 'utf8');
+    fallbackSlots.push(row.slotId);
+  }
+  const files = listRegularFiles(compositionsDir, '.html');
+  if (files.length !== 12) throw new Error(`composition snapshot 不是 12 份：${files.length}`);
+  const expectedNames = new Set(state.sourceHtmlRows.map((row) => row.fileName));
+  for (const file of files) {
+    if (!expectedNames.has(path.basename(file))) throw new Error(`composition snapshot 多出 ${file}`);
+  }
+  return { count: files.length, fallbackSlots: fallbackSlots.sort() };
+}
+
+function snapshotWorkingPrompts(projectDir, workdir, state, base, targetSlot) {
+  if (!Array.isArray(state.workingPromptRows) || state.workingPromptRows.length !== 12)
+    throw new Error('prepared state 缺 12 格 working prompt identity');
+  const baseBySlot = new Map(base.provenance.slots.map((slot) => [slot.slotId, slot]));
+  const evidence = state.workingPromptRows.map((before) => {
+    const workingFile = safeProjectPath(projectDir, before.promptPath, `slot ${before.slotId} working prompt`);
+    const workingBytes = fs.readFileSync(workingFile);
+    const workingSha256 = hashFile(workingFile);
+    const baseSlot = baseBySlot.get(before.slotId);
+    if (!baseSlot) throw new Error(`base provenance 缺 prompt slot ${before.slotId}`);
+    if (before.slotId !== targetSlot && workingSha256 !== before.sha256)
+      throw new Error(`非指定格 ${before.slotId} working prompt 在 prepare 後改變`);
+    if (before.slotId !== targetSlot && workingSha256 !== baseSlot.promptSha256)
+      throw new Error(`非指定格 ${before.slotId} working prompt 不等於 base provenance`);
+    if (before.slotId === targetSlot && workingSha256 === baseSlot.promptSha256)
+      throw new Error(`指定格 ${targetSlot} working prompt 沒有改變`);
+    const snapshotPath = `revision-artifacts/${state.targetRevisionId}/slots/${before.slotId}/prompt.txt`;
+    const snapshotFile = safeProjectPath(projectDir, snapshotPath, `slot ${before.slotId} prompt snapshot`);
+    copyFile(workingFile, snapshotFile);
+    const snapshotBytes = fs.readFileSync(snapshotFile);
+    return {
+      slotId: before.slotId,
+      workingPath: before.promptPath,
+      snapshotPath,
+      workingBytes,
+      snapshotBytes,
+      promptText: snapshotBytes.toString('utf8'),
+      promptSha256: hashFile(snapshotFile),
+    };
+  });
+  validatePromptSnapshotIdentity(evidence);
+  const snapshotFiles = evidence.map((row) => safeProjectPath(projectDir, row.snapshotPath, 'prompt snapshot'));
+  if (new Set(snapshotFiles).size !== 12 || snapshotFiles.some((file) => !fs.statSync(file).isFile()))
+    throw new Error('prompt snapshot 不是 12 份');
+  return evidence;
+}
+
+function revalidateWorkingPromptSnapshots(projectDir, evidence) {
+  const rows = evidence.map((row) => ({
+    slotId: row.slotId,
+    workingBytes: fs.readFileSync(safeProjectPath(projectDir, row.workingPath, 'working prompt')),
+    snapshotBytes: fs.readFileSync(safeProjectPath(projectDir, row.snapshotPath, 'prompt snapshot')),
+  }));
+  return validatePromptSnapshotIdentity(rows);
 }
 
 function copySlotFixture(workdir, htmlFile, slot) {
@@ -487,19 +799,33 @@ function finish(options) {
   const stateFile = path.join(workdir, STATE_FILE);
   assertRegularFile(stateFile, `${targetRevisionId}/${STATE_FILE}`);
   const state = readJson(stateFile);
-  if (state.status !== 'prepared' || state.projectId !== project.id || state.slot !== options.slot
-      || state.targetRevisionId !== targetRevisionId || state.baseRevisionNumber !== project.latestRevision)
+  if (state.schemaVersion !== 2 || state.status !== 'prepared' || state.projectId !== project.id
+      || state.slot !== options.slot || state.targetRevisionId !== targetRevisionId
+      || state.baseRevisionNumber !== project.latestRevision)
     throw new Error('prepared state 與目前 Project/slot/latestRevision 不一致');
 
   const base = loadBase(projectDir, project, state.baseRevisionId);
   if (hashFile(base.provenanceFile) !== state.baseProvenanceSha256)
     throw new Error('base provenance 在 prepare 後改變');
+  if (state.lineageFile) {
+    const lineageFile = safeProjectPath(projectDir, state.lineageFile, 'lineageFile');
+    if (hashFile(lineageFile) !== state.lineageSha256)
+      throw new Error('source lineage map 在 prepare 後改變');
+  }
   const baseMainFile = safeProjectPath(projectDir, state.baseMainFile, 'baseMainFile');
   if (hashFile(baseMainFile) !== state.baseMainSha256) throw new Error('base index.html 在 prepare 後改變');
   const artifacts = resolveBaseArtifacts(projectDir, base, options.slot);
-  const promptFile = safeProjectPath(projectDir, state.promptPath, 'promptPath');
-  assertRegularFile(promptFile, '新 prompt.txt');
-  const promptSha256 = hashFile(promptFile);
+  const compositionSnapshots = materializeCompositionSnapshots(
+    projectDir,
+    workdir,
+    state,
+    artifacts,
+    options.slot,
+  );
+  const promptSnapshots = snapshotWorkingPrompts(projectDir, workdir, state, base, options.slot);
+  const targetPrompt = promptSnapshots.find((row) => row.slotId === options.slot);
+  if (!targetPrompt) throw new Error(`prompt snapshots 缺 slot ${options.slot}`);
+  const promptSha256 = targetPrompt.promptSha256;
   const htmlFile = state.anchorHtml
     ? safeProjectPath(projectDir, state.anchorHtml, 'anchorHtml')
     : path.join(workdir, 'compositions', state.targetRenderName.replace(/\.mp4$/i, '.html'));
@@ -550,22 +876,18 @@ function finish(options) {
   assertRegularFile(baseFinalFile, 'base final output');
   const media = verifyFinalMedia(finalFile, baseFinalFile);
 
+  revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
+  const promptSnapshotBySlot = new Map(promptSnapshots.map((row) => [row.slotId, row]));
   const nextSlots = base.provenance.slots.map((slot) => {
     const item = nextItems.find((candidate) => candidate.slotId === slot.slotId);
-    if (slot.slotId === options.slot) {
-      const promptText = fs.readFileSync(promptFile, 'utf8');
-      return {
-        slotId: slot.slotId,
-        promptPath: path.relative(projectDir, promptFile).split(path.sep).join('/'),
-        outputPath: path.relative(projectDir, item.source).split(path.sep).join('/'),
-        promptText,
-        promptSha256,
-        outputSha256: item.sha256,
-      };
-    }
+    const prompt = promptSnapshotBySlot.get(slot.slotId);
+    if (!item || !prompt) throw new Error(`${targetRevisionId} provenance evidence 缺 slot ${slot.slotId}`);
     return {
-      ...slot,
+      slotId: slot.slotId,
+      promptPath: prompt.snapshotPath,
       outputPath: path.relative(projectDir, item.source).split(path.sep).join('/'),
+      promptText: prompt.promptText,
+      promptSha256: prompt.promptSha256,
       outputSha256: item.sha256,
     };
   });
@@ -595,6 +917,10 @@ function finish(options) {
       assetSize: item.size,
     };
   });
+  revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
+  const fallbackNote = compositionSnapshots.fallbackSlots.length > 0
+    ? `source HTML lineage 走完仍缺；slot ${compositionSnapshots.fallbackSlots.join(', ')} 使用 render-wrapper-fallback。`
+    : '';
 
   const nowISO = () => new Date().toISOString();
   const idFactory = () => 'broll-slot-idfactory-unused';
@@ -621,6 +947,7 @@ function finish(options) {
       paidProviderCalls: 0,
       note: [
         `broll-slot：以 ${base.summary.id} 為 base，只重生 slot ${options.slot}，其餘 11 格逐 byte 沿用；未呼叫 HeyGen。`,
+        fallbackNote,
         'job.json 待縫 3。',
         options.note ? String(options.note).trim() : '',
       ].filter(Boolean).join(' '),
@@ -673,6 +1000,7 @@ function finish(options) {
         brollProvenance: `12/12; 11 same as ${base.summary.id}; slot ${options.slot} different`,
       },
     });
+    revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
     const savedProject = store.get(project.id);
     const savedRevision = store.getRevision(project.id, targetRevisionId);
     validateManifestIdentity({
@@ -702,6 +1030,17 @@ function finish(options) {
         durationDiffSec: media.durationDiffSec,
       },
       checks: { slot: slotCheck.ok, main: mainCheck.ok },
+      sourceHtml: {
+        count: compositionSnapshots.count,
+        anchorKind: state.anchorKind,
+        lineageResolvedFrom: state.lineageResolvedFrom,
+        fallbackSlots: compositionSnapshots.fallbackSlots,
+      },
+      promptSnapshots: {
+        count: promptSnapshots.length,
+        workingCopyByteIdentical: true,
+        targetWorkingPath: state.promptPath,
+      },
       jobJson: 'pending seam 3',
     };
     writeJson(path.join(workdir, 'qa', 'validation.json'), validation);

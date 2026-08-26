@@ -41,6 +41,62 @@ test('selectBaseRevision defaults to latest done and validates explicit base', a
   assert.throws(() => selectBaseRevision(draft), /v003 不是 done/);
 });
 
+test('source HTML lineage follows parents and skips render-wrapper anchors', async () => {
+  const { resolveLineageSource, traceRevisionLineage } = await modulePromise;
+  const manifests = [
+    { id: 'v004', parentRevisionId: 'v003' },
+    { id: 'v003', parentRevisionId: 'v001' },
+    { id: 'v001' },
+  ];
+  const revisionChain = traceRevisionLineage(manifests, 'v004');
+  assert.deepEqual(revisionChain, ['v004', 'v003', 'v001']);
+  const sourcesByRevision = {
+    v004: [{ fileName: '05-limitup-fact.html', sourcePath: 'revision-artifacts/v004/compositions/05-limitup-fact.html' }],
+    v003: [{ fileName: '03-us-split.html', sourcePath: 'revision-artifacts/v003/compositions/03-us-split.html' }],
+    v001: [
+      { fileName: '03-us-split.html', sourcePath: 'archive-card-v1/compositions/03-us-split.html' },
+      { fileName: '05-limitup-fact.html', sourcePath: 'archive-card-v1/compositions/05-limitup-fact.html' },
+    ],
+  };
+  const fallbackSlotsByRevision = { v004: ['05'] };
+  assert.deepEqual(resolveLineageSource({
+    revisionChain,
+    slotId: '05',
+    fileName: '05-limitup-fact.html',
+    sourcesByRevision,
+    fallbackSlotsByRevision,
+  }), {
+    revisionId: 'v001',
+    sourcePath: 'archive-card-v1/compositions/05-limitup-fact.html',
+  });
+  assert.deepEqual(resolveLineageSource({
+    revisionChain,
+    slotId: '03',
+    fileName: '03-us-split.html',
+    sourcesByRevision,
+    fallbackSlotsByRevision,
+  }), {
+    revisionId: 'v003',
+    sourcePath: 'revision-artifacts/v003/compositions/03-us-split.html',
+  });
+});
+
+test('prompt snapshots must remain byte-identical to all 12 working copies', async () => {
+  const { validatePromptSnapshotIdentity } = await modulePromise;
+  const rows = Array.from({ length: 12 }, (_, index) => {
+    const slotId = String(index + 1).padStart(2, '0');
+    const workingBytes = Buffer.from(`slot ${slotId}\n動態：test\n`, 'utf8');
+    return { slotId, workingBytes, snapshotBytes: Buffer.from(workingBytes) };
+  });
+  assert.equal(validatePromptSnapshotIdentity(rows), true);
+  const changed = rows.map((row) => ({ ...row, snapshotBytes: Buffer.from(row.snapshotBytes) }));
+  changed[4].snapshotBytes[0] ^= 1;
+  assert.throws(
+    () => validatePromptSnapshotIdentity(changed),
+    /prompt snapshot 05 與工作副本 byte 不一致/,
+  );
+});
+
 test('compareSlotHashes requires exactly one changed output and current prompt hash', async () => {
   const { compareSlotHashes } = await modulePromise;
   const base = slots('base');
