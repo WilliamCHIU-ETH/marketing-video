@@ -14,6 +14,13 @@ const DATA_DIR = path.join(APP_DIR, 'runtime-data');
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 const PROJECT_STORE_FILE = path.join(APP_DIR, 'server', 'project-store.js');
 const JOB_STORE_FILE = path.join(APP_DIR, 'server', 'job-store.js');
+const MORNING_TEMPLATE_BUILD = path.join(
+  APP_DIR,
+  'config',
+  'templates',
+  '台股晨報',
+  'build-main.mjs',
+);
 const HF = ['--yes', 'hyperframes@0.8.3'];
 const STATE_FILE = 'broll-slot-state.json';
 
@@ -525,6 +532,11 @@ function prepare(options) {
   const lineageState = detectLegacyLineage(projectDir, project);
   const sourceLineage = collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState);
   const workingPromptRows = collectWorkingPrompts(projectDir, base.provenance);
+  const preferredSegmentLedger = path.join(projectDir, 'segment-ledger.v2.json');
+  const segmentLedgerFile = fs.existsSync(preferredSegmentLedger)
+    ? preferredSegmentLedger
+    : path.join(projectDir, 'segment-ledger.json');
+  assertRegularFile(segmentLedgerFile, 'segment ledger');
   const targetProbe = ffprobe(artifacts.target.source);
   const expectedDurationSec = Number((
     artifacts.target.card.resolvedPlacement.endSec - artifacts.target.card.resolvedPlacement.startSec
@@ -594,6 +606,8 @@ function prepare(options) {
     baseProvenanceSha256: hashFile(base.provenanceFile),
     baseMainFile: path.relative(projectDir, artifacts.mainFile),
     baseMainSha256: hashFile(artifacts.mainFile),
+    segmentLedgerFile: path.relative(projectDir, segmentLedgerFile).split(path.sep).join('/'),
+    segmentLedgerSha256: hashFile(segmentLedgerFile),
     baseFinalOutput: base.revision.outputs?.[0] || null,
     visualForm: base.revision.visualForm || null,
     expectedDurationSec,
@@ -746,14 +760,46 @@ function renderHyperframes(projectDir, outputFile, quality, logFile) {
   assertRegularFile(outputFile, 'HyperFrames render output');
 }
 
-function rewriteMainComposition(baseHtml, items) {
-  let html = baseHtml;
-  for (const item of items) {
-    const pattern = new RegExp(`(<video\\s+id=["']broll-${item.slotId}["'][^>]*?\\ssrc=["'])[^"']+(["'])`);
-    if (!pattern.test(html)) throw new Error(`base index.html 找不到 broll-${item.slotId}`);
-    html = html.replace(pattern, `$1renders/${item.name}$2`);
-  }
-  return html;
+function inferMainConfig(baseHtml) {
+  const compositionId = /data-composition-id=["']([^"']+)["']/.exec(baseHtml)?.[1];
+  if (!compositionId) throw new Error('base index.html 缺 data-composition-id');
+  const topBar = baseHtml.includes('class="tpl-header-overlay"')
+    ? 'header'
+    : (baseHtml.includes('class="title-board"') ? 'title-board' : 'none');
+  return {
+    compositionId,
+    topBar,
+    intro: baseHtml.includes('id="intro-frame"'),
+    bgm: baseHtml.includes('id="bgm"'),
+    brollAudio: baseHtml.includes('id="broll-audio-'),
+  };
+}
+
+function stageMainBuildInputs({ projectDir, workdir, state, base }) {
+  const segmentSource = safeProjectPath(projectDir, state.segmentLedgerFile, 'segmentLedgerFile');
+  if (hashFile(segmentSource) !== state.segmentLedgerSha256)
+    throw new Error('segment ledger 在 prepare 後改變');
+  const ledger = readJson(segmentSource);
+  if (!Array.isArray(ledger.segments) || !ledger.segments.length)
+    throw new Error('segment ledger 沒有 segments');
+  if (base.revision.visualForm) ledger.visualForm = base.revision.visualForm;
+  writeJson(path.join(workdir, 'segment-ledger.json'), ledger);
+  copyFile(
+    path.join(projectDir, 'caption-ledger.json'),
+    path.join(workdir, 'caption-ledger.json'),
+  );
+  copyFile(
+    path.join(projectDir, 'script', 'script.v1.txt'),
+    path.join(workdir, 'script', 'script.v1.txt'),
+  );
+  const baseMainFile = safeProjectPath(projectDir, state.baseMainFile, 'baseMainFile');
+  const config = inferMainConfig(fs.readFileSync(baseMainFile, 'utf8'));
+  writeJson(path.join(workdir, 'main.config.json'), config);
+  return {
+    segmentLedger: state.segmentLedgerFile,
+    visualForm: ledger.visualForm || 'card',
+    config,
+  };
 }
 
 function captureQaFrames(renderFile, qaDir, slot, duration) {
@@ -860,8 +906,12 @@ function finish(options) {
   changed.source = targetRender;
   changed.sha256 = hashFile(targetRender);
   changed.size = fs.statSync(targetRender).size;
-  const mainHtml = rewriteMainComposition(fs.readFileSync(baseMainFile, 'utf8'), nextItems);
-  fs.writeFileSync(path.join(workdir, 'index.html'), mainHtml, 'utf8');
+  const mainBuild = stageMainBuildInputs({ projectDir, workdir, state, base });
+  command('node', [MORNING_TEMPLATE_BUILD, '--project', workdir], {
+    cwd: APP_DIR,
+    logFile: path.join(workdir, 'qa', 'build-main.log'),
+  });
+  assertRegularFile(path.join(workdir, 'index.html'), 'template build-main output');
 
   const mainCheckFile = path.join(workdir, 'qa', 'check-main.json');
   const mainCheck = runHyperframesCheck(workdir, mainCheckFile);
@@ -1069,6 +1119,7 @@ function finish(options) {
         durationDiffSec: media.durationDiffSec,
       },
       checks: { slot: slotCheck.ok, main: mainCheck.ok },
+      mainBuild,
       sourceHtml: {
         count: compositionSnapshots.count,
         anchorKind: state.anchorKind,

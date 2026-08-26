@@ -7,18 +7,18 @@
  * 從 20px 32px 飄成 18px 30px、line-height 從 1.2 飄成 1.18，沒有任何地方定義過那組值。
  * 有規格的不飄（broll 與 caption 三支片位元組相同），沒家的才飄。
  *
- * 所以：版位一律讀 template/layout.json，每支片不同的東西一律讀 ledger 或 main.config.json。
- * 這支程式裡不得出現任何寫死的座標、顏色、字級或秒數。
+ * 所以：版位一律直接讀本 template 的 layout.json，每支片不同的東西一律讀 ledger 或
+ * main.config.json。這支程式裡不得出現任何寫死的座標、顏色、字級或秒數。
  *
- * 用法（在專案根目錄）：
+ * 用法（從 App 直接執行，不複製進 Project）：
  *
- *   node scripts/build-main.mjs
+ *   node app/config/templates/台股晨報/build-main.mjs --project /abs/project
  *
- * 讀什麼（全部相對於專案根）：
+ * 讀什麼：
  *
- *   template/layout.json      版位唯一來源
- *   template/header.mjs       header 片段產生器
- *   segment-ledger.json       durationSec / visualForm / segments[]
+ *   <template>/layout.json    版位唯一來源（--template 可覆寫）
+ *   <template>/header.mjs     header 片段產生器
+ *   segment-ledger.json       durationSec / visualForm / segments[] / segments[].audio
  *   caption-ledger.json       字幕分段（陣列，或 {captions:[]}）
  *   script/script.v1.txt      標題兩行（=== 區塊）
  *   renders/                  逐格 B-roll 成品，檔名以 <段號>- 開頭
@@ -48,19 +48,46 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { renderHeader } from '../template/header.mjs';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, '..');
+const { mergeSegmentAudioClips } = require(path.resolve(here, '../../../scripts/segment-utils.js'));
 
 const die = (msg) => { console.error(`❌ ${msg}`); process.exit(1); };
-const readJson = (rel) => {
-  const file = path.join(root, rel);
-  if (!fs.existsSync(file)) die(`找不到 ${rel}`);
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (e) { return die(`${rel} 不是合法 JSON：${e.message}`); }
+const parseArgs = (argv) => {
+  const options = { project: null, template: here };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token.startsWith('--')) die(`不認得參數：${token}`);
+    const [rawKey, inline] = token.slice(2).split('=', 2);
+    if (!['project', 'template'].includes(rawKey)) die(`不認得參數：--${rawKey}`);
+    const value = inline ?? argv[++index];
+    if (value == null || String(value).startsWith('--')) die(`--${rawKey} 缺值`);
+    options[rawKey] = value;
+  }
+  if (!options.project || !path.isAbsolute(options.project)) die('--project 必須是絕對路徑');
+  options.template = path.resolve(options.template);
+  return options;
 };
+const options = parseArgs(process.argv.slice(2));
+const root = fs.realpathSync(options.project);
+const templateDir = fs.realpathSync(options.template);
+const rootStat = fs.lstatSync(root);
+const templateStat = fs.lstatSync(templateDir);
+if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) die('--project 不是安全目錄');
+if (!templateStat.isDirectory() || templateStat.isSymbolicLink()) die('--template 不是安全目錄');
+const headerFile = path.join(templateDir, 'header.mjs');
+if (!fs.existsSync(headerFile)) die('template 找不到 header.mjs');
+const { renderHeader } = await import(pathToFileURL(headerFile).href);
+
+const readJsonFile = (file, label) => {
+  if (!fs.existsSync(file)) die(`找不到 ${label}`);
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { return die(`${label} 不是合法 JSON：${e.message}`); }
+};
+const readJson = (rel) => readJsonFile(path.join(root, rel), rel);
 const esc = (v) => String(v)
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -68,7 +95,7 @@ const n4 = (v) => Number(Number(v).toFixed(4));
 
 // ── 輸入 ───────────────────────────────────────────────────────────────────
 
-const L = readJson('template/layout.json');
+const L = readJsonFile(path.join(templateDir, 'layout.json'), 'template/layout.json');
 const ledger = readJson('segment-ledger.json');
 const captionsRaw = readJson('caption-ledger.json');
 const captions = Array.isArray(captionsRaw) ? captionsRaw : captionsRaw.captions;
@@ -166,6 +193,44 @@ const bodyDur = ledger.durationSec;
 const totalDur = n4(bodyDur + introSec);
 const shift = (t) => n4(Number(t) + introSec);
 
+function validateAudioSrc(src) {
+  if (!src || path.isAbsolute(src)) die(`segment audio.src 必須是 project 相對路徑：${src}`);
+  const file = path.resolve(root, src);
+  const relative = path.relative(root, file);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    die(`segment audio.src 超出 project：${src}`);
+  let stat;
+  try { stat = fs.lstatSync(file); } catch { die(`segment audio.src 不存在：${src}`); }
+  if (!stat.isFile() || stat.isSymbolicLink()) die(`segment audio.src 不是一般檔案：${src}`);
+  return String(src).split(path.sep).join('/');
+}
+
+let legacyAvatarAudio = false;
+let avatarClips;
+if (segments.every((segment) => segment.audio)) {
+  try {
+    avatarClips = mergeSegmentAudioClips(segments, {
+      durationSec: bodyDur,
+      toleranceSec: 0.02,
+      // Historical ledgers begin B-roll after the spoken greeting. When every segment points to
+      // one continuous all-avatar source, retain that source's leading greeting in the one clip.
+      extendSingleClipToDuration: true,
+    });
+  } catch (error) { die(error.message); }
+  avatarClips = avatarClips.map((clip) => ({ ...clip, src: validateAudioSrc(clip.src) }));
+} else {
+  legacyAvatarAudio = true;
+  console.log('WARN legacy-ledger-no-audio');
+  avatarClips = [{
+    src: validateAudioSrc('public/input-video.mp4'),
+    timelineStart: 0,
+    timelineEnd: bodyDur,
+    mediaStart: 0,
+    mediaEnd: bodyDur,
+    segmentIds: segments.map((segment) => String(segment.id)),
+  }];
+}
+
 // ── CSS ───────────────────────────────────────────────────────────────────
 
 const form = ledger.visualForm === 'fullframe'
@@ -180,8 +245,10 @@ const tb = L.titleBoard;
 const hdr = topBar === 'header'
   ? renderHeader({ date: title.date, label: title.label, layout: L }) : null;
 
+const avatarCssSelector = avatarClips.length === 1 ? '#avatar' : '.avatar-video';
+const cssColor = (value) => String(value).toLowerCase() === '#ffffff' ? '#fff' : value;
 const titleBoardCss = topBar === 'title-board' ? `
-.title-board{position:absolute;left:${tb.left}px;top:${tb.top}px;width:${tb.width}px;height:${tb.height}px;padding:${title.line2 ? tb.twoLine.padding : tb.oneLine.padding};border-radius:${tb.borderRadius}px;background:${tb.background};color:${tb.color};border:${tb.borderWidth}px solid ${tb.borderColor};transform:rotate(${tb.rotateDeg}deg);display:flex;${title.line2 ? 'flex-direction:column;' : ''}align-items:center;justify-content:center;text-align:center;${title.line2 ? '' : `font-size:${tb.oneLine.fontSize}px;font-weight:700;`}line-height:${title.line2 ? tb.twoLine.lineHeight : tb.oneLine.lineHeight};box-shadow:${tb.boxShadow}}${title.line2 ? `
+.title-board{position:absolute;left:${tb.left}px;top:${tb.top}px;width:${tb.width}px;height:${tb.height}px;padding:${title.line2 ? tb.twoLine.padding : tb.oneLine.padding};border-radius:${tb.borderRadius}px;background:${tb.background};color:${cssColor(tb.color)};border:${tb.borderWidth}px solid ${tb.borderColor};transform:rotate(${tb.rotateDeg}deg);display:flex;${title.line2 ? 'flex-direction:column;' : ''}align-items:center;justify-content:center;text-align:center;${title.line2 ? '' : `font-size:${tb.oneLine.fontSize}px;font-weight:700;`}line-height:${title.line2 ? tb.twoLine.lineHeight : tb.oneLine.lineHeight};box-shadow:${tb.boxShadow}}${title.line2 ? `
 .title-board .tl1{font-size:${tb.twoLine.line1.fontSize}px;font-weight:${tb.twoLine.line1.fontWeight};color:${tb.twoLine.line1.color}}
 .title-board .tl2{font-size:${tb.twoLine.line2.fontSize}px;font-weight:${tb.twoLine.line2.fontWeight}}` : ''}` : '';
 
@@ -198,12 +265,26 @@ const css = `
 *{box-sizing:border-box}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:${L.colors.stageBg};font-family:'${L.fonts.family}',sans-serif}
 #root{position:relative;width:${L.canvas.width}px;height:${L.canvas.height}px;overflow:hidden;background:${L.colors.stageBg}}
-#avatar{position:absolute;inset:0;width:${L.canvas.width}px;height:${L.canvas.height}px;object-fit:${L.avatar.objectFit}}
+${avatarCssSelector}{position:absolute;inset:0;width:${L.canvas.width}px;height:${L.canvas.height}px;object-fit:${L.avatar.objectFit}}
 .broll{position:absolute;left:${form.left}px;top:${form.top}px;width:${form.width}px;height:${form.height}px;object-fit:${form.objectFit}${form.borderRadius ? `;border-radius:${form.borderRadius}px` : ''}${form.boxShadow && form.boxShadow !== 'none' ? `;box-shadow:${form.boxShadow}` : ''}}${titleBoardCss}${hdr ? '\n' + hdr.css : ''}${introCss}
 .caption{position:absolute;left:${cap.left}px;top:${cap.top}px;width:${cap.width}px;height:${cap.height}px;display:flex;align-items:flex-start;justify-content:center;padding-top:${cap.paddingTop}px;text-align:center}
-.caption-inner{max-width:${inner.maxWidth}px;padding:${inner.padding};border-radius:${inner.borderRadius}px;background:${L.colors.captionBg};color:${inner.color};font-size:${inner.fontSize}px;font-weight:${inner.fontWeight};line-height:${inner.lineHeight};letter-spacing:${inner.letterSpacing};text-shadow:${inner.textShadow};box-shadow:${inner.boxShadow}}`.trim();
+.caption-inner{max-width:${inner.maxWidth}px;padding:${inner.padding};border-radius:${inner.borderRadius}px;background:${L.colors.captionBg};color:${cssColor(inner.color)};font-size:${inner.fontSize}px;font-weight:${inner.fontWeight};line-height:${inner.lineHeight};letter-spacing:${inner.letterSpacing};text-shadow:${inner.textShadow};box-shadow:${inner.boxShadow}}`.trim();
 
 // ── HTML 片段 ─────────────────────────────────────────────────────────────
+
+const avatarEls = avatarClips.flatMap((clip, index) => {
+  const single = avatarClips.length === 1;
+  const suffix = String(index + 1).padStart(2, '0');
+  const videoId = single ? 'avatar' : `avatar-${suffix}`;
+  const audioId = single ? 'avatar-audio' : `avatar-audio-${suffix}`;
+  const videoClass = single ? 'clip' : 'clip avatar-video';
+  const start = shift(clip.timelineStart);
+  const duration = n4(clip.timelineEnd - clip.timelineStart);
+  return [
+    `    <video id="${videoId}" class="${videoClass}" src="${esc(clip.src)}" muted playsinline data-start="${start}" data-duration="${duration}" data-media-start="${clip.mediaStart}" data-track-index="${T.avatar}"></video>`,
+    `    <audio id="${audioId}" class="clip" src="${esc(clip.src)}" data-start="${start}" data-duration="${duration}" data-media-start="${clip.mediaStart}" data-track-index="${T.avatarAudio}" data-volume="1"></audio>`,
+  ];
+}).join('\n');
 
 const brollEls = shots.map((s) =>
   `      <video id="broll-${s.id}" class="clip broll" src="renders/${s.file}" muted playsinline data-start="${shift(s.start)}" data-duration="${s.duration}" data-media-start="0" data-track-index="${T.brollBase + s.index}"></video>`
@@ -289,12 +370,12 @@ if (useBgm) {
 // 所以統一放後面，兩種形式都安全。
 // 開場卡放最後是因為它必須遮住第 0–1 秒的所有東西。
 
+const visualLayerEls = ledger.visualForm === 'fullframe'
+  ? [brollEls, hdr ? hdr.html : '', titleBoardHtml]
+  : [hdr ? hdr.html : '', titleBoardHtml, brollEls];
 const body = [
-  `    <video id="avatar" class="clip" src="public/input-video.mp4" muted playsinline data-start="${introSec}" data-duration="${bodyDur}" data-media-start="0" data-track-index="${T.avatar}"></video>`,
-  `    <audio id="avatar-audio" class="clip" src="public/input-video.mp4" data-start="${introSec}" data-duration="${bodyDur}" data-media-start="0" data-track-index="${T.avatarAudio}" data-volume="1"></audio>`,
-  brollEls,
-  hdr ? hdr.html : '',
-  titleBoardHtml,
+  avatarEls,
+  ...visualLayerEls,
   capEls,
   brollAudioEls,
   bgmHtml,
@@ -339,4 +420,12 @@ console.log(JSON.stringify({
   captions: captions.length,
   durationSec: totalDur,
   renders: shots.map((s) => `${s.id}→${s.file}`),
+  avatarClips: avatarClips.map((clip) => ({
+    src: clip.src,
+    start: shift(clip.timelineStart),
+    duration: n4(clip.timelineEnd - clip.timelineStart),
+    mediaStart: clip.mediaStart,
+    segments: clip.segmentIds,
+  })),
+  legacyAvatarAudio,
 }));
