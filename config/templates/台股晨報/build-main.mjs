@@ -266,6 +266,31 @@ if (segmentsWithAudio.length === segments.length) {
   die(`segment audio schema 混合；缺 audio 的段：${missing.join(', ')}`);
 }
 
+function assertAvatarVideoStreams(clips) {
+  const bySource = new Map();
+  for (const clip of clips) {
+    const ids = bySource.get(clip.src) || new Set();
+    for (const id of clip.segmentIds || []) ids.add(String(id));
+    bySource.set(clip.src, ids);
+  }
+  const missing = [];
+  for (const [src, ids] of bySource) {
+    const file = safePath(() => resolveExistingWithin(root, src, `主播 video source ${src}`, 'file'));
+    let streams;
+    try {
+      streams = execFileSync('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=index',
+        '-of', 'csv=p=0', file,
+      ], { encoding: 'utf8' }).trim();
+    } catch {
+      die(`無法驗證主播 video stream：段 ${[...ids].join(', ')}，src=${src}`);
+    }
+    if (!streams) missing.push(`段 ${[...ids].join(', ')}，src=${src}`);
+  }
+  if (missing.length) die(`主播 video source 沒有 video stream：${missing.join('；')}`);
+}
+assertAvatarVideoStreams(avatarClips);
+
 // ── CSS ───────────────────────────────────────────────────────────────────
 
 const form = ledger.visualForm === 'fullframe'

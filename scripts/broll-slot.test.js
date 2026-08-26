@@ -273,8 +273,10 @@ test('runner honors an external DATA_DIR for project validation and stores', asy
   });
   assert.equal(store.projectsDir, path.join(dataDir, 'projects'));
   assert.equal(jobStore.jobsDir, path.join(dataDir, 'jobs'));
+  const foreignDataDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-foreign-data-dir-'));
+  fs.mkdirSync(path.join(foreignDataDir, 'projects'));
   assert.throws(
-    () => validateProjectDir(projectDir, { dataDir: path.join(APP, 'runtime-data') }),
+    () => validateProjectDir(projectDir, { dataDir: foreignDataDir }),
     /Project 不在 DATA_DIR\/projects 內/,
   );
 });

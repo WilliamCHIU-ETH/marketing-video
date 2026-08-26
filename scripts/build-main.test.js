@@ -18,6 +18,22 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+let speakerMp4Bytes = null;
+function writeSpeakerMp4(file) {
+  if (!speakerMp4Bytes) {
+    const cacheDir = fs.mkdtempSync(path.join(TMP, 'seam01-speaker-mp4-'));
+    const cacheFile = path.join(cacheDir, 'speaker.mp4');
+    const result = spawnSync('ffmpeg', [
+      '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=32x32:r=10:d=0.2',
+      '-c:v', 'mpeg4', '-pix_fmt', 'yuv420p', '-an', cacheFile,
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    speakerMp4Bytes = fs.readFileSync(cacheFile);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, speakerMp4Bytes);
+}
+
 function writePcmWav(file, durationSec, sampleRate = 8000) {
   const samples = Math.round(durationSec * sampleRate);
   const dataSize = samples * 2;
@@ -54,8 +70,8 @@ function fixture(segments, durationSec = Math.max(...segments.map((segment) => s
   if (!audioSources.size) audioSources.add('public/input-video.mp4');
   for (const source of audioSources) {
     const file = path.join(root, source);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'audio fixture');
+    if (path.extname(source).toLowerCase() === '.wav') writePcmWav(file, 1);
+    else writeSpeakerMp4(file);
   }
   for (const segment of segments) {
     if ((segment.visual?.mode ?? 'broll') === 'none') continue;
@@ -119,6 +135,26 @@ test('all segments without audio use only the explicit legacy fallback', () => {
   assert.equal(output.legacyAvatarAudio, true);
 });
 
+test('speaker source requires a video stream: WAV fails and MP4 passes', () => {
+  const audioOnly = fixture([
+    segment('01', 0, 1, { src: 'recordings/voice.wav' }),
+  ], 1);
+  let result = runBuild(audioOnly);
+  assert.notEqual(result.status, 0);
+  assert.match(
+    `${result.stdout}${result.stderr}`,
+    /主播 video source 沒有 video stream：段 01，src=recordings\/voice\.wav/,
+  );
+
+  const speakerVideo = fixture([
+    segment('01', 0, 1, { src: 'avatar/speaker.mp4' }),
+  ], 1);
+  result = runBuild(speakerVideo);
+  assert.equal(result.status, 0, result.stderr);
+  const html = fs.readFileSync(path.join(speakerVideo, 'index.html'), 'utf8');
+  assert.match(html, /<video id="avatar"[^>]+src="avatar\/speaker\.mp4"/);
+});
+
 test('durationSec always renders endSec minus startSec instead of stale fixture value', () => {
   const stale = segment('01', 0, 5.195);
   stale.durationSec = 5.2;
@@ -131,12 +167,16 @@ test('durationSec always renders endSec minus startSec instead of stale fixture 
 });
 
 test('rejects symlinked project/template/audio path components', () => {
+  const symlinkFixture = fs.mkdtempSync(path.join(TMP, 'seam01-symlink-component-'));
+  const symlinkTarget = fs.mkdtempSync(path.join(TMP, 'seam01-symlink-target-'));
+  fs.writeFileSync(path.join(symlinkTarget, 'avatar-pairs.json'), '{}');
+  fs.symlinkSync(symlinkTarget, path.join(symlinkFixture, 'assets'));
   assert.throws(
     () => assertNoSymlinkComponents(
-      path.join(APP, 'assets', 'avatar-pairs.json'),
-      'app/assets reviewer fixture',
+      path.join(symlinkFixture, 'assets', 'avatar-pairs.json'),
+      'temporary assets reviewer fixture',
     ),
-    /component 是 symlink.*app\/assets/,
+    /component 是 symlink.*assets/,
   );
 
   const base = fixture([segment('01', 0, 1)], 1);
