@@ -280,6 +280,42 @@ function assertDirectory(dir, label = dir) {
   return stat;
 }
 
+export function createPrepareWorkspace(finalWorkdir, { token = crypto.randomUUID() } = {}) {
+  const target = path.resolve(finalWorkdir);
+  const parent = path.dirname(target);
+  assertDirectory(parent, 'revision-artifacts');
+  if (fs.existsSync(target)) throw new Error(`prepare workdir 已存在：${target}`);
+  const safeToken = String(token).replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const stagingWorkdir = path.join(parent, `.tmp-${path.basename(target)}-${process.pid}-${safeToken}`);
+  if (fs.existsSync(stagingWorkdir)) throw new Error(`prepare staging workdir 已存在：${stagingWorkdir}`);
+  fs.mkdirSync(stagingWorkdir);
+  const created = fs.lstatSync(stagingWorkdir);
+  let published = false;
+  const assertOwnedStaging = () => {
+    const current = fs.lstatSync(stagingWorkdir);
+    if (!current.isDirectory() || current.isSymbolicLink()
+        || current.dev !== created.dev || current.ino !== created.ino)
+      throw new Error('prepare staging workdir identity 已改變，拒絕操作');
+  };
+  return {
+    finalWorkdir: target,
+    stagingWorkdir,
+    publish() {
+      assertOwnedStaging();
+      if (fs.existsSync(target)) throw new Error(`prepare workdir 已存在：${target}`);
+      fs.renameSync(stagingWorkdir, target);
+      published = true;
+      return target;
+    },
+    rollback() {
+      if (published || !fs.existsSync(stagingWorkdir)) return { removed: false, published };
+      assertOwnedStaging();
+      fs.rmSync(stagingWorkdir, { recursive: true, force: false });
+      return { removed: true, published: false };
+    },
+  };
+}
+
 export function validateProjectDir(input, { dataDir = resolveRunnerDataDir() } = {}) {
   const requested = path.resolve(input);
   const projectsDir = path.join(path.resolve(dataDir), 'projects');
@@ -687,114 +723,134 @@ function prepare(options) {
   if (Math.abs(targetProbe.duration - expectedDurationSec) > 0.11)
     throw new Error(`slot ${options.slot} base render 時長與 staged-ledger placement 不一致`);
 
-  for (const dir of ['compositions', 'renders', 'qa', 'slots', 'public', 'assets'])
-    fs.mkdirSync(path.join(workdir, dir), { recursive: true });
-  copyDirectoryFiles(artifacts.assetsDir, path.join(workdir, 'assets'));
-  copyFile(artifacts.hyperframesFile, path.join(workdir, 'hyperframes.json'));
-  copyFile(artifacts.avatarFile, path.join(workdir, 'public', 'input-video.mp4'));
-  const ledgerAudioSources = stageLedgerAudioSources({
-    projectDir,
-    workdir,
-    ledger: canonicalLedger,
-  });
+  const workspaceAttempt = createPrepareWorkspace(workdir);
+  const stagingWorkdir = workspaceAttempt.stagingWorkdir;
+  try {
+    for (const dir of ['compositions', 'renders', 'qa', 'slots', 'public', 'assets'])
+      fs.mkdirSync(path.join(stagingWorkdir, dir), { recursive: true });
+    copyDirectoryFiles(artifacts.assetsDir, path.join(stagingWorkdir, 'assets'));
+    copyFile(artifacts.hyperframesFile, path.join(stagingWorkdir, 'hyperframes.json'));
+    copyFile(artifacts.avatarFile, path.join(stagingWorkdir, 'public', 'input-video.mp4'));
+    const ledgerAudioSources = stageLedgerAudioSources({
+      projectDir,
+      workdir: stagingWorkdir,
+      ledger: canonicalLedger,
+    });
 
-  const reuseRows = [];
-  for (const item of artifacts.resolved) {
-    if (item.slotId === options.slot) continue;
-    const target = path.join(workdir, 'renders', item.name);
-    copyFile(item.source, target, item.sha256);
-    reuseRows.push({ slotId: item.slotId, outputSha256: item.sha256, sourcePath: item.card.assetPath });
-    console.log(`slot ${item.slotId} sha256 ${item.sha256}`);
-  }
-
-  const promptRow = workingPromptRows.find((row) => row.slotId === options.slot);
-  const promptPath = safeProjectPath(projectDir, promptRow.promptPath, 'target working prompt');
-  const targetSource = sourceLineage.rows.find((row) => row.slotId === options.slot);
-  let anchorHtml = null;
-  let anchorKind = null;
-  let anchorRender = null;
-  let lineageResolvedFrom = targetSource?.sourcePath || null;
-  if (options.mode === 'anchor') {
-    anchorHtml = path.join(workdir, 'compositions', artifacts.target.name.replace(/\.mp4$/i, '.html'));
-    if (targetSource?.sourcePath) {
-      const sourceHtml = safeProjectPath(projectDir, targetSource.sourcePath, 'target lineage HTML');
-      copyFile(sourceHtml, anchorHtml, targetSource.sourceSha256);
-      anchorKind = 'source-html';
-    } else {
-      const anchorName = `anchor-slot${options.slot}.mp4`;
-      anchorRender = path.join(workdir, 'assets', anchorName);
-      copyFile(artifacts.target.source, anchorRender, artifacts.target.sha256);
-      fs.writeFileSync(anchorHtml, makeRenderAnchorHtml({
-        slot: options.slot,
-        duration: expectedDurationSec,
-        width: targetProbe.width,
-        height: targetProbe.height,
-        anchorName,
-      }), 'utf8');
-      anchorKind = 'render-wrapper-fallback';
-      lineageResolvedFrom = null;
+    const reuseRows = [];
+    for (const item of artifacts.resolved) {
+      if (item.slotId === options.slot) continue;
+      const target = path.join(stagingWorkdir, 'renders', item.name);
+      copyFile(item.source, target, item.sha256);
+      reuseRows.push({ slotId: item.slotId, outputSha256: item.sha256, sourcePath: item.card.assetPath });
+      console.log(`slot ${item.slotId} sha256 ${item.sha256}`);
     }
+
+    const promptRow = workingPromptRows.find((row) => row.slotId === options.slot);
+    const promptPath = safeProjectPath(projectDir, promptRow.promptPath, 'target working prompt');
+    const targetSource = sourceLineage.rows.find((row) => row.slotId === options.slot);
+    let anchorHtml = null;
+    let anchorKind = null;
+    let anchorRender = null;
+    let lineageResolvedFrom = targetSource?.sourcePath || null;
+    if (options.mode === 'anchor') {
+      anchorHtml = path.join(
+        stagingWorkdir,
+        'compositions',
+        artifacts.target.name.replace(/\.mp4$/i, '.html'),
+      );
+      if (targetSource?.sourcePath) {
+        const sourceHtml = safeProjectPath(projectDir, targetSource.sourcePath, 'target lineage HTML');
+        copyFile(sourceHtml, anchorHtml, targetSource.sourceSha256);
+        anchorKind = 'source-html';
+      } else {
+        const anchorName = `anchor-slot${options.slot}.mp4`;
+        anchorRender = path.join(stagingWorkdir, 'assets', anchorName);
+        copyFile(artifacts.target.source, anchorRender, artifacts.target.sha256);
+        fs.writeFileSync(anchorHtml, makeRenderAnchorHtml({
+          slot: options.slot,
+          duration: expectedDurationSec,
+          width: targetProbe.width,
+          height: targetProbe.height,
+          anchorName,
+        }), 'utf8');
+        anchorKind = 'render-wrapper-fallback';
+        lineageResolvedFrom = null;
+      }
+    }
+
+    const finalArtifactPath = (stagedFile) => stagedFile
+      ? path.join(workdir, path.relative(stagingWorkdir, stagedFile))
+      : null;
+    const finalAnchorHtml = finalArtifactPath(anchorHtml);
+    const finalAnchorRender = finalArtifactPath(anchorRender);
+    const state = {
+      schemaVersion: 2,
+      status: 'prepared',
+      preparedAt: new Date().toISOString(),
+      projectId: project.id,
+      projectDir,
+      baseRevisionId: base.summary.id,
+      baseRevisionNumber: base.summary.number,
+      targetRevisionId,
+      targetRevisionNumber: targetNumber,
+      slot: options.slot,
+      mode: options.mode,
+      workdir,
+      baseRevisionFile: path.relative(projectDir, base.revisionFile),
+      baseProvenanceFile: path.relative(projectDir, base.provenanceFile),
+      baseProvenanceSha256: hashFile(base.provenanceFile),
+      baseMainFile: path.relative(projectDir, artifacts.mainFile),
+      baseMainSha256: hashFile(artifacts.mainFile),
+      segmentLedgerFile: path.relative(projectDir, segmentLedgerFile).split(path.sep).join('/'),
+      segmentLedgerSha256: hashFile(segmentLedgerFile),
+      ledgerAudioSources,
+      visualSegmentCount,
+      visualSegmentIds: visualSegments.map((segment) => segment.id),
+      baseFinalOutput: base.revision.outputs?.[0] || null,
+      visualForm: base.revision.visualForm || null,
+      expectedDurationSec,
+      targetRenderName: artifacts.target.name,
+      targetBaseOutputSha256: artifacts.target.sha256,
+      promptPath: promptRow.promptPath,
+      promptSha256Before: hashFile(promptPath),
+      workingPromptRows,
+      revisionLineage: sourceLineage.chain,
+      sourceHtmlRows: sourceLineage.rows,
+      lineageFile: lineageState.lineageFile
+        ? path.relative(projectDir, lineageState.lineageFile).split(path.sep).join('/')
+        : null,
+      lineageSha256: lineageState.lineageSha256,
+      lineageResolvedFrom,
+      anchorHtml: finalAnchorHtml ? path.relative(projectDir, finalAnchorHtml) : null,
+      anchorKind,
+      anchorRender: finalAnchorRender ? path.relative(projectDir, finalAnchorRender) : null,
+      reuseRows,
+    };
+    writeJson(path.join(stagingWorkdir, STATE_FILE), state);
+    workspaceAttempt.publish();
+
+    const nextCommand = `node ${__filename} finish --project ${JSON.stringify(projectDir)} --slot ${options.slot}`;
+    const result = {
+      workdir,
+      slot: options.slot,
+      anchorHtml: finalAnchorHtml,
+      anchorKind,
+      lineageResolvedFrom,
+      promptPath: promptRow.promptPath,
+      expectedDurationSec,
+      ledgerAudioSources,
+      nextCommand,
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return result;
+  } catch (error) {
+    let workspaceRollback;
+    try { workspaceRollback = workspaceAttempt.rollback(); }
+    catch (rollbackError) { workspaceRollback = { removed: false, error: rollbackError.message }; }
+    console.error(JSON.stringify({ ok: false, prepareWorkspaceRollback: workspaceRollback }, null, 2));
+    throw error;
   }
-
-  const state = {
-    schemaVersion: 2,
-    status: 'prepared',
-    preparedAt: new Date().toISOString(),
-    projectId: project.id,
-    projectDir,
-    baseRevisionId: base.summary.id,
-    baseRevisionNumber: base.summary.number,
-    targetRevisionId,
-    targetRevisionNumber: targetNumber,
-    slot: options.slot,
-    mode: options.mode,
-    workdir,
-    baseRevisionFile: path.relative(projectDir, base.revisionFile),
-    baseProvenanceFile: path.relative(projectDir, base.provenanceFile),
-    baseProvenanceSha256: hashFile(base.provenanceFile),
-    baseMainFile: path.relative(projectDir, artifacts.mainFile),
-    baseMainSha256: hashFile(artifacts.mainFile),
-    segmentLedgerFile: path.relative(projectDir, segmentLedgerFile).split(path.sep).join('/'),
-    segmentLedgerSha256: hashFile(segmentLedgerFile),
-    ledgerAudioSources,
-    visualSegmentCount,
-    visualSegmentIds: visualSegments.map((segment) => segment.id),
-    baseFinalOutput: base.revision.outputs?.[0] || null,
-    visualForm: base.revision.visualForm || null,
-    expectedDurationSec,
-    targetRenderName: artifacts.target.name,
-    targetBaseOutputSha256: artifacts.target.sha256,
-    promptPath: promptRow.promptPath,
-    promptSha256Before: hashFile(promptPath),
-    workingPromptRows,
-    revisionLineage: sourceLineage.chain,
-    sourceHtmlRows: sourceLineage.rows,
-    lineageFile: lineageState.lineageFile
-      ? path.relative(projectDir, lineageState.lineageFile).split(path.sep).join('/')
-      : null,
-    lineageSha256: lineageState.lineageSha256,
-    lineageResolvedFrom,
-    anchorHtml: anchorHtml ? path.relative(projectDir, anchorHtml) : null,
-    anchorKind,
-    anchorRender: anchorRender ? path.relative(projectDir, anchorRender) : null,
-    reuseRows,
-  };
-  writeJson(path.join(workdir, STATE_FILE), state);
-
-  const nextCommand = `node ${__filename} finish --project ${JSON.stringify(projectDir)} --slot ${options.slot}`;
-  const result = {
-    workdir,
-    slot: options.slot,
-    anchorHtml,
-    anchorKind,
-    lineageResolvedFrom,
-    promptPath: promptRow.promptPath,
-    expectedDurationSec,
-    ledgerAudioSources,
-    nextCommand,
-  };
-  console.log(JSON.stringify(result, null, 2));
-  return result;
 }
 
 function materializeCompositionSnapshots(projectDir, workdir, state, artifacts, targetSlot) {
@@ -1067,10 +1123,57 @@ function captureQaFrames(renderFile, qaDir, slot, duration) {
   }
 }
 
-function formatJobId(slot, revisionId, date = new Date()) {
+const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+export function formatJobId(slot, revisionId, projectId, date = new Date()) {
+  const normalizedSlot = normalizeSlot(slot);
+  const normalizedRevision = normalizeRevisionId(revisionId);
+  const rawProjectId = String(projectId || '');
+  if (!RUN_ID_PATTERN.test(rawProjectId)) throw new Error(`Project ID 不合法：${projectId}`);
+  const withoutPrefix = rawProjectId.replace(/^project-/i, '');
+  const readable = withoutPrefix.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 20)
+    .replace(/[^a-zA-Z0-9]+$/g, '') || 'project';
+  const digest = crypto.createHash('sha256').update(rawProjectId).digest('hex').slice(0, 10);
   const iso = date.toISOString();
-  const stamp = `${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 16).replace(':', '')}`;
-  return `slot-${slot}-${revisionId}-${stamp}`;
+  const stamp = `${iso.slice(0, 10).replaceAll('-', '')}-${iso.slice(11, 19).replaceAll(':', '')}`;
+  const id = `slot-${normalizedSlot}-${normalizedRevision}-${readable}-${digest}-${stamp}`;
+  if (!RUN_ID_PATTERN.test(id)) throw new Error('產生的 Run ID 不合法');
+  return id;
+}
+
+export function assertJobIdAvailable(jobStore, { jobId, projectId, revisionId }) {
+  const dir = jobStore.jobDir(jobId);
+  if (!fs.existsSync(dir)) return true;
+  let existing = null;
+  try { existing = jobStore.readJob(jobId); } catch (error) {
+    throw new Error(`Run ID ${jobId} 已存在且無法驗證：${error.message}`);
+  }
+  if (existing && existing.projectId !== projectId) {
+    throw new Error(
+      `Run ID collision：${jobId} 已屬於 Project ${existing.projectId}，不可寫入 ${projectId}`,
+    );
+  }
+  if (existing && existing.revisionId !== revisionId)
+    throw new Error(`Run ID collision：${jobId} 已屬於 Revision ${existing.revisionId}`);
+  throw new Error(`Run ID ${jobId} 已存在，拒絕覆寫`);
+}
+
+export function removeOwnedJobRecord(jobStore, { jobId, projectId, revisionId }) {
+  const dir = jobStore.jobDir(jobId);
+  if (!fs.existsSync(dir)) return { removed: false, reason: 'job-not-found' };
+  assertDirectory(dir, `Run ${jobId} 目錄`);
+  const job = jobStore.readJob(jobId);
+  if (!job || job.projectId !== projectId || job.revisionId !== revisionId) {
+    throw new Error(`Run ${jobId} identity 不屬於本次 rollback，拒絕刪除`);
+  }
+  const entries = fs.readdirSync(dir).sort();
+  if (entries.length !== 1 || entries[0] !== 'job.json')
+    throw new Error(`Run ${jobId} 目錄含非本次 job.json 的資料，拒絕刪除`);
+  const file = jobStore.jobFile(jobId);
+  assertRegularFile(file, `Run ${jobId} job.json`);
+  fs.unlinkSync(file);
+  fs.rmdirSync(dir);
+  return { removed: true };
 }
 
 function verifyFinalMedia(finalFile, baseFile) {
@@ -1152,6 +1255,28 @@ function rollbackDraft(store, projectId, revisionId) {
     store.updateRevision(projectId, revisionId, { status: 'draft', outputs: [], archived: [] });
   }
   return { aborted: true, result: store.abortRevision(projectId, revisionId) };
+}
+
+export function rollbackFinishMetadata({
+  store,
+  jobStore,
+  projectId,
+  revisionId,
+  jobId,
+  jobSaveAttempted,
+  revisionAdded,
+}) {
+  let job = { removed: false, reason: 'save-not-attempted' };
+  if (jobSaveAttempted) {
+    try { job = removeOwnedJobRecord(jobStore, { jobId, projectId, revisionId }); }
+    catch (error) { job = { removed: false, error: error.message }; }
+  }
+  let revision = { aborted: false, reason: 'revision-not-added' };
+  if (revisionAdded) {
+    try { revision = rollbackDraft(store, projectId, revisionId); }
+    catch (error) { revision = { aborted: false, error: error.message }; }
+  }
+  return { job, revision };
 }
 
 function finish(options) {
@@ -1330,8 +1455,10 @@ function finish(options) {
   const nowISO = () => new Date().toISOString();
   const idFactory = () => 'broll-slot-idfactory-unused';
   const { store, jobStore } = createRunnerStores({ dataDir, nowISO, idFactory });
-  const jobId = formatJobId(options.slot, targetRevisionId);
+  const jobId = formatJobId(options.slot, targetRevisionId, project.id);
+  assertJobIdAvailable(jobStore, { jobId, projectId: project.id, revisionId: targetRevisionId });
   let added = false;
+  let jobSaveAttempted = false;
   try {
     outputAttempt.publish(outputEvidence);
     const revision = store.addRevision(project.id, {
@@ -1433,6 +1560,18 @@ function finish(options) {
       renderInputManifest: mainBuild.renderInputManifest,
       renderInputManifestSha256: mainBuild.renderInputManifestSha256,
     };
+    revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
+    const preSaveProject = store.get(project.id);
+    const preSaveRevision = store.getRevision(project.id, targetRevisionId);
+    validateManifestIdentity({
+      project: preSaveProject,
+      revision: preSaveRevision,
+      output,
+      fileEvidence: outputEvidence,
+    });
+    if (updated.id !== preSaveRevision.id)
+      throw new Error('updateRevision 回傳與 pre-save Revision 不一致');
+    jobSaveAttempted = true;
     jobStore.saveJob(job, { projectStore: store });
     revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
     const savedProject = store.get(project.id);
@@ -1495,11 +1634,15 @@ function finish(options) {
     console.log(JSON.stringify(validation, null, 2));
     return validation;
   } catch (error) {
-    let rollback = null;
-    if (added) {
-      try { rollback = rollbackDraft(store, project.id, targetRevisionId); }
-      catch (rollbackError) { rollback = { aborted: false, error: rollbackError.message }; }
-    }
+    const rollback = rollbackFinishMetadata({
+      store,
+      jobStore,
+      projectId: project.id,
+      revisionId: targetRevisionId,
+      jobId,
+      jobSaveAttempted,
+      revisionAdded: added,
+    });
     console.error(JSON.stringify({ ok: false, error: error.message, rollback }, null, 2));
     throw error;
   }

@@ -187,6 +187,104 @@ test('visual segment count, not a hard-coded twelve, owns hash comparison', asyn
   ]);
 });
 
+test('job IDs include project identity and reject a cross-Project collision', async () => {
+  const { assertJobIdAvailable, createRunnerStores, formatJobId } = await modulePromise;
+  const when = new Date('2026-08-26T11:35:42.000Z');
+  const firstProject = 'project-shared-prefix-abcdefghijkl-0001';
+  const secondProject = 'project-shared-prefix-abcdefghijkl-0002';
+  const first = formatJobId('05', 'v009', firstProject, when);
+  const second = formatJobId('05', 'v009', secondProject, when);
+  assert.notEqual(first, second);
+  assert.match(first, /^slot-05-v009-shared-prefix-abcdef-[0-9a-f]{10}-20260826-113542$/);
+  assert.match(first, /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/);
+
+  const dataDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-job-collision-'));
+  const { jobStore } = createRunnerStores({
+    dataDir,
+    nowISO: () => when.toISOString(),
+    idFactory: () => 'unused',
+  });
+  jobStore.writeJobRecord({
+    id: first,
+    projectId: firstProject,
+    revisionId: 'v009',
+  });
+  assert.throws(
+    () => assertJobIdAvailable(jobStore, {
+      jobId: first,
+      projectId: 'project-other',
+      revisionId: 'v009',
+    }),
+    /Run ID collision.*已屬於 Project project-shared-prefix-abcdefghijkl-0001.*project-other/,
+  );
+});
+
+test('prepare workspace rollback removes partial staging and permits retry', async () => {
+  const { createPrepareWorkspace } = await modulePromise;
+  const root = fs.mkdtempSync(path.join(TMP, 'broll-slot-prepare-transaction-'));
+  const artifacts = path.join(root, 'revision-artifacts');
+  fs.mkdirSync(artifacts);
+  const finalWorkdir = path.join(artifacts, 'v009');
+
+  const failed = createPrepareWorkspace(finalWorkdir, { token: 'failed-stage' });
+  fs.mkdirSync(path.join(failed.stagingWorkdir, 'assets'));
+  fs.writeFileSync(path.join(failed.stagingWorkdir, 'assets', 'partial.bin'), 'partial');
+  assert.deepEqual(failed.rollback(), { removed: true, published: false });
+  assert.equal(fs.existsSync(failed.stagingWorkdir), false);
+  assert.equal(fs.existsSync(finalWorkdir), false);
+
+  const retry = createPrepareWorkspace(finalWorkdir, { token: 'retry' });
+  fs.writeFileSync(path.join(retry.stagingWorkdir, 'broll-slot-state.json'), '{}');
+  assert.equal(retry.publish(), finalWorkdir);
+  assert.equal(fs.existsSync(retry.stagingWorkdir), false);
+  assert.equal(fs.existsSync(path.join(finalWorkdir, 'broll-slot-state.json')), true);
+});
+
+test('post-save validation rollback removes owned Job and aborts Revision', async () => {
+  const { createRunnerStores, rollbackFinishMetadata } = await modulePromise;
+  const dataDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-metadata-rollback-'));
+  let id = 0;
+  const { store, jobStore } = createRunnerStores({
+    dataDir,
+    nowISO: () => '2026-08-26T11:35:42.000Z',
+    idFactory: () => `transaction-${++id}`,
+  });
+  const project = store.create({ name: 'Transaction fixture', template: 'fixture', owner: 'test' });
+  const base = store.addRevision(project.id, { jobId: 'base-run', runId: 'base-run', status: 'draft' });
+  store.updateRevision(project.id, base.id, { status: 'done', outputs: [] });
+  const draft = store.addRevision(project.id, {
+    jobId: 'slot-05-v002-transaction',
+    runId: 'slot-05-v002-transaction',
+    status: 'draft',
+  });
+  const job = {
+    id: draft.jobId,
+    projectId: project.id,
+    revisionId: draft.id,
+    revisionNumber: draft.number,
+    status: 'done',
+    outputs: [],
+  };
+  jobStore.saveJob(job, { projectStore: store });
+  assert.equal(fs.existsSync(jobStore.jobDir(job.id)), true);
+  assert.equal(store.getRevision(project.id, draft.id).status, 'done');
+
+  const rollback = rollbackFinishMetadata({
+    store,
+    jobStore,
+    projectId: project.id,
+    revisionId: draft.id,
+    jobId: job.id,
+    jobSaveAttempted: true,
+    revisionAdded: true,
+  });
+  assert.deepEqual(rollback.job, { removed: true });
+  assert.equal(rollback.revision.aborted, true);
+  assert.equal(fs.existsSync(jobStore.jobDir(job.id)), false);
+  assert.equal(store.getRevision(project.id, draft.id), null);
+  assert.equal(store.get(project.id).latestRevision, 1);
+});
+
 test('prepare stages each unique ledger audio source with identical bytes', async () => {
   const { stageLedgerAudioSources } = await modulePromise;
   const projectDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-audio-project-'));
