@@ -37,6 +37,7 @@ const {
   inspectMediaFile,
   isGenericReusableAsset,
 } = require('./project-store');
+const { createJobStore, revisionOptionsFromJob } = require('./job-store');
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
 const {
   PROVIDER_LOCK,
@@ -154,12 +155,24 @@ if (TEST_PIPELINE_ENTRY) {
     throw new Error('TEST_PIPELINE_ENTRY 必須是 DATA_DIR 內的一般檔案');
 }
 
-const JOBS_DIR = path.join(DATA_DIR, 'jobs');
 const PROJECT_STORE = createProjectStore({
   dataDir: DATA_DIR,
   nowISO: () => new Date().toISOString(),
   idFactory: newId,
 });
+const JOB_STORE = createJobStore({
+  dataDir: DATA_DIR,
+  nowISO: () => new Date().toISOString(),
+});
+const {
+  jobsDir: JOBS_DIR,
+  RUN_ID,
+  safeRunId,
+  jobDir,
+  jobFile,
+  readJob,
+  writeJobRecord,
+} = JOB_STORE;
 
 // ── 保留策略 ──────────────────────────────
 // Project Run 的正式成品與共用素材已經另存到 projects/。只要能驗證每份 output 都在
@@ -433,15 +446,6 @@ function codeChangedAt() {
 // 用檔案存，伺服器重開不會掉。不用資料庫 —— 一天十幾筆而已。
 ensureDir(JOBS_DIR);
 
-const RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
-function safeRunId(id) {
-  const value = String(id || '');
-  if (!RUN_ID.test(value)) throw new Error('Run ID 不合法');
-  return value;
-}
-function jobDir(id) { return path.join(JOBS_DIR, safeRunId(id)); }
-function jobFile(id) { return path.join(jobDir(id), 'job.json'); }
-
 function ownedJobDir(id) {
   try {
     const dir = jobDir(id);
@@ -465,19 +469,6 @@ function ownedJobPayloadDir(id, subdir) {
   } catch (_) {
     return null;
   }
-}
-
-function revisionOptionsFromJob(job) {
-  return {
-    skipGenerate: !!job.skipGenerate,
-    noSpeed: !!job.noSpeed,
-    withAd: !!job.withAd,
-    autoApprove: !!job.autoApprove,
-    workflowMode: job.workflowMode || 'manual-assets',
-    controlPolicy: job.controlPolicy || 'pause-before-render',
-    graphicBrollMode: job.graphicBrollMode || 'disabled',
-    focusstockBrollMode: job.focusstockBrollMode || 'disabled',
-  };
 }
 
 function preparedReviewRevision(job) {
@@ -556,8 +547,8 @@ function loadJobs() {
     if (!entry.isDirectory() || !RUN_ID.test(entry.name)) continue;
     const id = entry.name;
     try {
-      const j = JSON.parse(fs.readFileSync(jobFile(id), 'utf-8'));
-      if (j.id !== id) continue;
+      const j = readJob(id);
+      if (!j) continue;
       let recoveryChanged = false;
       try {
         if (fs.existsSync(path.join(jobDir(j.id), REVIEW_EDIT_TRANSACTION))) {
@@ -648,51 +639,14 @@ startupJobs.reviewTransactions.forEach(({ job, transactionId, expected }) => {
 });
 
 function saveJob(j) {
-  writeJobRecord(j);
-  if (j.projectId && j.revisionId) {
-    const updatedRevision = PROJECT_STORE.updateRevision(j.projectId, j.revisionId, {
-      jobId: j.id,
-      runId: j.id,
-      status: j.status,
-      owner: j.owner,
-      title: j.title,
-      options: revisionOptionsFromJob(j),
-      assetRefs: j.assetRefs || [],
-      files: j.files || [],
-      outputs: j.outputs || [],
-      archived: j.archived || [],
-      submittedAt: j.submittedAt || null,
-      startedAt: j.startedAt || null,
-      finishedAt: j.finishedAt || null,
-      ...(j.workflowMode ? {
-        workflowMode: j.workflowMode,
-        controlPolicy: j.controlPolicy || null,
-        stage: j.stage || null,
-        failedStage: j.failedStage || null,
-        cancelRequestedAt: j.cancelRequestedAt || null,
-        cancelledAt: j.cancelledAt || null,
-        graphicBroll: j.graphicBroll || null,
-        timelinePlacements: j.timelinePlacements || [],
-        renderInputManifest: j.renderInputManifest || null,
-        renderInputManifestSha256: j.renderInputManifestSha256 || null,
-        renderEvidence: j.renderEvidence || null,
-        focusstockVisualInputs: j.focusstockVisualInputs || [],
-        focusstockBrollCarryForward: j.focusstockBrollCarryForward || null,
-      } : {}),
-      ...(j.materialAcquisition ? { materialAcquisition: j.materialAcquisition } : {}),
-      ...(j.materialAcquisitionResult
-        ? { materialAcquisitionResult: j.materialAcquisitionResult } : {}),
-    });
-    if (!updatedRevision) throw new Error('Project／Revision job state 無法同步');
-  }
+  return JOB_STORE.saveJob(j, {
+    projectStore: PROJECT_STORE,
+    revisionOptionsFromJob,
+  });
 }
 
 // Recovery bookkeeping is internal job metadata. Persist it without making the Project look newly
 // edited; only saveJob() is allowed to synchronize an actual status/asset change to the Revision.
-function writeJobRecord(j) {
-  ensureDir(jobDir(j.id));
-  atomicWriteFile(jobFile(j.id), JSON.stringify(j, null, 2));
-}
 
 function getJob(id) { return JOBS.find((j) => j.id === id); }
 

@@ -13,6 +13,7 @@ const APP_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(APP_DIR, 'runtime-data');
 const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 const PROJECT_STORE_FILE = path.join(APP_DIR, 'server', 'project-store.js');
+const JOB_STORE_FILE = path.join(APP_DIR, 'server', 'job-store.js');
 const HF = ['--yes', 'hyperframes@0.8.3'];
 const STATE_FILE = 'broll-slot-state.json';
 
@@ -922,10 +923,18 @@ function finish(options) {
     ? `source HTML lineage 走完仍缺；slot ${compositionSnapshots.fallbackSlots.join(', ')} 使用 render-wrapper-fallback。`
     : '';
 
+  const revisionTitle = `${base.revision.title || project.name}（slot ${options.slot} 單格迭代）`;
+  const revisionNote = [
+    `broll-slot：以 ${base.summary.id} 為 base，只重生 slot ${options.slot}，其餘 11 格逐 byte 沿用；未呼叫 HeyGen。`,
+    fallbackNote,
+    options.note ? String(options.note).trim() : '',
+  ].filter(Boolean).join(' ');
   const nowISO = () => new Date().toISOString();
   const idFactory = () => 'broll-slot-idfactory-unused';
   const { createProjectStore } = require(PROJECT_STORE_FILE);
+  const { createJobStore } = require(JOB_STORE_FILE);
   const store = createProjectStore({ dataDir: DATA_DIR, nowISO, idFactory });
+  const jobStore = createJobStore({ dataDir: DATA_DIR, nowISO });
   const jobId = formatJobId(options.slot, targetRevisionId);
   let added = false;
   try {
@@ -934,7 +943,7 @@ function finish(options) {
       runId: jobId,
       status: 'draft',
       owner: base.revision.owner,
-      title: `${base.revision.title || project.name}（slot ${options.slot} 單格迭代）`,
+      title: revisionTitle,
       options: {
         ...(base.revision.options || {}),
         skipGenerate: true,
@@ -945,12 +954,7 @@ function finish(options) {
       files: [],
       visualForm: base.revision.visualForm || null,
       paidProviderCalls: 0,
-      note: [
-        `broll-slot：以 ${base.summary.id} 為 base，只重生 slot ${options.slot}，其餘 11 格逐 byte 沿用；未呼叫 HeyGen。`,
-        fallbackNote,
-        'job.json 待縫 3。',
-        options.note ? String(options.note).trim() : '',
-      ].filter(Boolean).join(' '),
+      note: revisionNote,
       graphicBroll: {
         ...base.revision.graphicBroll,
         style: `${base.revision.graphicBroll.style || 'composition-v1'}-slot-${options.slot}`,
@@ -1000,9 +1004,44 @@ function finish(options) {
         brollProvenance: `12/12; 11 same as ${base.summary.id}; slot ${options.slot} different`,
       },
     });
+    if (!updated) throw new Error('Revision done state 無法寫入');
+    const job = {
+      id: jobId,
+      template: 'tw-morning-report',
+      owner: updated.owner,
+      title: updated.title,
+      status: 'done',
+      createdAt: revision.createdAt,
+      startedAt: revision.createdAt,
+      finishedAt,
+      projectId: project.id,
+      revisionId: targetRevisionId,
+      revisionNumber: targetNumber,
+      outputs: updated.outputs,
+      files: updated.files || [],
+      assetRefs: updated.assetRefs || [],
+      workflowMode: 'agent-broll-slot',
+      note: revisionNote,
+      skipGenerate: true,
+      noSpeed: true,
+      withAd: !!updated.options?.withAd,
+      autoApprove: !!updated.options?.autoApprove,
+      controlPolicy: updated.options?.controlPolicy || 'pause-before-render',
+      graphicBrollMode: updated.options?.graphicBrollMode || 'disabled',
+      focusstockBrollMode: updated.options?.focusstockBrollMode || 'disabled',
+      archived: updated.archived || [],
+      graphicBroll: updated.graphicBroll || null,
+    };
+    jobStore.saveJob(job, { projectStore: store });
     revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
     const savedProject = store.get(project.id);
     const savedRevision = store.getRevision(project.id, targetRevisionId);
+    const savedJob = jobStore.readJob(jobId);
+    if (!savedJob || savedJob.projectId !== project.id || savedJob.revisionId !== targetRevisionId
+        || savedJob.revisionNumber !== targetNumber || savedJob.id !== savedRevision.jobId
+        || savedRevision.runId !== savedJob.id
+        || JSON.stringify(savedJob.outputs) !== JSON.stringify(savedRevision.outputs))
+      throw new Error('Project／Revision／Job identity 驗證失敗');
     validateManifestIdentity({
       project: savedProject,
       revision: savedRevision,
@@ -1041,7 +1080,8 @@ function finish(options) {
         workingCopyByteIdentical: true,
         targetWorkingPath: state.promptPath,
       },
-      jobJson: 'pending seam 3',
+      jobJson: path.relative(APP_DIR, jobStore.jobFile(jobId)).split(path.sep).join('/'),
+      jobIdentity: true,
     };
     writeJson(path.join(workdir, 'qa', 'validation.json'), validation);
     writeJson(stateFile, { ...state, status: 'finished', finishedAt, jobId, output });
