@@ -18,6 +18,27 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function writePcmWav(file, durationSec, sampleRate = 8000) {
+  const samples = Math.round(durationSec * sampleRate);
+  const dataSize = samples * 2;
+  const wav = Buffer.alloc(44 + dataSize);
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(dataSize, 40);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, wav);
+}
+
 function fixture(segments, durationSec = Math.max(...segments.map((segment) => segment.endSec))) {
   const root = fs.mkdtempSync(path.join(TMP, 'seam01-build-main-'));
   for (const dir of ['renders', 'public', 'script']) fs.mkdirSync(path.join(root, dir), { recursive: true });
@@ -150,6 +171,42 @@ test('rejects symlinked project/template/audio path components', () => {
   result = runBuild(base, ['--template', headerRoot]);
   assert.notEqual(result.status, 0);
   assert.match(`${result.stdout}${result.stderr}`, /template\/header\.mjs 路徑 component 是 symlink/);
+});
+
+test('build-segment-ledger measures selected audio and rejects retained duration conflicts', () => {
+  const root = fs.mkdtempSync(path.join(TMP, 'seam01-audio-duration-'));
+  for (const dir of ['script', 'asr', 'recordings']) fs.mkdirSync(path.join(root, dir), { recursive: true });
+  fs.writeFileSync(path.join(root, 'script', 'script.v1.txt'), '(image1)甲(image1)');
+  writeJson(path.join(root, 'asr', 'script-char-times.json'), [
+    { i: 0, ch: '甲', origIdx: 8, start: 0, end: 0.5 },
+  ]);
+  writePcmWav(path.join(root, 'recordings', 'selected.wav'), 1);
+  writeJson(path.join(root, 'segment-ledger.json'), { durationSec: 2, segments: [] });
+  let result = spawnSync(process.execPath, [
+    BUILD_LEDGER,
+    '--project', root,
+    '--audio-src', 'recordings/selected.wav',
+    '--out', 'rebuilt.json',
+  ], { cwd: APP, encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /audio source duration 1\.000000s/);
+  assert.match(`${result.stdout}${result.stderr}`, /metadata duration 2\.000000s 衝突/);
+  assert.equal(fs.existsSync(path.join(root, 'rebuilt.json')), false);
+
+  writeJson(path.join(root, 'segment-ledger.json'), { durationSec: 1.05, segments: [] });
+  result = spawnSync(process.execPath, [
+    BUILD_LEDGER,
+    '--project', root,
+    '--audio-src', 'recordings/selected.wav',
+    '--out', 'rebuilt.json',
+  ], { cwd: APP, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const rebuilt = JSON.parse(fs.readFileSync(path.join(root, 'rebuilt.json'), 'utf8'));
+  assert.equal(rebuilt.durationSec, 1);
+  assert.equal(rebuilt.segments[0].endSec, 1);
+  assert.deepEqual(rebuilt.segments[0].audio, {
+    src: 'recordings/selected.wav', start: 0, end: 1,
+  });
 });
 
 test('build-segment-ledger rejects symlinked --out nearest parent', () => {

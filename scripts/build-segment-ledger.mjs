@@ -57,10 +57,23 @@ function defaultAudioSrc(projectDir) {
 
 function probeDuration(file) {
   try {
-    return Number(execFileSync('ffprobe', [
+    const duration = Number(execFileSync('ffprobe', [
       '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file,
     ], { encoding: 'utf8' }).trim());
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
   } catch { return null; }
+}
+
+function selectedAudioDuration(audioFile, previousDurationSec, toleranceSec = 0.1) {
+  const measured = probeDuration(audioFile);
+  if (!measured) throw new Error(`無法以 ffprobe 量測選定 audio source：${audioFile}`);
+  const retained = Number(previousDurationSec);
+  if (Number.isFinite(retained) && retained > 0 && Math.abs(measured - retained) >= toleranceSec) {
+    throw new Error(
+      `選定 audio source duration ${measured.toFixed(6)}s 與保留 metadata duration ${retained.toFixed(6)}s 衝突`,
+    );
+  }
+  return measured;
 }
 
 function writeJsonAtomic(file, value) {
@@ -100,10 +113,7 @@ function main(argv = process.argv.slice(2)) {
   if (rawAudioSrc.includes('\\')) throw new Error('--audio-src 不可使用反斜線');
   const audioSrc = rawAudioSrc.split(path.sep).join('/');
   const audioFile = resolveExistingWithin(projectDir, audioSrc, '--audio-src', 'file');
-  const durationSec = Number(previous.durationSec)
-    || probeDuration(audioFile)
-    || Number(charTimes.at(-1)?.end);
-  if (!Number.isFinite(durationSec) || durationSec <= 0) throw new Error('無法決定 durationSec');
+  const durationSec = selectedAudioDuration(audioFile, previous.durationSec);
 
   const segments = alignMarkerBlocksToTimes({
     blocks,

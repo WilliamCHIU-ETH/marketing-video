@@ -1,8 +1,13 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+
+const APP = path.resolve(__dirname, '..');
+const TMP = fs.realpathSync('/tmp');
 
 const modulePromise = import('./broll-slot.mjs');
 
@@ -180,6 +185,98 @@ test('visual segment count, not a hard-coded twelve, owns hash comparison', asyn
     { slotId: '01', result: 'same' },
     { slotId: '05', result: 'diff' },
   ]);
+});
+
+test('prepare stages each unique ledger audio source with identical bytes', async () => {
+  const { stageLedgerAudioSources } = await modulePromise;
+  const projectDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-audio-project-'));
+  const workdir = path.join(projectDir, 'revision-artifacts', 'v002');
+  fs.mkdirSync(path.join(projectDir, 'avatar'), { recursive: true });
+  fs.mkdirSync(path.join(projectDir, 'recordings'), { recursive: true });
+  fs.mkdirSync(workdir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'avatar', 'speaker-a.mp4'), 'speaker-a');
+  fs.writeFileSync(path.join(projectDir, 'recordings', 'speaker-b.wav'), 'speaker-b-longer');
+  const ledger = { segments: [
+    { id: '00', audio: { src: 'avatar/speaker-a.mp4', start: 0, end: 1 } },
+    { id: '01', audio: { src: 'avatar/speaker-a.mp4', start: 1, end: 2 } },
+    { id: '02', audio: { src: 'recordings/speaker-b.wav', start: 0, end: 1 } },
+  ] };
+  const rows = stageLedgerAudioSources({ projectDir, workdir, ledger });
+  assert.deepEqual(rows.map((row) => row.src), [
+    'avatar/speaker-a.mp4',
+    'recordings/speaker-b.wav',
+  ]);
+  for (const row of rows) {
+    const source = fs.readFileSync(path.join(projectDir, row.src));
+    const staged = fs.readFileSync(path.join(workdir, row.src));
+    assert.deepEqual(staged, source);
+    assert.equal(row.size, source.length);
+    assert.equal(row.sha256, crypto.createHash('sha256').update(source).digest('hex'));
+  }
+});
+
+test('final output is retry-safe after validation or persistence failure', async () => {
+  const { createRetrySafeFinalOutput } = await modulePromise;
+  const outputs = fs.mkdtempSync(path.join(TMP, 'broll-slot-output-'));
+  const finalFile = path.join(outputs, 'v008-slot05-final.mp4');
+
+  const failedValidation = createRetrySafeFinalOutput(finalFile, { token: 'validation-failure' });
+  fs.writeFileSync(failedValidation.tempFile, 'rendered-but-invalid');
+  assert.throws(() => { throw new Error('simulated verifyFinalMedia failure'); }, /verifyFinalMedia/);
+  assert.deepEqual(failedValidation.rollback(null), {
+    removedTemp: true, removedPublished: false, publishedConflict: false,
+  });
+  assert.equal(fs.existsSync(finalFile), false);
+
+  const failedPersistence = createRetrySafeFinalOutput(finalFile, { token: 'persistence-failure' });
+  fs.writeFileSync(failedPersistence.tempFile, 'rendered-and-verified');
+  const bytes = fs.readFileSync(failedPersistence.tempFile);
+  const evidence = {
+    size: bytes.length,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
+  failedPersistence.publish(evidence);
+  assert.equal(fs.existsSync(finalFile), true);
+  assert.deepEqual(failedPersistence.rollback(evidence), {
+    removedTemp: false, removedPublished: true, publishedConflict: false,
+  });
+  assert.equal(fs.existsSync(finalFile), false);
+
+  const retry = createRetrySafeFinalOutput(finalFile, { token: 'retry-success' });
+  fs.writeFileSync(retry.tempFile, bytes);
+  assert.equal(retry.publish(evidence), finalFile);
+  assert.deepEqual(fs.readFileSync(finalFile), bytes);
+});
+
+test('runner honors an external DATA_DIR for project validation and stores', async () => {
+  const { createRunnerStores, resolveRunnerDataDir, validateProjectDir } = await modulePromise;
+  const dataDir = fs.mkdtempSync(path.join(TMP, 'broll-slot-data-dir-'));
+  const projectId = 'project-external-data-dir';
+  const projectDir = path.join(dataDir, 'projects', projectId);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'project.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    id: projectId,
+    name: 'External fixture',
+    latestRevision: 0,
+    revisions: [],
+    assets: [],
+  }, null, 2)}\n`);
+  const resolved = resolveRunnerDataDir({ TEST_MODE: '1', DATA_DIR: dataDir });
+  assert.equal(resolved, dataDir);
+  assert.equal(resolveRunnerDataDir({}), path.join(APP, 'runtime-data'));
+  assert.equal(validateProjectDir(projectDir, { dataDir }).projectDir, projectDir);
+  const { store, jobStore } = createRunnerStores({
+    dataDir,
+    nowISO: () => '2026-08-26T00:00:00.000Z',
+    idFactory: () => 'unused',
+  });
+  assert.equal(store.projectsDir, path.join(dataDir, 'projects'));
+  assert.equal(jobStore.jobsDir, path.join(dataDir, 'jobs'));
+  assert.throws(
+    () => validateProjectDir(projectDir, { dataDir: path.join(APP, 'runtime-data') }),
+    /Project 不在 DATA_DIR\/projects 內/,
+  );
 });
 
 test('validateManifestIdentity matches summary, revision, outputs and file evidence', async () => {

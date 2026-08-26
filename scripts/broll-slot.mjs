@@ -10,8 +10,6 @@ const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const APP_DIR = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(APP_DIR, 'runtime-data');
-const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 const PROJECT_STORE_FILE = path.join(APP_DIR, 'server', 'project-store.js');
 const JOB_STORE_FILE = path.join(APP_DIR, 'server', 'job-store.js');
 const MORNING_TEMPLATE_BUILD = path.join(
@@ -23,6 +21,10 @@ const MORNING_TEMPLATE_BUILD = path.join(
 );
 const HF = ['--yes', 'hyperframes@0.8.3'];
 const STATE_FILE = 'broll-slot-state.json';
+const {
+  resolveExistingWithin,
+  resolveOutputWithin,
+} = require('./path-safety');
 
 export function normalizeRevisionId(value) {
   const match = String(value || '').trim().match(/^v(\d{1,6})$/i);
@@ -233,6 +235,37 @@ function isInside(parent, child) {
   return relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
+function envFlagValue(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || ''));
+}
+
+function resolvedPathIncludingMissing(input) {
+  let cursor = path.resolve(input);
+  const missing = [];
+  while (!fs.existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor) break;
+    missing.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+  return path.resolve(fs.realpathSync(cursor), ...missing);
+}
+
+export function resolveRunnerDataDir(env = process.env) {
+  const testMode = envFlagValue(env.TEST_MODE);
+  if (testMode && !env.DATA_DIR)
+    throw new Error('TEST_MODE=1 必須明確指定 DATA_DIR，避免碰到正式 jobs');
+  const configured = env.DATA_DIR || 'runtime-data';
+  const dataDir = path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : path.resolve(APP_DIR, configured);
+  const appReal = fs.realpathSync(APP_DIR);
+  const dataReal = resolvedPathIncludingMissing(dataDir);
+  if (testMode && (dataReal === appReal || isInside(appReal, dataReal)))
+    throw new Error('TEST_MODE 的 DATA_DIR 必須位於 repo 外，且不可透過 symlink 指回 repo');
+  return dataDir;
+}
+
 function assertRegularFile(file, label = file) {
   let stat;
   try { stat = fs.lstatSync(file); } catch { throw new Error(`缺檔：${label}`); }
@@ -247,18 +280,28 @@ function assertDirectory(dir, label = dir) {
   return stat;
 }
 
-function validateProjectDir(input) {
+export function validateProjectDir(input, { dataDir = resolveRunnerDataDir() } = {}) {
   const requested = path.resolve(input);
-  assertDirectory(PROJECTS_DIR, 'runtime-data/projects');
+  const projectsDir = path.join(path.resolve(dataDir), 'projects');
+  assertDirectory(projectsDir, 'DATA_DIR/projects');
   assertDirectory(requested, 'Project 目錄');
-  const projectsReal = fs.realpathSync(PROJECTS_DIR);
+  const projectsReal = fs.realpathSync(projectsDir);
   const projectReal = fs.realpathSync(requested);
-  if (!isInside(projectsReal, projectReal)) throw new Error('Project 不在 app/runtime-data/projects 內');
+  if (!isInside(projectsReal, projectReal)) throw new Error('Project 不在 DATA_DIR/projects 內');
   const projectFile = path.join(projectReal, 'project.json');
   assertRegularFile(projectFile, 'project.json');
   const project = readJson(projectFile);
   if (project.id !== path.basename(projectReal)) throw new Error('Project ID 與目錄名不一致');
-  return { projectDir: projectReal, project };
+  return { dataDir: path.resolve(dataDir), projectsDir: projectsReal, projectDir: projectReal, project };
+}
+
+export function createRunnerStores({ dataDir, nowISO, idFactory }) {
+  const { createProjectStore } = require(PROJECT_STORE_FILE);
+  const { createJobStore } = require(JOB_STORE_FILE);
+  return {
+    store: createProjectStore({ dataDir, nowISO, idFactory }),
+    jobStore: createJobStore({ dataDir, nowISO }),
+  };
 }
 
 function safeProjectPath(projectDir, relative, label) {
@@ -274,6 +317,48 @@ function copyFile(source, target, expectedSha = null) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.copyFileSync(source, target);
   if (expectedSha && hashFile(target) !== expectedSha) throw new Error(`複製 SHA-256 不符：${target}`);
+}
+
+export function stageLedgerAudioSources({ projectDir, workdir, ledger }) {
+  if (!ledger || !Array.isArray(ledger.segments)) throw new Error('segment ledger 沒有 segments');
+  const uniqueSources = new Map();
+  for (const segment of ledger.segments) {
+    if (!segment.audio) continue;
+    const src = String(segment.audio.src || '');
+    if (!src || src.includes('\\') || path.isAbsolute(src))
+      throw new Error(`segment ${segment.id} audio.src 必須是 Project 相對 POSIX 路徑`);
+    const source = resolveExistingWithin(projectDir, src, `segment ${segment.id} audio.src`, 'file');
+    const canonicalSrc = path.relative(projectDir, source).split(path.sep).join('/');
+    if (!isInside(projectDir, source) || canonicalSrc.startsWith('../'))
+      throw new Error(`segment ${segment.id} audio.src 超出 Project`);
+    if (!uniqueSources.has(canonicalSrc)) uniqueSources.set(canonicalSrc, source);
+  }
+
+  const rows = [];
+  for (const [src, source] of uniqueSources) {
+    const sourceStat = assertRegularFile(source, `ledger audio source ${src}`);
+    const sha256 = hashFile(source);
+    const target = resolveOutputWithin(workdir, src, `staged ledger audio ${src}`);
+    if (target === source) throw new Error(`ledger audio source 不可與 staged target 相同：${src}`);
+    copyFile(source, target, sha256);
+    const targetStat = assertRegularFile(target, `staged ledger audio ${src}`);
+    const stagedSha256 = hashFile(target);
+    if (targetStat.size !== sourceStat.size || stagedSha256 !== sha256)
+      throw new Error(`staged ledger audio identity 不符：${src}`);
+    rows.push({ src, size: sourceStat.size, sha256 });
+  }
+  return rows.sort((a, b) => a.src.localeCompare(b.src));
+}
+
+function validateStagedLedgerAudioSources(workdir, rows) {
+  if (!Array.isArray(rows)) throw new Error('prepared state 缺 ledger audio source evidence');
+  for (const row of rows) {
+    const file = resolveExistingWithin(workdir, row.src, `staged ledger audio ${row.src}`, 'file');
+    const stat = assertRegularFile(file, `staged ledger audio ${row.src}`);
+    if (stat.size !== row.size || hashFile(file) !== row.sha256)
+      throw new Error(`staged ledger audio 在 prepare 後改變：${row.src}`);
+  }
+  return true;
 }
 
 function copyDirectoryFiles(source, target) {
@@ -556,7 +641,8 @@ function makeRenderAnchorHtml({ slot, duration, width, height, anchorName }) {
 }
 
 function prepare(options) {
-  const { projectDir, project } = validateProjectDir(options.project);
+  const dataDir = resolveRunnerDataDir();
+  const { projectDir, project } = validateProjectDir(options.project, { dataDir });
   const base = loadBase(projectDir, project, options.from);
   if (Number(base.summary.number) !== Number(project.latestRevision))
     throw new Error('--from 目前只支援 latest done Revision，避免平行 append 造成版本歧義');
@@ -606,6 +692,11 @@ function prepare(options) {
   copyDirectoryFiles(artifacts.assetsDir, path.join(workdir, 'assets'));
   copyFile(artifacts.hyperframesFile, path.join(workdir, 'hyperframes.json'));
   copyFile(artifacts.avatarFile, path.join(workdir, 'public', 'input-video.mp4'));
+  const ledgerAudioSources = stageLedgerAudioSources({
+    projectDir,
+    workdir,
+    ledger: canonicalLedger,
+  });
 
   const reuseRows = [];
   for (const item of artifacts.resolved) {
@@ -665,6 +756,7 @@ function prepare(options) {
     baseMainSha256: hashFile(artifacts.mainFile),
     segmentLedgerFile: path.relative(projectDir, segmentLedgerFile).split(path.sep).join('/'),
     segmentLedgerSha256: hashFile(segmentLedgerFile),
+    ledgerAudioSources,
     visualSegmentCount,
     visualSegmentIds: visualSegments.map((segment) => segment.id),
     baseFinalOutput: base.revision.outputs?.[0] || null,
@@ -698,6 +790,7 @@ function prepare(options) {
     lineageResolvedFrom,
     promptPath: promptRow.promptPath,
     expectedDurationSec,
+    ledgerAudioSources,
     nextCommand,
   };
   console.log(JSON.stringify(result, null, 2));
@@ -990,6 +1083,68 @@ function verifyFinalMedia(finalFile, baseFile) {
   return { actual, base, durationDiffSec: Math.abs(actual.duration - base.duration) };
 }
 
+function fileEvidence(file) {
+  const stat = assertRegularFile(file);
+  return { size: stat.size, sha256: hashFile(file) };
+}
+
+export function createRetrySafeFinalOutput(finalFile, { token = crypto.randomUUID() } = {}) {
+  const target = path.resolve(finalFile);
+  const parent = path.dirname(target);
+  assertDirectory(parent, 'final output parent');
+  if (fs.existsSync(target)) throw new Error(`output 已存在，拒絕覆寫：${target}`);
+  const extension = path.extname(target) || '.mp4';
+  const stem = path.basename(target, path.extname(target));
+  const safeToken = String(token).replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const tempFile = path.join(parent, `.${stem}.${process.pid}.${safeToken}.tmp${extension}`);
+  if (fs.existsSync(tempFile)) throw new Error(`temporary output 已存在：${tempFile}`);
+  let published = false;
+
+  const matches = (file, expected) => {
+    try {
+      const actual = fileEvidence(file);
+      return actual.size === expected?.size && actual.sha256 === expected?.sha256;
+    } catch { return false; }
+  };
+
+  return {
+    finalFile: target,
+    tempFile,
+    publish(expected) {
+      if (!matches(tempFile, expected)) throw new Error('temporary output 與驗證 evidence 不一致');
+      if (fs.existsSync(target)) throw new Error(`output 已存在，拒絕覆寫：${target}`);
+      fs.linkSync(tempFile, target);
+      published = true;
+      try {
+        if (!matches(target, expected)) throw new Error('published output 與驗證 evidence 不一致');
+        fs.unlinkSync(tempFile);
+        return target;
+      } catch (error) {
+        if (matches(target, expected)) fs.unlinkSync(target);
+        published = false;
+        throw error;
+      }
+    },
+    rollback(expected) {
+      const result = { removedTemp: false, removedPublished: false, publishedConflict: false };
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+        result.removedTemp = true;
+      }
+      if (published && fs.existsSync(target)) {
+        if (matches(target, expected)) {
+          fs.unlinkSync(target);
+          result.removedPublished = true;
+          published = false;
+        } else {
+          result.publishedConflict = true;
+        }
+      }
+      return result;
+    },
+  };
+}
+
 function rollbackDraft(store, projectId, revisionId) {
   const revision = store.getRevision(projectId, revisionId);
   if (!revision) return { aborted: false, reason: 'revision-not-found' };
@@ -1001,7 +1156,8 @@ function rollbackDraft(store, projectId, revisionId) {
 
 function finish(options) {
   const finishStartedAt = process.hrtime.bigint();
-  const { projectDir, project } = validateProjectDir(options.project);
+  const dataDir = resolveRunnerDataDir();
+  const { projectDir, project } = validateProjectDir(options.project, { dataDir });
   const targetNumber = Number(project.latestRevision) + 1;
   const targetRevisionId = `v${String(targetNumber).padStart(3, '0')}`;
   const workdir = path.join(projectDir, 'revision-artifacts', targetRevisionId);
@@ -1023,6 +1179,7 @@ function finish(options) {
   }
   const baseMainFile = safeProjectPath(projectDir, state.baseMainFile, 'baseMainFile');
   if (hashFile(baseMainFile) !== state.baseMainSha256) throw new Error('base index.html 在 prepare 後改變');
+  validateStagedLedgerAudioSources(workdir, state.ledgerAudioSources);
   const mainBuild = stageMainBuildInputs({ projectDir, workdir, state, base });
   if (Math.abs(mainBuild.targetSegment.durationSec - state.expectedDurationSec) > 0.0001)
     throw new Error('staged ledger target duration 與 prepare 不一致');
@@ -1095,25 +1252,30 @@ function finish(options) {
   recordTiming('main-check', mainCheck.wallTimeMs);
   const slug = `slot${options.slot}`;
   const finalFile = path.join(projectDir, 'outputs', `${targetRevisionId}-${slug}-final.mp4`);
-  if (fs.existsSync(finalFile)) throw new Error(`output 已存在，拒絕覆寫：${finalFile}`);
-  const mainRenderWallTimeMs = renderHyperframes(
-    workdir,
-    finalFile,
-    quality,
-    path.join(workdir, 'qa', 'render-main.log'),
-  );
-  recordTiming('main-render', mainRenderWallTimeMs);
-  timings.finishThroughRenderWallTimeMs = Number(
-    (Number(process.hrtime.bigint() - finishStartedAt) / 1e6).toFixed(3),
-  );
-  writeJson(path.join(workdir, 'qa', 'timings.json'), timings);
+  const outputAttempt = createRetrySafeFinalOutput(finalFile);
+  let outputEvidence = null;
+  try {
+    const mainRenderWallTimeMs = renderHyperframes(
+      workdir,
+      outputAttempt.tempFile,
+      quality,
+      path.join(workdir, 'qa', 'render-main.log'),
+    );
+    recordTiming('main-render', mainRenderWallTimeMs);
+    timings.finishThroughRenderWallTimeMs = Number(
+      (Number(process.hrtime.bigint() - finishStartedAt) / 1e6).toFixed(3),
+    );
+    writeJson(path.join(workdir, 'qa', 'timings.json'), timings);
 
   const baseOutput = base.revision.outputs?.[0];
   if (!baseOutput?.archive) throw new Error('base Revision 缺 outputs[0].archive');
   const baseFinalFile = path.resolve(APP_DIR, baseOutput.archive);
-  if (!isInside(APP_DIR, baseFinalFile)) throw new Error('base output archive 超出 app');
+  const projectOutputsDir = path.join(projectDir, 'outputs');
+  assertDirectory(projectOutputsDir, 'Project outputs');
+  if (!isInside(projectOutputsDir, baseFinalFile))
+    throw new Error('base output archive 超出目前 DATA_DIR 的 Project outputs');
   assertRegularFile(baseFinalFile, 'base final output');
-  const media = verifyFinalMedia(finalFile, baseFinalFile);
+  const media = verifyFinalMedia(outputAttempt.tempFile, baseFinalFile);
 
   revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
   const promptSnapshotBySlot = new Map(promptSnapshots.map((row) => [row.slotId, row]));
@@ -1139,7 +1301,7 @@ function finish(options) {
     slots: nextSlots,
   });
 
-  const outputEvidence = { size: fs.statSync(finalFile).size, sha256: hashFile(finalFile) };
+  outputEvidence = fileEvidence(outputAttempt.tempFile);
   const output = {
     name: 'final.mp4',
     mediaType: 'video/mp4',
@@ -1167,13 +1329,11 @@ function finish(options) {
   ].filter(Boolean).join(' ');
   const nowISO = () => new Date().toISOString();
   const idFactory = () => 'broll-slot-idfactory-unused';
-  const { createProjectStore } = require(PROJECT_STORE_FILE);
-  const { createJobStore } = require(JOB_STORE_FILE);
-  const store = createProjectStore({ dataDir: DATA_DIR, nowISO, idFactory });
-  const jobStore = createJobStore({ dataDir: DATA_DIR, nowISO });
+  const { store, jobStore } = createRunnerStores({ dataDir, nowISO, idFactory });
   const jobId = formatJobId(options.slot, targetRevisionId);
   let added = false;
   try {
+    outputAttempt.publish(outputEvidence);
     const revision = store.addRevision(project.id, {
       jobId,
       runId: jobId,
@@ -1341,6 +1501,16 @@ function finish(options) {
       catch (rollbackError) { rollback = { aborted: false, error: rollbackError.message }; }
     }
     console.error(JSON.stringify({ ok: false, error: error.message, rollback }, null, 2));
+    throw error;
+  }
+  } catch (error) {
+    let outputRollback;
+    try { outputRollback = outputAttempt.rollback(outputEvidence); }
+    catch (rollbackError) { outputRollback = { error: rollbackError.message }; }
+    if (outputRollback.removedTemp || outputRollback.removedPublished
+        || outputRollback.publishedConflict || outputRollback.error) {
+      console.error(JSON.stringify({ ok: false, outputRollback }, null, 2));
+    }
     throw error;
   }
 }
