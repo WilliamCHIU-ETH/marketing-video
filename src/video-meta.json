@@ -3,5 +3,6 @@
   "outroDurationSec": 0,
   "titleText": "",
   "headerDate": "",
+  "headerLabel": "台股晨報",
   "_note": "Sanitized baseline fixture; runtime scripts overwrite this file."
 }

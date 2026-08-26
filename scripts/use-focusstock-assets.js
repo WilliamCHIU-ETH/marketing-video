@@ -14,6 +14,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT, "assets", "焦點股日報");
@@ -23,6 +24,12 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const FILES = [
   { src: "intro-frame.jpg", dest: "focusstock-intro-frame.jpg", optional: false },
   { src: "header-overlay.png", dest: "focusstock-header-overlay.png", optional: false },
+  {
+    src: "header-overlay-v2.png",
+    dest: "focusstock-header-overlay-v2.png",
+    optional: false,
+    sha256: "86c5e28d0162cfe5b1ad23ebd4d19d33b5b39d7c0b9dd3f3da8b32a22a51633f",
+  },
   { src: "bgm.wav", dest: "focusstock-bgm.wav", optional: true },
 ];
 
@@ -50,7 +57,7 @@ const missingRequired = [];
   else FILES.push(entry);
 })();
 
-for (const { src, dest, optional } of FILES) {
+for (const { src, dest, optional, sha256 } of FILES) {
   const srcPath = path.join(SRC_DIR, src);
   const destPath = path.join(PUBLIC_DIR, dest);
   if (!fs.existsSync(srcPath)) {
@@ -64,6 +71,13 @@ for (const { src, dest, optional } of FILES) {
   const size = fs.statSync(srcPath).size;
   if (size === 0) {
     console.warn(`⚠️  assets/焦點股日報/${src} 是 0 byte（可能上傳/同步沒完成），仍會複製但目標檔也會是壞檔`);
+  }
+  if (sha256) {
+    const actualSha256 = crypto.createHash("sha256").update(fs.readFileSync(srcPath)).digest("hex");
+    if (actualSha256 !== sha256) {
+      console.error(`❌ assets/焦點股日報/${src} SHA-256 不符，拒絕複製未驗收的 header 素材`);
+      process.exit(1);
+    }
   }
   fs.copyFileSync(srcPath, destPath);
   console.log(`  ✓ assets/焦點股日報/${src}  →  public/${dest}（${size} bytes）`);
