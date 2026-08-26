@@ -9,6 +9,7 @@ const {
   ScriptTimelineResolverError,
   resolvePlacementStart: resolveScriptPlacementStart,
 } = require('./script-timeline-resolver');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 
 const ROOT = path.resolve(__dirname, '..');
 const READY_MODE = 'ready-to-place';
@@ -113,7 +114,7 @@ function validateIntent(intent) {
       || intent.contractVersion !== 2
       || typeof intent.requestId !== 'string' || !intent.requestId
       || intent.provider?.id !== 'chipk-simulator-capture'
-      || intent.provider?.toolVersion !== '0.3.0'
+      || intent.provider?.toolVersion !== PROVIDER_LOCK.toolVersion
       || intent.target?.routeId !== 'chipk.stock.main-force'
       || intent.target?.stockId !== '3441' || intent.target?.stockName !== '聯一光'
       || intent.presentation?.profileId !== 'chipk.stock-main-force-portrait.v1'

@@ -9,6 +9,7 @@ const {
   MaterialAcquisitionError,
   acquireOptionalMaterial,
   buildCaptureRequest,
+  normalizeMaterialAcquisitionIntent,
 } = require('./material-acquisition');
 const FOCUSSTOCK_VISUAL_TIMING = require(
   '../src/Focusstock/focusstock-visual-timing.contract.json');
@@ -32,6 +33,11 @@ const FOCUSSTOCK_SHOTS = path.posix.join(
 const SUBTITLES = path.posix.join('src', 'subtitles.json');
 const REVIEW_EDIT_TRANSACTION = 'review-edit-transaction.json';
 const REVIEW_EDIT_PLAN = path.posix.join('state', FOCUSSTOCK_SHOTS);
+const CTA_ROUTE_ID = 'chipk.stock.realtime';
+const CTA_OPERATION = 'screenshot';
+const CTA_MODE = 'live';
+const CTA_ASSET_NAME = 'cta.png';
+const CTA_PROVENANCE_NAME = 'cta.provenance.json';
 
 function fail(message, code, details) {
   throw new MaterialAcquisitionError(message, code, details);
@@ -1725,6 +1731,219 @@ function compactPreparedPhoneAcquisition({
   return { compacted: true, bytesFreed, alreadyCompacted: false };
 }
 
+function resolveCtaProjectRoot(projectPath) {
+  if (typeof projectPath !== 'string' || !path.isAbsolute(projectPath))
+    fail('CTA Project path must be absolute', 'project_path_invalid');
+  let stat;
+  let root;
+  try {
+    stat = fs.lstatSync(projectPath);
+    root = fs.realpathSync(projectPath);
+  } catch (_) {}
+  if (!stat?.isDirectory() || stat.isSymbolicLink() || !root)
+    fail('CTA Project path is missing or unsafe', 'project_path_invalid');
+  return root;
+}
+
+function assertSafeCtaTarget(file) {
+  let stat;
+  try { stat = fs.lstatSync(file); } catch (_) { return; }
+  if (!stat.isFile() || stat.isSymbolicLink())
+    fail('CTA output target is unsafe', 'project_output_invalid');
+}
+
+function ensureSafeCtaDestination(projectRoot) {
+  const assetsDirectory = ensureOwnedDirectory(projectRoot, 'assets');
+  const ctaDirectory = ensureOwnedDirectory(assetsDirectory, 'cta');
+  const assetFile = path.join(ctaDirectory, CTA_ASSET_NAME);
+  const provenanceFile = path.join(ctaDirectory, CTA_PROVENANCE_NAME);
+  assertSafeCtaTarget(assetFile);
+  assertSafeCtaTarget(provenanceFile);
+  return { assetsDirectory, ctaDirectory, assetFile, provenanceFile };
+}
+
+function writePrivateStagingFile(directory, name, bytes, token) {
+  const file = path.join(directory, `.${name}.${token}.tmp`);
+  fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o600 });
+  const fd = fs.openSync(file, 'r');
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  return file;
+}
+
+function replaceCtaOutputPair(directory, records) {
+  const token = `${process.pid}.${crypto.randomUUID()}`;
+  const staged = [];
+  const backups = [];
+  const installed = [];
+  try {
+    for (const record of records) {
+      if (!record || path.basename(record.name) !== record.name
+          || !Buffer.isBuffer(record.bytes) || record.bytes.length < 1) {
+        fail('CTA output transaction is invalid', 'materialization_failed');
+      }
+      const target = path.join(directory, record.name);
+      assertSafeCtaTarget(target);
+      staged.push({
+        target,
+        staging: writePrivateStagingFile(directory, record.name, record.bytes, token),
+        backup: path.join(directory, `.${record.name}.${token}.bak`),
+      });
+    }
+    try {
+      for (const item of staged) {
+        if (!fs.existsSync(item.target)) continue;
+        fs.renameSync(item.target, item.backup);
+        backups.push(item);
+      }
+      for (const item of staged) {
+        fs.renameSync(item.staging, item.target);
+        installed.push(item);
+      }
+      fsyncDirectory(directory);
+    } catch (error) {
+      for (const item of installed.reverse()) {
+        try { fs.unlinkSync(item.target); } catch (_) {}
+      }
+      for (const item of backups.reverse()) {
+        try { fs.renameSync(item.backup, item.target); } catch (_) {}
+      }
+      try { fsyncDirectory(directory); } catch (_) {}
+      fail('CTA output transaction could not be committed', 'materialization_failed', {
+        cause: error?.code || 'filesystem_error',
+      });
+    }
+    for (const item of backups) {
+      try { fs.unlinkSync(item.backup); } catch (_) {}
+    }
+    fsyncDirectory(directory);
+  } finally {
+    for (const item of staged) {
+      try { fs.unlinkSync(item.staging); } catch (_) {}
+    }
+  }
+}
+
+function verifiedCtaFile(projectRoot, file, expectedSize, expectedSha256) {
+  let stat;
+  let real;
+  try {
+    stat = fs.lstatSync(file);
+    real = fs.realpathSync(file);
+  } catch (_) {}
+  const relative = real && path.relative(projectRoot, real);
+  if (!stat?.isFile() || stat.isSymbolicLink() || !real || !relative
+      || relative === '..' || relative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relative) || stat.size !== expectedSize
+      || hashFile(file) !== expectedSha256) {
+    fail('CTA output is missing, unsafe, or changed', 'materialization_failed');
+  }
+  return { absolutePath: real, bytes: stat.size, sha256: expectedSha256 };
+}
+
+async function captureCtaMaterial({
+  projectPath,
+  stockId,
+  requestIdFactory = () => `capture-cta-${crypto.randomUUID()}`,
+  nowISO = () => new Date().toISOString(),
+  provider = createChipKCaptureCliAdapter(),
+}) {
+  const projectRoot = resolveCtaProjectRoot(projectPath);
+  const intent = normalizeMaterialAcquisitionIntent({
+    policy: 'require-capture',
+    operation: CTA_OPERATION,
+    mode: CTA_MODE,
+    route: CTA_ROUTE_ID,
+    stock: { id: stockId },
+  });
+  const requestId = requestIdFactory();
+  if (typeof requestId !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(requestId))
+    fail('CTA acquisition request ID is invalid', 'invalid_request');
+  const preflightDestination = ensureSafeCtaDestination(projectRoot);
+  const acquisitionDirectory = fs.mkdtempSync(
+    path.join(projectRoot, '.capture-cta-acquisition-'));
+  fs.chmodSync(acquisitionDirectory, 0o700);
+  try {
+    const request = buildCaptureRequest(intent, {
+      requestId,
+      outputDirectory: acquisitionDirectory,
+    });
+    const result = await acquireOptionalMaterial({
+      policy: intent.policy,
+      request,
+      provider,
+    });
+    if (result.status !== 'acquired')
+      fail('CTA material acquisition did not complete', 'provider_request_failed');
+    const artifact = result.material?.find((item) => item.role === 'screenshot');
+    if (!artifact)
+      fail('Validated CTA screenshot is missing', 'materialization_failed');
+
+    const pngBytes = fs.readFileSync(artifact.absolutePath);
+    if (pngBytes.length !== artifact.size
+        || crypto.createHash('sha256').update(pngBytes).digest('hex') !== artifact.sha256) {
+      fail('Validated CTA screenshot changed before materialization', 'materialization_failed');
+    }
+    const destination = ensureSafeCtaDestination(projectRoot);
+    if (destination.assetsDirectory !== preflightDestination.assetsDirectory
+        || destination.ctaDirectory !== preflightDestination.ctaDirectory
+        || destination.assetFile !== preflightDestination.assetFile
+        || destination.provenanceFile !== preflightDestination.provenanceFile) {
+      fail('CTA output destination changed after preflight', 'project_output_invalid');
+    }
+    const { ctaDirectory, assetFile, provenanceFile } = destination;
+    const acquiredAt = nowISO();
+    if (typeof acquiredAt !== 'string' || !Number.isFinite(Date.parse(acquiredAt)))
+      fail('CTA acquisition timestamp is invalid', 'materialization_failed');
+    const provenance = {
+      schemaVersion: 1,
+      sha256: artifact.sha256,
+      bytes: artifact.size,
+      absolutePath: assetFile,
+      providerId: result.provider,
+      toolVersion: result.providerVersion,
+      contractVersion: result.contractVersion,
+      routeId: CTA_ROUTE_ID,
+      operation: CTA_OPERATION,
+      mode: CTA_MODE,
+      stockId: intent.stock.id,
+      acquiredAt,
+    };
+    replaceCtaOutputPair(ctaDirectory, [
+      { name: CTA_ASSET_NAME, bytes: pngBytes },
+      {
+        name: CTA_PROVENANCE_NAME,
+        bytes: Buffer.from(`${JSON.stringify(provenance, null, 2)}\n`),
+      },
+    ]);
+    const asset = verifiedCtaFile(
+      projectRoot, assetFile, artifact.size, artifact.sha256);
+    let savedProvenance;
+    try { savedProvenance = JSON.parse(fs.readFileSync(provenanceFile, 'utf8')); }
+    catch (_) { fail('CTA provenance is missing or invalid', 'materialization_failed'); }
+    if (JSON.stringify(savedProvenance) !== JSON.stringify(provenance))
+      fail('CTA provenance changed while materializing', 'materialization_failed');
+    return {
+      schemaVersion: 1,
+      status: 'completed',
+      asset: {
+        absolutePath: asset.absolutePath,
+        mimeType: 'image/png',
+        bytes: asset.bytes,
+        sha256: asset.sha256,
+      },
+      evidence: {
+        providerId: result.provider,
+        toolVersion: result.providerVersion,
+        contractVersion: result.contractVersion,
+        stockId: intent.stock.id,
+      },
+    };
+  } finally {
+    fs.rmSync(acquisitionDirectory, { recursive: true, force: true });
+  }
+}
+
 async function prepareJobMaterialAcquisition({
   job,
   jobDirectory,
@@ -1868,6 +2087,7 @@ module.exports = {
   buildFocusstockVisualConflictEvidence,
   buildFocusstockVisualTimelinePlacements,
   buildPreparedPhoneTimelinePlacement,
+  captureCtaMaterial,
   compileReviewedFocusstockVisualEvidence,
   compactPreparedPhoneAcquisition,
   commitPreparedPhoneMaterialSelection,

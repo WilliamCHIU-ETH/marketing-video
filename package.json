@@ -12,6 +12,7 @@
     "studio": "npm run dev:server",
     "doctor": "node scripts/doctor.js",
     "doctor:full": "node scripts/doctor.js --full",
+    "material": "node scripts/material.js",
     "smoke": "node scripts/smoke-server.js",
     "migrate:legacy": "node scripts/migrate-legacy-jobs.js",
     "test:legacy-migration": "node --test scripts/migrate-legacy-jobs.test.js",
@@ -51,7 +52,8 @@
     "use-focusstock-ad-assets": "node scripts/use-focusstock-ad-assets.js",
     "parse-script:focusstock": "node scripts/parse-focusstock-script.js",
     "render:focusstock": "remotion render Focusstock out/output-focusstock.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
-    "render:focusstock-ad": "remotion render FocusstockAd out/output-focusstock-ad.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k"
+    "render:focusstock-ad": "remotion render FocusstockAd out/output-focusstock-ad.mp4 --concurrency=2 --timeout=300000 --crf 23 --audio-bitrate 128k",
+    "test:capture-cta": "node --test scripts/capture-cta-command.test.js scripts/capture-cta-contract-shape.test.js scripts/capture-cta-routing-guard.test.js scripts/chipk-capture-031-conformance.test.js"
   },
   "dependencies": {
     "@remotion/cli": "4.0.512",

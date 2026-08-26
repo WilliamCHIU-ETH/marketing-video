@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const { spawn, spawnSync } = require('child_process');
+const PROVIDER_LOCK = require('../config/chipk-capture-provider.lock.json');
 const { capturePaidSpeakerAfterFailure } = require('../server/project-assets');
 const { createProjectStore, inspectMediaFile } = require('../server/project-store');
 
@@ -16,6 +17,7 @@ const ROOT = path.resolve(__dirname, '..');
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'marketing-video-smoke-'));
 const GUARD_LOG = path.join(DATA_DIR, 'blocked-side-effects.log');
 const GUARD_MODULE = path.join(DATA_DIR, 'side-effect-guard.cjs');
+const LOCKED_TOOL_VERSION = PROVIDER_LOCK.toolVersion;
 let child;
 const AUXILIARY_CHILDREN = new Set();
 
@@ -3023,7 +3025,7 @@ const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const capabilities = {
   schemaVersion: 1,
   providerId: 'chipk-simulator-capture',
-  toolVersion: '0.3.0',
+  toolVersion: ${JSON.stringify(LOCKED_TOOL_VERSION)},
   productionReady: true,
   operations: ['screenshot', 'record'],
   contractCapabilities: [
@@ -3166,7 +3168,7 @@ for (const value of Object.values(files))
 process.stdout.write(JSON.stringify({
   contractVersion: 2,
   requestId: request.requestId,
-  provider: { id: 'chipk-simulator-capture', toolVersion: '0.3.0' },
+  provider: { id: 'chipk-simulator-capture', toolVersion: ${JSON.stringify(LOCKED_TOOL_VERSION)} },
   status: 'completed',
   artifacts: Object.entries(files).map(([role, value]) => ({
     role,
