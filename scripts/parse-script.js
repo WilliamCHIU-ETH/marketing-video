@@ -21,6 +21,7 @@ const {
   getTitleText,
   cleanBodyWithIndex,
 } = require('./script-utils');
+const { imagePattern, parseImageOptions } = require('./segment-utils');
 
 // 這支腳本寫進全域路徑（src/*.generated.json、public/），兩個 session 同時跑會靜默互蓋。
 // 跟 run.js 共用同一把鎖（app/.run.lock）。
@@ -117,7 +118,6 @@ function bodyRangeToCleanedRange(bodyStart, bodyEnd) {
 
 // ─── 收集所有 overlay/textcard 標記，依腳本實際位置排序 ───
 // 大小寫不分(i flag),(Logo)/(IMAGE1)/(Shot:...) 都認
-const imagePattern = /\(image(\d+)(?::([a-z0-9,=]+))?\)([\s\S]*?)\(image\1\)/gi;
 const logoPattern = /\(logo\)([\s\S]*?)\(logo\)/gi;
 const shotPattern = /\(shot:([^():]+)(?::([a-z0-9,=]+))?\)([\s\S]*?)\(shot:\1\)/gi;
 const textPattern = /\(text:([^:)]+)(?::([a-z]+))?(?::(skip))?\)([\s\S]*?)\(\/text\)/gi;
@@ -137,6 +137,8 @@ overlayMatches.sort((a, b) => a.index - b.index);
 function buildImageOverlay(m) {
   const n = m[1];
   const optsRaw = m[2];
+  const markerOptions = parseImageOptions(optsRaw, n);
+  if (markerOptions.visual === 'none') return null;
   const contentBodyStart = m.index + m[0].indexOf(m[3]);
   const contentBodyEnd = contentBodyStart + m[3].length;
   const range = bodyRangeToCleanedRange(contentBodyStart, contentBodyEnd);

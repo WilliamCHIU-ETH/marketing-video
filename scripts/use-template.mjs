@@ -1,20 +1,12 @@
 #!/usr/bin/env node
 /**
- * 把版型層複製進一個 HyperFrames 專案。
+ * 把版型宣告的二進位素材複製進一個 HyperFrames Project。
  *
  *   node app/scripts/use-template.mjs 台股晨報 app/runtime-data/projects/<project-id>
  *
- * 複製兩種東西，來源不同、理由不同：
- *
- *   config/templates/<版型>/   → <project>/template/   版位定義與 header 片段。
- *                                                      納版控，因為它是會飄的那一半。
- *   assets/<版型>/             → <project>/assets/     png / jpg / mp3。
- *                                                      不納版控（assets 是 symlink → ../data/assets），
- *                                                      因為是二進位素材。
- *
- * 複製而不是共用參照，是刻意的：HyperFrames 專案自我完備才能兩個 session 同時 render。
- * 代價是複製之後會各自演化 —— 但因為來源在版控裡，`diff` 就看得出誰改了什麼，
- * 這正是現在缺的（header 抄了三次、飄了兩次，沒有任何地方看得出來）。
+ * `config/templates/<版型>/` 的程式與 layout 不再複製：組裝器直接從 App 版型目錄執行，
+ * Project 只保留自己的 ledger、config 與素材。這支命令只複製 layout.json 宣告的
+ * png / jpg / mp3 到 `<project>/assets/`。
  */
 
 import fs from 'node:fs';
@@ -23,13 +15,6 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(here, '..');
-
-const TEMPLATE_FILES = ['layout.json', 'header.mjs'];
-
-// build-main.mjs 去 <project>/scripts/ 而不是 <project>/template/，因為它是被執行的東西，
-// 專案的 package.json 用 `node scripts/build-main.mjs` 叫它；template/ 放的是被讀的東西。
-// 它自己 import '../template/header.mjs'，兩邊的相對位置在 use-template 這裡就固定下來。
-const SCRIPT_FILES = ['build-main.mjs'];
 
 // 文字檔用行數差，二進位用位元組差 —— 只是給人看「差多少」的量級，不是 diff 工具。
 const TEXT_EXT = new Set(['.json', '.mjs', '.js', '.md', '.txt']);
@@ -70,9 +55,7 @@ if (!fs.existsSync(projectDir)) die(`找不到專案目錄：${projectDir}`);
 
 const layout = JSON.parse(fs.readFileSync(path.join(templateDir, 'layout.json'), 'utf8'));
 
-const outTemplate = path.join(projectDir, 'template');
 const outAssets = path.join(projectDir, 'assets');
-const outScripts = path.join(projectDir, 'scripts');
 // 目錄不在這裡建 —— 被拒絕的執行必須連一個空目錄都不留下，否則「未寫入任何檔案」是騙人的。
 // 建目錄移到下面真正要寫的時候。
 
@@ -93,9 +76,6 @@ function stage(srcDir, name, outDir, label) {
     : { src, dst, label, state: 'conflict', diff: describeDiff(srcBuf, dstBuf, name) });
 }
 
-for (const name of TEMPLATE_FILES) stage(templateDir, name, outTemplate, `template/${name}`);
-for (const name of SCRIPT_FILES) stage(templateDir, name, outScripts, `scripts/${name}`);
-
 // 只複製 layout.json 宣告過的素材 —— 資料夾裡多出來的東西不跟著跑，
 // 免得某支片默默依賴一個沒有宣告的檔案。
 for (const [role, file] of Object.entries(layout.assets || {})) {
@@ -104,8 +84,7 @@ for (const [role, file] of Object.entries(layout.assets || {})) {
 }
 
 // 內容相同就直接覆蓋、不吵，因為重跑同一個版型是常態。
-// 內容不同代表這個專案手改過（或版型變了），無聲蓋掉會丟掉別人的工作 ——
-// 這個保護是實測出來的需求：抽 build-main.mjs 那一輪，作者得先手動備份才敢跑這支程式。
+// 內容不同代表 Project 素材被替換過（或版型素材變了），無聲蓋掉會丟掉別人的工作。
 const conflicts = plan.filter((p) => p.state === 'conflict');
 if (conflicts.length && !force) {
   console.error(`❌ ${conflicts.length} 個目標檔已存在且內容不同，未寫入任何檔案：\n`);
@@ -135,6 +114,9 @@ for (const p of plan) {
 
 console.log(`✅ ${templateName} → ${path.relative(process.cwd(), projectDir) || projectDir}`);
 for (const c of copied) console.log(`   ${c}`);
+if (fs.existsSync(path.join(projectDir, 'scripts', 'build-main.mjs'))) {
+  console.log(`ℹ️ 本 Project 的 scripts/build-main.mjs 是歷史副本；正典是 app/config/templates/${templateName}/build-main.mjs。`);
+}
 if (backedUp.length) {
   console.log('\n覆蓋前的備份：');
   for (const b of backedUp) console.log(`   ${b}`);

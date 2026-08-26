@@ -7,18 +7,18 @@
  * 從 20px 32px 飄成 18px 30px、line-height 從 1.2 飄成 1.18，沒有任何地方定義過那組值。
  * 有規格的不飄（broll 與 caption 三支片位元組相同），沒家的才飄。
  *
- * 所以：版位一律讀 template/layout.json，每支片不同的東西一律讀 ledger 或 main.config.json。
- * 這支程式裡不得出現任何寫死的座標、顏色、字級或秒數。
+ * 所以：版位一律直接讀本 template 的 layout.json，每支片不同的東西一律讀 ledger 或
+ * main.config.json。這支程式裡不得出現任何寫死的座標、顏色、字級或秒數。
  *
- * 用法（在專案根目錄）：
+ * 用法（從 App 直接執行，不複製進 Project）：
  *
- *   node scripts/build-main.mjs
+ *   node app/config/templates/台股晨報/build-main.mjs --project /abs/project
  *
- * 讀什麼（全部相對於專案根）：
+ * 讀什麼：
  *
- *   template/layout.json      版位唯一來源
- *   template/header.mjs       header 片段產生器
- *   segment-ledger.json       durationSec / visualForm / segments[]
+ *   <template>/layout.json    版位唯一來源（--template 可覆寫）
+ *   <template>/header.mjs     header 片段產生器
+ *   segment-ledger.json       durationSec / visualForm / segments[] / segments[].audio
  *   caption-ledger.json       字幕分段（陣列，或 {captions:[]}）
  *   script/script.v1.txt      標題兩行（=== 區塊）
  *   renders/                  逐格 B-roll 成品，檔名以 <段號>- 開頭
@@ -48,19 +48,56 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { renderHeader } from '../template/header.mjs';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, '..');
+const { mergeSegmentAudioClips } = require(path.resolve(here, '../../../scripts/segment-utils.js'));
+const {
+  resolveExistingPath,
+  resolveExistingWithin,
+  resolveOutputWithin,
+} = require(path.resolve(here, '../../../scripts/path-safety.js'));
 
 const die = (msg) => { console.error(`❌ ${msg}`); process.exit(1); };
-const readJson = (rel) => {
-  const file = path.join(root, rel);
-  if (!fs.existsSync(file)) die(`找不到 ${rel}`);
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (e) { return die(`${rel} 不是合法 JSON：${e.message}`); }
+const safePath = (callback) => {
+  try { return callback(); }
+  catch (error) { return die(error.message); }
 };
+const parseArgs = (argv) => {
+  const options = { project: null, template: here };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token.startsWith('--')) die(`不認得參數：${token}`);
+    const [rawKey, inline] = token.slice(2).split('=', 2);
+    if (!['project', 'template'].includes(rawKey)) die(`不認得參數：--${rawKey}`);
+    const value = inline ?? argv[++index];
+    if (value == null || String(value).startsWith('--')) die(`--${rawKey} 缺值`);
+    options[rawKey] = value;
+  }
+  if (!options.project || !path.isAbsolute(options.project)) die('--project 必須是絕對路徑');
+  return options;
+};
+const options = parseArgs(process.argv.slice(2));
+const root = safePath(() => resolveExistingPath(options.project, '--project', 'directory'));
+const templateDir = safePath(() => resolveExistingPath(options.template, '--template', 'directory'));
+const headerFile = safePath(() => resolveExistingWithin(
+  templateDir,
+  'header.mjs',
+  'template/header.mjs',
+  'file',
+));
+const { renderHeader } = await import(pathToFileURL(headerFile).href);
+
+const readJsonFile = (file, label) => {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { return die(`${label} 不是合法 JSON：${e.message}`); }
+};
+const readJson = (rel) => readJsonFile(
+  safePath(() => resolveExistingWithin(root, rel, rel, 'file')),
+  rel,
+);
 const esc = (v) => String(v)
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -68,7 +105,13 @@ const n4 = (v) => Number(Number(v).toFixed(4));
 
 // ── 輸入 ───────────────────────────────────────────────────────────────────
 
-const L = readJson('template/layout.json');
+const layoutFile = safePath(() => resolveExistingWithin(
+  templateDir,
+  'layout.json',
+  'template/layout.json',
+  'file',
+));
+const L = readJsonFile(layoutFile, 'template/layout.json');
 const ledger = readJson('segment-ledger.json');
 const captionsRaw = readJson('caption-ledger.json');
 const captions = Array.isArray(captionsRaw) ? captionsRaw : captionsRaw.captions;
@@ -79,10 +122,14 @@ if (!Array.isArray(segments) || !segments.length) die('segment-ledger.json 沒�
 if (typeof ledger.durationSec !== 'number') die('segment-ledger.json 缺 durationSec');
 
 const cfgFile = path.join(root, 'main.config.json');
-const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {};
+const cfg = fs.existsSync(cfgFile)
+  ? readJsonFile(safePath(() => resolveExistingWithin(root, 'main.config.json', 'main.config.json', 'file')), 'main.config.json')
+  : {};
 
-const pkg = fs.existsSync(path.join(root, 'package.json'))
-  ? JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) : {};
+const pkgFile = path.join(root, 'package.json');
+const pkg = fs.existsSync(pkgFile)
+  ? readJsonFile(safePath(() => resolveExistingWithin(root, 'package.json', 'package.json', 'file')), 'package.json')
+  : {};
 const compositionId = cfg.compositionId || `${pkg.name || 'main'}-main`;
 
 const TOP_BARS = new Set(['header', 'title-board', 'none']);
@@ -100,7 +147,13 @@ const brollAudio = cfg.brollAudio ?? Boolean(L.broll.audio?.enabled);
 function parseTitle() {
   const file = path.join(root, 'script', 'script.v1.txt');
   if (!fs.existsSync(file)) return { date: null, label: null, line2: null };
-  const parts = fs.readFileSync(file, 'utf8').split('===');
+  const safeFile = safePath(() => resolveExistingWithin(
+    root,
+    'script/script.v1.txt',
+    'script/script.v1.txt',
+    'file',
+  ));
+  const parts = fs.readFileSync(safeFile, 'utf8').split('===');
   const block = parts.length >= 3 ? (parts[parts.length - 2] || '') : (parts[0] || '');
   const lines = block.trim().split('\n').map((s) => s.trim()).filter(Boolean);
   const [first = '', second = ''] = lines;
@@ -131,9 +184,24 @@ if (topBar === 'title-board' && !title.line1)
 // 而且抄錯不會有人發現（放錯格的 B-roll 一樣 render 得出來）。改成用段號前綴去比對，
 // 命中 0 個或 2 個以上一律 fail closed。
 
+function visualMode(segment) {
+  const mode = segment.visual?.mode ?? 'broll';
+  if (!['broll', 'none'].includes(mode)) die(`段 ${segment.id} visual.mode 只能是 broll 或 none`);
+  return mode;
+}
+const visualSegments = segments.filter((segment) => visualMode(segment) === 'broll');
 const rendersDir = path.join(root, 'renders');
-if (!fs.existsSync(rendersDir)) die('找不到 renders/');
-const renderFiles = fs.readdirSync(rendersDir).filter((f) => f.toLowerCase().endsWith('.mp4'));
+let renderFiles = [];
+if (visualSegments.length) {
+  safePath(() => resolveExistingWithin(root, 'renders', 'renders/', 'directory'));
+  renderFiles = fs.readdirSync(rendersDir, { withFileTypes: true })
+    .filter((entry) => entry.name.toLowerCase().endsWith('.mp4'))
+    .map((entry) => {
+      if (!entry.isFile() || entry.isSymbolicLink()) die(`renders/${entry.name} 不是安全的一般檔案`);
+      safePath(() => resolveExistingWithin(root, `renders/${entry.name}`, `renders/${entry.name}`, 'file'));
+      return entry.name;
+    });
+}
 
 function resolveRender(segment) {
   if (segment.render) {
@@ -151,11 +219,13 @@ function resolveRender(segment) {
     + '請在 segment-ledger.json 的該段加上 "render" 欄位指定唯一檔名');
 }
 
-const shots = segments.map((s, i) => {
-  const duration = typeof s.durationSec === 'number'
-    ? s.durationSec : n4(s.endSec - s.startSec);
-  if (!(duration > 0)) die(`段 ${s.id} 的長度不是正數`);
-  return { id: s.id, index: i, start: s.startSec, duration, file: resolveRender(s) };
+const shots = visualSegments.map((segment, index) => {
+  const start = Number(segment.startSec);
+  const end = Number(segment.endSec);
+  const duration = n4(end - start);
+  if (![start, end].every(Number.isFinite) || !(duration > 0))
+    die(`段 ${segment.id} 的 startSec/endSec 不是正長度`);
+  return { id: segment.id, index, start, duration, file: resolveRender(segment) };
 });
 
 // ── 時間軸：開場卡會把所有東西往後推 ───────────────────────────────────────
@@ -165,6 +235,61 @@ if (useIntro && !(introSec > 0)) die('layout.json 的 intro.durationSec 不是�
 const bodyDur = ledger.durationSec;
 const totalDur = n4(bodyDur + introSec);
 const shift = (t) => n4(Number(t) + introSec);
+
+function validateAudioSrc(src) {
+  if (!src || path.isAbsolute(src) || String(src).includes('\\'))
+    die(`segment audio.src 必須是 project 相對路徑：${src}`);
+  safePath(() => resolveExistingWithin(root, String(src), `segment audio.src ${src}`, 'file'));
+  return String(src).split(path.sep).join('/');
+}
+
+let legacyAvatarAudio = false;
+let avatarClips;
+const segmentsWithAudio = segments.filter((segment) => segment.audio);
+if (segmentsWithAudio.length === segments.length) {
+  try { avatarClips = mergeSegmentAudioClips(segments, { toleranceSec: 0.02 }); }
+  catch (error) { die(error.message); }
+  avatarClips = avatarClips.map((clip) => ({ ...clip, src: validateAudioSrc(clip.src) }));
+} else if (segmentsWithAudio.length === 0) {
+  legacyAvatarAudio = true;
+  console.log('WARN legacy-ledger-no-audio');
+  avatarClips = [{
+    src: validateAudioSrc('public/input-video.mp4'),
+    timelineStart: 0,
+    timelineEnd: bodyDur,
+    mediaStart: 0,
+    mediaEnd: bodyDur,
+    segmentIds: segments.map((segment) => String(segment.id)),
+  }];
+} else {
+  const missing = segments.filter((segment) => !segment.audio).map((segment) => String(segment.id));
+  die(`segment audio schema 混合；缺 audio 的段：${missing.join(', ')}`);
+}
+
+function assertAvatarVideoStreams(clips) {
+  const bySource = new Map();
+  for (const clip of clips) {
+    const ids = bySource.get(clip.src) || new Set();
+    for (const id of clip.segmentIds || []) ids.add(String(id));
+    bySource.set(clip.src, ids);
+  }
+  const missing = [];
+  for (const [src, ids] of bySource) {
+    const file = safePath(() => resolveExistingWithin(root, src, `主播 video source ${src}`, 'file'));
+    let streams;
+    try {
+      streams = execFileSync('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=index',
+        '-of', 'csv=p=0', file,
+      ], { encoding: 'utf8' }).trim();
+    } catch {
+      die(`無法驗證主播 video stream：段 ${[...ids].join(', ')}，src=${src}`);
+    }
+    if (!streams) missing.push(`段 ${[...ids].join(', ')}，src=${src}`);
+  }
+  if (missing.length) die(`主播 video source 沒有 video stream：${missing.join('；')}`);
+}
+assertAvatarVideoStreams(avatarClips);
 
 // ── CSS ───────────────────────────────────────────────────────────────────
 
@@ -180,8 +305,10 @@ const tb = L.titleBoard;
 const hdr = topBar === 'header'
   ? renderHeader({ date: title.date, label: title.label, layout: L }) : null;
 
+const avatarCssSelector = avatarClips.length === 1 ? '#avatar' : '.avatar-video';
+const cssColor = (value) => String(value).toLowerCase() === '#ffffff' ? '#fff' : value;
 const titleBoardCss = topBar === 'title-board' ? `
-.title-board{position:absolute;left:${tb.left}px;top:${tb.top}px;width:${tb.width}px;height:${tb.height}px;padding:${title.line2 ? tb.twoLine.padding : tb.oneLine.padding};border-radius:${tb.borderRadius}px;background:${tb.background};color:${tb.color};border:${tb.borderWidth}px solid ${tb.borderColor};transform:rotate(${tb.rotateDeg}deg);display:flex;${title.line2 ? 'flex-direction:column;' : ''}align-items:center;justify-content:center;text-align:center;${title.line2 ? '' : `font-size:${tb.oneLine.fontSize}px;font-weight:700;`}line-height:${title.line2 ? tb.twoLine.lineHeight : tb.oneLine.lineHeight};box-shadow:${tb.boxShadow}}${title.line2 ? `
+.title-board{position:absolute;left:${tb.left}px;top:${tb.top}px;width:${tb.width}px;height:${tb.height}px;padding:${title.line2 ? tb.twoLine.padding : tb.oneLine.padding};border-radius:${tb.borderRadius}px;background:${tb.background};color:${cssColor(tb.color)};border:${tb.borderWidth}px solid ${tb.borderColor};transform:rotate(${tb.rotateDeg}deg);display:flex;${title.line2 ? 'flex-direction:column;' : ''}align-items:center;justify-content:center;text-align:center;${title.line2 ? '' : `font-size:${tb.oneLine.fontSize}px;font-weight:700;`}line-height:${title.line2 ? tb.twoLine.lineHeight : tb.oneLine.lineHeight};box-shadow:${tb.boxShadow}}${title.line2 ? `
 .title-board .tl1{font-size:${tb.twoLine.line1.fontSize}px;font-weight:${tb.twoLine.line1.fontWeight};color:${tb.twoLine.line1.color}}
 .title-board .tl2{font-size:${tb.twoLine.line2.fontSize}px;font-weight:${tb.twoLine.line2.fontWeight}}` : ''}` : '';
 
@@ -198,12 +325,26 @@ const css = `
 *{box-sizing:border-box}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:${L.colors.stageBg};font-family:'${L.fonts.family}',sans-serif}
 #root{position:relative;width:${L.canvas.width}px;height:${L.canvas.height}px;overflow:hidden;background:${L.colors.stageBg}}
-#avatar{position:absolute;inset:0;width:${L.canvas.width}px;height:${L.canvas.height}px;object-fit:${L.avatar.objectFit}}
+${avatarCssSelector}{position:absolute;inset:0;width:${L.canvas.width}px;height:${L.canvas.height}px;object-fit:${L.avatar.objectFit}}
 .broll{position:absolute;left:${form.left}px;top:${form.top}px;width:${form.width}px;height:${form.height}px;object-fit:${form.objectFit}${form.borderRadius ? `;border-radius:${form.borderRadius}px` : ''}${form.boxShadow && form.boxShadow !== 'none' ? `;box-shadow:${form.boxShadow}` : ''}}${titleBoardCss}${hdr ? '\n' + hdr.css : ''}${introCss}
 .caption{position:absolute;left:${cap.left}px;top:${cap.top}px;width:${cap.width}px;height:${cap.height}px;display:flex;align-items:flex-start;justify-content:center;padding-top:${cap.paddingTop}px;text-align:center}
-.caption-inner{max-width:${inner.maxWidth}px;padding:${inner.padding};border-radius:${inner.borderRadius}px;background:${L.colors.captionBg};color:${inner.color};font-size:${inner.fontSize}px;font-weight:${inner.fontWeight};line-height:${inner.lineHeight};letter-spacing:${inner.letterSpacing};text-shadow:${inner.textShadow};box-shadow:${inner.boxShadow}}`.trim();
+.caption-inner{max-width:${inner.maxWidth}px;padding:${inner.padding};border-radius:${inner.borderRadius}px;background:${L.colors.captionBg};color:${cssColor(inner.color)};font-size:${inner.fontSize}px;font-weight:${inner.fontWeight};line-height:${inner.lineHeight};letter-spacing:${inner.letterSpacing};text-shadow:${inner.textShadow};box-shadow:${inner.boxShadow}}`.trim();
 
 // ── HTML 片段 ─────────────────────────────────────────────────────────────
+
+const avatarEls = avatarClips.flatMap((clip, index) => {
+  const single = avatarClips.length === 1;
+  const suffix = String(index + 1).padStart(2, '0');
+  const videoId = single ? 'avatar' : `avatar-${suffix}`;
+  const audioId = single ? 'avatar-audio' : `avatar-audio-${suffix}`;
+  const videoClass = single ? 'clip' : 'clip avatar-video';
+  const start = shift(clip.timelineStart);
+  const duration = n4(clip.timelineEnd - clip.timelineStart);
+  return [
+    `    <video id="${videoId}" class="${videoClass}" src="${esc(clip.src)}" muted playsinline data-start="${start}" data-duration="${duration}" data-media-start="${clip.mediaStart}" data-track-index="${T.avatar}"></video>`,
+    `    <audio id="${audioId}" class="clip" src="${esc(clip.src)}" data-start="${start}" data-duration="${duration}" data-media-start="${clip.mediaStart}" data-track-index="${T.avatarAudio}" data-volume="1"></audio>`,
+  ];
+}).join('\n');
 
 const brollEls = shots.map((s) =>
   `      <video id="broll-${s.id}" class="clip broll" src="renders/${s.file}" muted playsinline data-start="${shift(s.start)}" data-duration="${s.duration}" data-media-start="0" data-track-index="${T.brollBase + s.index}"></video>`
@@ -258,6 +399,7 @@ if (useBgm) {
   if (!fs.existsSync(mixed))
     bgmDie(`缺 assets/${B.mixedFile}。BGM 來源只有 52.0 秒、成片 ${totalDur}s，`
       + '而 hyperframes 0.8.3 沒有 fade 屬性，所以 loop／fade／volume 要先用 ffmpeg 做進軌裡。');
+  safePath(() => resolveExistingWithin(root, `assets/${B.mixedFile}`, `assets/${B.mixedFile}`, 'file'));
 
   // 只檢查「檔案存在」會放行上面那種 0 byte 壞檔，出來的片就是靜音而且沒人會發現。
   // 所以這裡驗長度：ffprobe 在就驗秒數，不在就至少驗不是空檔並明講降級。
@@ -289,12 +431,10 @@ if (useBgm) {
 // 所以統一放後面，兩種形式都安全。
 // 開場卡放最後是因為它必須遮住第 0–1 秒的所有東西。
 
+const visualLayerEls = [brollEls, hdr ? hdr.html : '', titleBoardHtml];
 const body = [
-  `    <video id="avatar" class="clip" src="public/input-video.mp4" muted playsinline data-start="${introSec}" data-duration="${bodyDur}" data-media-start="0" data-track-index="${T.avatar}"></video>`,
-  `    <audio id="avatar-audio" class="clip" src="public/input-video.mp4" data-start="${introSec}" data-duration="${bodyDur}" data-media-start="0" data-track-index="${T.avatarAudio}" data-volume="1"></audio>`,
-  brollEls,
-  hdr ? hdr.html : '',
-  titleBoardHtml,
+  avatarEls,
+  ...visualLayerEls,
   capEls,
   brollAudioEls,
   bgmHtml,
@@ -326,7 +466,8 @@ ${capTweens}
 </html>
 `;
 
-fs.writeFileSync(path.join(root, 'index.html'), html);
+const outputFile = safePath(() => resolveOutputWithin(root, 'index.html', 'index.html'));
+fs.writeFileSync(outputFile, html);
 console.log(JSON.stringify({
   output: 'index.html',
   compositionId,
@@ -335,8 +476,17 @@ console.log(JSON.stringify({
   intro: useIntro ? introSec : false,
   bgm: useBgm,
   brollAudio,
-  segments: shots.length,
+  segments: segments.length,
+  visualSegments: shots.length,
   captions: captions.length,
   durationSec: totalDur,
   renders: shots.map((s) => `${s.id}→${s.file}`),
+  avatarClips: avatarClips.map((clip) => ({
+    src: clip.src,
+    start: shift(clip.timelineStart),
+    duration: n4(clip.timelineEnd - clip.timelineStart),
+    mediaStart: clip.mediaStart,
+    segments: clip.segmentIds,
+  })),
+  legacyAvatarAudio,
 }));

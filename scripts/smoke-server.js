@@ -294,8 +294,13 @@ function treeFingerprint(dir) {
       const file = path.join(base, entry.name);
       if (entry.isDirectory()) walk(file, nextRel);
       else {
-        const stat = fs.statSync(file);
-        out.push(`${nextRel}:${stat.size}:${Math.round(stat.mtimeMs)}`);
+        // Fingerprint symlinks as links instead of dereferencing them. Runtime data may safely
+        // retain a broken historical source link; that must not prevent the provider-free smoke.
+        const stat = fs.lstatSync(file);
+        const identity = entry.isSymbolicLink()
+          ? `link:${fs.readlinkSync(file)}`
+          : `file:${stat.size}`;
+        out.push(`${nextRel}:${identity}:${Math.round(stat.mtimeMs)}`);
       }
     }
   };
@@ -710,7 +715,9 @@ async function main() {
   assert.ok(preparedGateStart > 0 && preparedGateEnd > preparedGateStart,
     '必須能獨立驗證 ready-to-place timeline/render evidence gate');
   const verifiedPreparedPhoneTimelineEvidence = new Function(
-    `${html.slice(preparedGateStart, preparedGateEnd)}\nreturn verifiedPreparedPhoneTimelineEvidence;`)();
+    'PROVIDER_LOCK',
+    `${html.slice(preparedGateStart, preparedGateEnd)}\nreturn verifiedPreparedPhoneTimelineEvidence;`,
+  )(PROVIDER_LOCK);
   const preparedFixture = {
     materialAcquisition: {
       policy: 'require-capture', operation: 'prepared-video', route: 'chipk.stock.main-force',
@@ -939,6 +946,7 @@ async function main() {
   assert.match((await ambiguousPreparedPhrase.json()).error, /ambiguous/);
 
   const serverSource = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  const jobStoreSource = fs.readFileSync(path.join(ROOT, 'server', 'job-store.js'), 'utf8');
   const runSource = fs.readFileSync(path.join(ROOT, 'run.js'), 'utf8');
   assert.match(runSource,
     /PREPARED_PHONE_MODE === "ready-to-place"[\s\S]{0,300}throw new Error\("ready-to-place 圖片 auto-shot 失敗/,
@@ -981,7 +989,10 @@ async function main() {
     /evidence = await runPipeline\(job, args\);[\s\S]{0,1800}finalizeRenderOutputs\(job, evidence\)/,
     '正常 render 必須與 detached recovery 共用 output finalizer');
   assert.match(serverSource,
-    /function writeJobRecord\(j\) \{[\s\S]{0,160}atomicWriteFile\(jobFile\(j\.id\)/,
+    /const JOB_STORE = createJobStore\([\s\S]{0,400}writeJobRecord,[\s\S]{0,400}= JOB_STORE/,
+    'server 必須委派可 require 的 job store');
+  assert.match(jobStoreSource,
+    /function writeJobRecord\(job\) \{[\s\S]{0,200}atomicWriteFile\(jobFile\(job\.id\)/,
     'job.json 必須透過 atomic temp + rename 寫入');
   const preloadSource = serverSource.match(
     /const PIPELINE_EVIDENCE_PRELOAD = String\.raw`([\s\S]+?)`;\n\nfunction preparePipelineEvidence/);
