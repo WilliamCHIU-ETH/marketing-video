@@ -4,7 +4,10 @@
     "不要在 composition 或 build-main.mjs 裡重打一次數字。",
     "2026-08-25 建立。動機：header 的座標在 auditor-format / armC / 鼎元 三支片之間",
     "抄了三次、padding 與 line-height 各飄一次，而 broll 與 caption 因為 SKILL.md 有寫、",
-    "三支片位元組完全相同。有規格的不飄，沒家的才飄。"
+    "三支片位元組完全相同。有規格的不飄，沒家的才飄。",
+    "2026-08-25 擴充：把 build-main.mjs 抽進版型層時，順手把三支片手抄的 CSS 值全部收進來 ——",
+    "broll 的 fullframe 形式、caption-inner、title-board、avatar、bgm、開場卡秒數。",
+    "判準是「這個值在兩支以上的片裡被手抄過」，不是「所有 CSS 都搬進來」。"
   ],
   "templateId": "tw-morning-report",
   "label": "台股晨報",
@@ -16,6 +19,18 @@
     "bgm": "BGM.mp3"
   },
 
+  "$projectAssets": [
+    "以下三個檔不由 use-template.mjs 帶入，因為它們不是版型資產：",
+    "gsap.min.js、NotoSansTC-Regular.ttf、NotoSansTC-Bold.ttf 由專案自己備齊。",
+    "字型是硬約束 4（只用本機檔案），gsap 是 caption 淡入淡出的執行依賴。"
+  ],
+  "fonts": {
+    "family": "Noto Sans TC",
+    "regular": "NotoSansTC-Regular.ttf",
+    "bold": "NotoSansTC-Bold.ttf"
+  },
+  "gsap": "gsap.min.js",
+
   "colors": {
     "brandBlue": "#0152F5",
     "stageBg": "#06111f",
@@ -24,34 +39,178 @@
 
   "header": {
     "$comment": "header-overlay-v2.png 是 1080×1920 全幅 RGBA，白框以分隔線切成左右兩格。數值沿用 FocusstockComposition.tsx 的 FS_LAYOUT（使用者拍板）。",
+    "$headerAssetSpec": {
+      "$why": [
+        "2026-08-26 使用者決定：重做一張較短的 header 素材，把可用區還回來。",
+        "現況不透明帶 387px，可用區（帶底→字幕頂 1390）只有 1004px、佔畫面 52.3%。",
+        "既有 12 格 B-roll 的最上緣文字實測：01=334、09=382、06=388，其餘 ≥399。",
+        "帶底只要 ≤320 就一格都不會被切，且可用區回到 1070px。",
+        "垂直壓縮既有素材不可行：0.85 就看得出 CMoney 鑽石被壓扁，不拿品牌標記換 58px。"
+      ],
+      "current": {
+        "bandHeight": 387,
+        "verticalBudget": "上留白 71 + logo 58 + 間隙 48 + 白框 167 + 下緣 43 = 387",
+        "logo": { "top": 71, "height": 58 },
+        "whiteBox": { "top": 177, "height": 167, "left": 82, "right": 996 },
+        "divider": { "left": 317, "right": 322 },
+        "leftCellWidth": 236,
+        "rightCellWidth": 675
+      },
+      "target": {
+        "$approach": "只裁三段藍色留白，logo 與白框尺寸一個像素都不動 —— 這樣零變形，而且字級不必改。",
+        "bandHeight": 320,
+        "verticalBudget": "上留白 45 + logo 58 + 間隙 32 + 白框 167 + 下緣 18 = 320",
+        "logo": { "top": 45, "height": 58 },
+        "whiteBox": { "top": 121, "height": 167, "left": 82, "right": 996 },
+        "divider": { "left": 317, "right": 322 },
+        "$mustHold": [
+          "寬 1080 滿版，不透明帶必須橫跨整個畫面寬度（不得留側邊縫）。",
+          "logo 與白框維持原尺寸與原水平位置，只改垂直位置。",
+          "白框左格須容得下 4 位日期（86px 字級實測 204px 寬，格寬 236 → 餘 32px）。",
+          "白框右格須容得下 5 字片型（112px 字級實測「籌碼K晨報」525px 寬，格寬 675 → 餘 150px）。",
+          "logo 不得非等比縮放。"
+        ]
+      },
+      "$applyWhenAssetLands": {
+        "$note": "新素材進來後要同步改的三個值，其餘不動。",
+        "header.date.top": "197 → 141",
+        "header.label.top": "183 → 127",
+        "keepClear.header.bottom": "386 → 320"
+      }
+    },
     "dateFormat": "MMDD",
     "$dateFormatNote": "2026-08-11 使用者統一：三個版型日期一律 MMDD 無斜線（0810），不插斜線、不斜體。FocusstockComposition.tsx 兩個呼叫端都傳 italic={false}。",
     "date":  { "top": 197, "left": 62,  "width": 258, "fontSize": 86,  "color": "#0152F5" },
     "label": { "top": 183, "left": 332, "width": 625, "height": 142, "fontSize": 112, "color": "#0152F5" }
   },
 
+  "titleBoard": {
+    "$comment": [
+      "旋轉標題板，SKILL.md「版面幾何」有寫 x=322 / y=74 / 668×148 / -2.4°。",
+      "它與 header 互斥：header-overlay-v2.png 的藍色banner 在 y 0–375 是不透明的，",
+      "會把 y 74–222 的標題板完全蓋掉。同一支片只能選一個，由 build-main.mjs 的 topBar 決定。",
+      "兩種變體都在野生程式碼裡出現過，差異就是 2026-08-25 記錄的那次飄移：",
+      "  oneLine（armC、auditor-format）：padding 20px 32px、line-height 1.2、fontSize 40",
+      "  twoLine（鼎元 v001／v002）：padding 18px 30px、line-height 1.18、tl1 34 / tl2 40",
+      "twoLine 是後出現的，因為講稿標題本來就有兩行；oneLine 只放得下一行。"
+    ],
+    "left": 322, "top": 74, "width": 668, "height": 148,
+    "borderRadius": 24, "rotateDeg": -2.4,
+    "background": "#0e1a2b", "borderColor": "#3a4a5e", "borderWidth": 2,
+    "color": "#ffffff", "boxShadow": "0 12px 30px rgba(1,8,18,.32)",
+    "oneLine": { "padding": "20px 32px", "lineHeight": 1.2, "fontSize": 40 },
+    "twoLine": {
+      "padding": "18px 30px", "lineHeight": 1.18,
+      "line1": { "fontSize": 34, "fontWeight": 400, "color": "#9fb0c4" },
+      "line2": { "fontSize": 40, "fontWeight": 700 }
+    }
+  },
+
+  "avatar": {
+    "$comment": "HeyGen 主播影片鋪滿全幅。cover 會裁切，這是刻意的（框取由 HeyGen 那端決定）。",
+    "objectFit": "cover"
+  },
+
   "intro": {
-    "$comment": "開場卡，疊在 intro-frame.jpg 上。HyperFrames 線目前沒有開場卡，先定義起來。",
+    "$comment": [
+      "開場卡，疊在 intro-frame.jpg 上。固定 1 秒，總長 = 開場卡 + heygen 期，沒有 outro",
+      "（focusstock-timeline.ts:54）。",
+      "2026-08-26 使用者裁決：這 1 秒不計入片長目標。「45s 片」指 45 秒旁白、成片 46 秒；",
+      "60s 同理成片 61 秒。所以 晨報講稿時長換算表.md 的字數預算不因開場卡下調 ——",
+      "旁白要保有完整長度，兩個觀察指標的空間不能被壓縮。",
+      "重要：label 那一格是「描述圖裡已經有什麼」，不是要畫上去的槽位 ——",
+      "intro-frame.jpg 的白底方塊裡已經烙印了藍字，所以本版型不再疊 label 文字。",
+      "2026-08-25 實測：疊上去會和烙印的字重疊成一團無法辨識。",
+      "date 與 title 兩格是圖上的空白區，要靠程式畫。"
+    ],
+    "durationSec": 1,
     "date":  { "top": 440,  "left": 0,   "width": 1080, "fontSize": 250, "color": "#ffffff" },
-    "label": { "top": 730,  "left": 112, "width": 856,  "height": 234, "fontSize": 150 },
+    "label": {
+      "$bakedIntoAsset": true,
+      "$bakedText": "盤後日報",
+      "$note": "目前這張 intro-frame.jpg 烙印的是「盤後日報」，而晨報的片型是「籌碼K晨報」——素材與片型不符，待決。",
+      "top": 730,  "left": 112, "width": 856,  "height": 234, "fontSize": 150
+    },
     "title": { "top": 1010, "fontSize": 142, "color": "#ffd400" }
   },
 
   "broll": {
-    "$comment": "已驗證值（PROD-003 與 BATCH-01A 兩條獨立產線收斂到同一組）。auditor-format / armC / 鼎元 三支片位元組相同，不要動。",
+    "$comment": [
+      "card 形式：已驗證值（PROD-003 與 BATCH-01A 兩條獨立產線收斂到同一組）。",
+      "armC、auditor-format、鼎元 v001 三支片這段 CSS 位元組完全相同，不要動。",
+      "使用者已明確表示不處理 B4（卡片遮住主播臉），所以這組幾何不得變更、不得提議優化。"
+    ],
     "left": 55, "top": 470, "width": 970, "height": 740,
-    "borderRadius": 32, "boxShadow": "0 22px 56px rgba(1,8,18,.38)"
+    "borderRadius": 32, "boxShadow": "0 22px 56px rgba(1,8,18,.38)",
+    "objectFit": "contain",
+    "fullframe": {
+      "$comment": [
+        "SKILL.md「視覺形式」允許的第二種形式，全幅覆蓋主播。鼎元 v002 用的就是這組。",
+        "object-fit 是 fill 而非 contain：B-roll 本來就是 1080×1920 產出，fill 不會變形也不留邊。",
+        "選 fullframe 時版位禁區沒有保護，描述階段就要自己避開 header 與字幕區。"
+      ],
+      "left": 0, "top": 0, "width": 1080, "height": 1920,
+      "borderRadius": 0, "boxShadow": "none", "objectFit": "fill"
+    },
+    "audio": {
+      "$comment": "B-roll 自帶音軌。auditor-format 有掛（volume 0.7），armC 與鼎元沒有。預設不掛，要掛才在 main.config.json 打開。",
+      "enabled": false,
+      "volume": 0.7
+    }
   },
 
   "caption": {
+    "$comment": "三支片位元組完全相同（SKILL.md 有寫規格）。inner 的細節原本只存在手抄的 CSS 裡，2026-08-25 收進來。",
     "left": 60, "top": 1390, "width": 960, "height": 250,
-    "paddingTop": 20, "fontSize": 48, "borderRadius": 22
+    "paddingTop": 20, "fontSize": 48, "borderRadius": 22,
+    "inner": {
+      "maxWidth": 940, "padding": "14px 28px 18px", "borderRadius": 22,
+      "color": "#ffffff", "fontSize": 48, "fontWeight": 700,
+      "lineHeight": 1.35, "letterSpacing": ".02em",
+      "textShadow": "0 2px 4px rgba(0,0,0,.6)", "boxShadow": "0 8px 24px rgba(0,0,0,.24)"
+    },
+    "fade": {
+      "$comment": "三支片相同：淡入 0.12s、淡出 0.10s，但都不得超過該句時長的 1/4（短句才會觸發上限）。",
+      "inSec": 0.12, "outSec": 0.10, "maxRatio": 0.25,
+      "inEase": "power2.out", "outEase": "power2.in", "riseFromY": 10
+    }
+  },
+
+  "bgm": {
+    "$comment": [
+      "拍板參數來自 focusstock-timeline.ts:59（FOCUSSTOCK_BGM），三個版型共用同一組。",
+      "坑：BGM.mp3 只有 52.0 秒，晨報成片通常 60 秒以上，直接掛會斷。",
+      "hyperframes 0.8.3 有 data-loop／data-volume 但沒有 fade 屬性，所以不靠 renderer 做 fade ——",
+      "改用 ffmpeg 預先產一條剛好長度、已含 fade 與 volume 的軌（build-main.mjs 會印出指令）。"
+    ],
+    "volume": 0.15,
+    "fadeInSec": 1.0,
+    "fadeOutSec": 2.0,
+    "mixedFile": "bgm-mixed.m4a"
   },
 
   "keepClear": {
-    "$comment": "B-roll 與任何疊圖都不得侵入的區域。",
-    "header":  { "top": 0,    "bottom": 380  },
+    "$comment": [
+      "B-roll 與任何疊圖都不得侵入的區域。",
+      "header 的 380 原本是估值；2026-08-25 從 header-overlay-v2.png 逐列量 alpha，",
+      "不透明帶實際到 y=386，已更正。這 6px 不是小數：鼎元 12 格裡有 2 格的章節標題落在",
+      "y 222–386 之間（01「昨日台股」全遮、09「昨日大盤成交值」上緣被切），",
+      "因為那批 B-roll 是照舊的禁區（標題板 y<222）畫的。",
+      "選 topBar=header 時，B-roll 描述階段必須用 386 這個數字，不是 222。"
+    ],
+    "header":  { "top": 0,    "bottom": 386  },
     "caption": { "top": 1390, "bottom": 1640 },
     "keyNumber": { "top": 1350, "bottom": 1680 }
+  },
+
+  "tracks": {
+    "$comment": "data-track-index 分層慣例，三支片一致。broll 與 broll-audio 從基準值往上逐格 +1。",
+    "avatar": 1,
+    "brollBase": 3,
+    "avatarAudio": 20,
+    "brollAudioBase": 30,
+    "caption": 50,
+    "intro": 60,
+    "bgm": 70
   }
 }
