@@ -615,6 +615,9 @@ const STAGE_TEXT = {
 };
 
 let TPLS = {}, BRANDS = [], ADMIN = false, brand = null, tpl = 'default', view = 'list', openJob = null;
+// App 接受哪一版 provider 由 config/chipk-capture-provider.lock.json 決定，boot() 從 /api/health 取。
+// 這裡曾經寫死 '0.3.0'：lock 一升到 0.3.1，合法取得的 v2 evidence 就會被判成不成立。
+let PROVIDER_LOCK = {};
 let activeProject = null, reusedAssets = [], reusedSpeakerAsset = null;
 let projectAssetLibraryOpen = false;
 let iterationReturn = null;
@@ -983,6 +986,7 @@ async function boot() {
   const h = await api('/api/health');
   TPLS = h.templates;
   BRANDS = h.brands || [];
+  PROVIDER_LOCK = h.providerLock || {};
   // 修正紀錄與發音替換只給管理者（本機連進來的人）看；
   // Avatar 已是建立影片的正式欄位，不再依管理者權限隱藏。
   ADMIN = !!h.admin;
@@ -1569,10 +1573,12 @@ function verifiedPreparedPhoneTimelineEvidence(job) {
   if (!intent || intent.operation !== 'prepared-video' || intent.policy !== 'require-capture'
       || intent.route !== 'chipk.stock.main-force'
       || intent.stock?.id !== '3441'
-      || intent.presentation?.profileId !== 'chipk.stock-main-force-portrait.v1'
+      || intent.presentation?.profileId !== PROVIDER_LOCK.readyToPlaceProfileId
       || intent.placement?.layoutId !== 'focusstock-phone-portrait.v1'
-      || !result || result.status !== 'acquired' || result.contractVersion !== 2
-      || result.provider !== 'chipk-simulator-capture' || result.providerVersion !== '0.3.0'
+      || !result || result.status !== 'acquired'
+      || result.contractVersion !== PROVIDER_LOCK.readyToPlaceContractVersion
+      || result.provider !== PROVIDER_LOCK.providerId
+      || result.providerVersion !== PROVIDER_LOCK.toolVersion
       || result.placementStatus !== 'compiled' || result.automaticTimelineUse !== true
       || result.presentation?.profileId !== intent.presentation.profileId
       || !result.preparedArtifact || result.preparedArtifact.role !== 'prepared-video'

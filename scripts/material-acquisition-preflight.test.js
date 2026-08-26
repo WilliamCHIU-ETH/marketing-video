@@ -228,7 +228,7 @@ test('ready-to-place live lock gate fails closed before the existing VIP readine
     { contractVersion: 1, mode: 'live' }, verifiedCapabilities, missingFlag), null);
 });
 
-test('completed v1 screenshot follows the 0.3.1 lock while v2 live stays disabled', async (t) => {
+test('completed v1 screenshot follows the consumer lock while v2 live stays disabled', async (t) => {
   const { request, result } = fixture(t);
   let acquireCalls = 0;
   const value = await acquireOptionalMaterial({

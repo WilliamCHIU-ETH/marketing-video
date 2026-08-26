@@ -39,6 +39,7 @@ const {
 } = require('./project-store');
 const { capturePaidSpeakerAfterFailure } = require('./project-assets');
 const {
+  PROVIDER_LOCK,
   normalizeMaterialAcquisitionIntent,
   resolvePreparedVideoPlacement,
 } = require('./material-acquisition');
@@ -3497,6 +3498,17 @@ const server = http.createServer(async (req, res) => {
         lockAgeMin: fs.existsSync(LOCK)
           ? Math.round((Date.now() - fs.statSync(LOCK).mtimeMs) / 60000) : null,
         templates: TEMPLATES, brands: listBrands(),
+        // 前台的 prepared-video 驗證需要知道 App 接受哪一版 provider。以前那些值寫死在
+        // public/index.html，lock 一升版前台就會把合法的 evidence 判成不成立。改成從這裡派生，
+        // lock 是唯一來源（docs/architecture/chipk-capture-compatibility.md）。只吐版本識別，不吐路徑。
+        providerLock: {
+          providerId: PROVIDER_LOCK.providerId,
+          toolVersion: PROVIDER_LOCK.toolVersion,
+          contractVersion: PROVIDER_LOCK.contractVersion,
+          readyToPlaceContractVersion: PROVIDER_LOCK.readyToPlaceContractVersion,
+          readyToPlaceProfileId: PROVIDER_LOCK.readyToPlaceProfileId,
+          readyToPlaceLiveEnabled: PROVIDER_LOCK.readyToPlaceLiveEnabled === true,
+        },
         startedAt: STARTED_AT, codeChangedAt: codeChangedAt(),
         admin: isAdmin(req, url),
         mode: TEST_MODE ? 'test' : 'normal',

@@ -68,7 +68,7 @@ Server、`doctor` 與 ASR 的 setup／transcribe entrypoints 都會讀取 repo r
 | `MINIMAX_API_KEY` | MiniMax fallback | 否 |
 | `MINIMAX_GROUP_ID` | MiniMax fallback | 否 |
 | `OPENAI_API_KEY` | 選用的 AI 生圖／判圖腳本 | 否 |
-| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture `0.3.1` executable 絕對路徑；只開放 contract v1，v2 live 仍關閉 | 否 |
+| `CHIPK_CAPTURE_BIN` | 選用的 ChipK Capture executable 絕對路徑，版本必須與 lock 的 `toolVersion` 相符；只開放 contract v1，v2 live 仍關閉 | 否 |
 | `WHISPER_MODEL_PATH` | 本機 whisper.cpp 模型；預設 `.cache/whisper/ggml-base-q5_1.bin` | 僅 ASR |
 | `WHISPER_MODEL_SHA256` | 模型校驗碼；換自訂模型時必須同步設定 | 僅 ASR |
 | `WHISPER_THREADS` | CPU thread 數；預設 `4` | 僅 ASR |
@@ -97,19 +97,20 @@ artifact 實際通過 App 的 bytes／hash／media validator、Run staging、pla
 Project Asset／Revision selection 與 timeline-ready evidence。任何 raw fallback 都會使 gate
 失敗；synthetic driver 必須交付可實際解碼的無音軌 H264 MP4，不接受只宣告 media metadata。
 
-目前 runtime lock 的 Provider ID 是 `chipk-simulator-capture`，tool version 是 `0.3.1`，
-但能力必須分 contract 判斷：
+runtime lock 的 Provider ID 是 `chipk-simulator-capture`，**tool version 一律以
+`config/chipk-capture-provider.lock.json` 為準，本文不複述**（複述過一次就是第二個要維護的地方，
+已經害過一個 session 誤判根因）。能力必須分 contract 判斷：
 
-- contract v1 的 screenshot／record 使用 `0.3.1`，通過既有 policy 與 artifact validation 後可用；晨報 CTA 實機擷取屬此路徑。
+- contract v1 的 screenshot／record 使用 lock 釘的版本，通過既有 policy 與 artifact validation 後可用；晨報 CTA 實機擷取屬此路徑。
 - contract v2 的 ready-to-place 仍須精確選取 `contractCapabilities` v2 entry、presentation profile 與 `stockIds: ["3441"]`，但 `readyToPlaceLiveEnabled: false` 明確關閉所有 live prepared-video acquisition。Synthetic conformance 不受影響。
 
-lock 的 release 欄位是 tag `v0.3.1`、commit `null`、status
-`pending-provider-attestation`，不得解讀為 release identity 已驗證。Provider CLI 對
+lock 的 release 欄位目前 status 是 `pending-provider-attestation` 且沒有 commit，
+不得解讀為 release identity 已驗證。實際值讀 lock。Provider CLI 對
 Marketing Video 只揭露 `capabilities` 與 `acquire` 兩個命令，不揭露 release commit；
 Marketing Video 也不進 provider repo 取 Git metadata。只有 Provider owner 或 release CI
 交付含 tag、commit、binary digest 的不可變 release manifest 後，status 才可改為 `released`。
 
-Provider `0.3.1` 確實廣告 `runReadiness.vipSession=verified_before_mutation`，但這不會打開
+Provider 確實廣告 `runReadiness.vipSession=verified_before_mutation`，但這不會打開
 v2 live。App 會先以 `readyToPlaceLiveEnabled` 做 contract-specific gate；目前的 `false` 使
 `mode=live` prepared-video 在 Provider acquire 前以
 `provider_ready_to_place_live_disabled` fail closed。不得用 Provider readiness、版本相符或
@@ -128,30 +129,26 @@ NODE
 npm run test:material-provider
 ```
 
-第一段必須輸出 `readyToPlaceLiveEnabled=false`。測試必須證明：即使 `0.3.1` capabilities
+第一段必須輸出 `readyToPlaceLiveEnabled=false`。測試必須證明：即使 capabilities
 廣告 VIP session readiness，v2 live 仍回
 `provider_ready_to_place_live_disabled`，且 Provider acquire 呼叫次數是 0。欄位缺少或
 不是布林 `true` 時也必須 fail closed；只有正式 cutover 把它設成 `true` 後，流程才可繼續
 接受既有 VIP session readiness gate。
 
-### 緊急退回 0.3.0
+### 緊急退回前一版
 
 1. 先停止 server 與 worker，避免同時存在兩套 consumer lock。
-2. 將 `config/chipk-capture-provider.lock.json` 的 `toolVersion` 改回 `0.3.0`，並把 release 一起改回：
+2. 把 `config/chipk-capture-provider.lock.json` 的 `toolVersion` 與整個 `release` 區塊還原成
+   **前一個已驗證的 release**。值從兩個地方取，不要憑記憶打：
+   - Provider repo 的 annotated tag 清單（`git -C <provider> tag -l --sort=-v:refname`）
+   - 本檔與 lock 的 Git 歷史（`git log -p config/chipk-capture-provider.lock.json`）
 
-   ```json
-   {
-     "tag": "v0.3.0",
-     "commit": "586fbe7414ab0c25d78ae6e462887fe72030e0a7",
-     "status": "released"
-   }
-   ```
-
-3. 保持 `readyToPlaceLiveEnabled: false`，並讓 `CHIPK_CAPTURE_BIN` 與 lock 一起切回相符的 `0.3.0` executable；不得用環境變數繞過版本檢查。
+   **不要在這裡寫下第二份版本號**——那正是這次要消掉的東西。
+3. 保持 `readyToPlaceLiveEnabled: false`，並讓 `CHIPK_CAPTURE_BIN` 與 lock 一起切回相符的 executable；不得用環境變數繞過版本檢查。
 4. 重跑 `npm run test:material-provider`、`npm run doctor` 與 `npm run smoke`，通過後才重啟服務；版本化文件要與 rollback commit 一起更新。
 
-rollback 會同步撤回 `0.3.1` 的 contract v1 CTA 實機擷取能力；退回後必須把 CTA live capture
-視為不可用並明確回報，不得讓 `0.3.1` binary 對著 `0.3.0` lock 執行，也不得以生成圖冒充。
+rollback 會同步撤回目前這版的 contract v1 CTA 實機擷取能力；退回後必須把 CTA live capture
+視為不可用並明確回報，不得讓新版 binary 對著舊版 lock 執行，也不得以生成圖冒充。
 contract v2 live 前後都維持關閉。
 
 ### CTA 擷取的兩個入口：人用 npm，agent 直呼 node
@@ -202,7 +199,7 @@ recording 或先存成一般 B-Roll；Provider／profile／hash／placement 任�
 
 第一個規劃中的垂直切片是 Focusstock workflow 的「聯一光 3441 主力頁」。以下 JSON 是
 v2 live cutover 未來解除後的正式 shape（標題與講稿仍由當次影片提供），不是目前可執行的
-操作；即使 Provider 是 `0.3.1`，flag 為 false 時也不得送出：
+操作；不論 Provider 是哪一版，flag 為 false 時都不得送出：
 
 ```json
 {

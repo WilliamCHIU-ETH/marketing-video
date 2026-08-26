@@ -665,6 +665,7 @@ async function acquireOptionalMaterial({
 
 module.exports = {
   LEGACY_CONTRACT_VERSION,
+  PROVIDER_LOCK,
   MaterialAcquisitionError,
   READY_TO_PLACE_CONTRACT_VERSION,
   READY_TO_PLACE_LAYOUT,

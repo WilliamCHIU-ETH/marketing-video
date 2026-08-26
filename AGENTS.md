@@ -103,10 +103,11 @@ A placement should normally use a unique phrase from the current script; the ser
 the same cleaner as subtitle alignment. Never calculate `startCharIdx` from the raw API body, and use
 `startSec` only when the user explicitly supplies the timing.
 Before any prepared-video acquisition, run the canonical Provider's `capabilities --json` and use
-only advertised profile／route／stock coverage. Provider v0.3.0 does not advertise
-`runReadiness.vipSession=verified_before_mutation`, so live acquire is prohibited and the App must
-fail closed before calling the Provider. Synthetic conformance remains allowed; do not bypass this
-gate or replace an unsupported/live request with screenshot or raw recording.
+only advertised profile／route／stock coverage. Live acquire is gated by `readyToPlaceLiveEnabled`
+in `config/chipk-capture-provider.lock.json`, not by what the Provider advertises: while that flag
+is false the App fails closed before calling the Provider, even when the Provider does advertise
+`runReadiness.vipSession=verified_before_mutation`. Synthetic conformance remains allowed; do not
+bypass this gate or replace an unsupported/live request with screenshot or raw recording.
 A later Revision must reacquire this ready-to-place intent and placement; never carry the previous
 `prepared-phone-video` forward as general B-Roll.
 The current Focusstock slice may also select existing image assets owned by the same Project in the

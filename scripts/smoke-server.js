@@ -720,7 +720,7 @@ async function main() {
     },
     materialAcquisitionResult: {
       status: 'acquired', contractVersion: 2, provider: 'chipk-simulator-capture',
-      providerVersion: '0.3.0', placementStatus: 'compiled', automaticTimelineUse: true,
+      providerVersion: LOCKED_TOOL_VERSION, placementStatus: 'compiled', automaticTimelineUse: true,
       presentation: { profileId: 'chipk.stock-main-force-portrait.v1' },
       compiledPlanSha256: 'd'.repeat(64),
       preparedArtifact: {
