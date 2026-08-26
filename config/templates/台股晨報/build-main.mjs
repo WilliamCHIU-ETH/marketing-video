@@ -54,8 +54,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const { mergeSegmentAudioClips } = require(path.resolve(here, '../../../scripts/segment-utils.js'));
+const {
+  resolveExistingPath,
+  resolveExistingWithin,
+  resolveOutputWithin,
+} = require(path.resolve(here, '../../../scripts/path-safety.js'));
 
 const die = (msg) => { console.error(`❌ ${msg}`); process.exit(1); };
+const safePath = (callback) => {
+  try { return callback(); }
+  catch (error) { return die(error.message); }
+};
 const parseArgs = (argv) => {
   const options = { project: null, template: here };
   for (let index = 0; index < argv.length; index += 1) {
@@ -68,26 +77,27 @@ const parseArgs = (argv) => {
     options[rawKey] = value;
   }
   if (!options.project || !path.isAbsolute(options.project)) die('--project 必須是絕對路徑');
-  options.template = path.resolve(options.template);
   return options;
 };
 const options = parseArgs(process.argv.slice(2));
-const root = fs.realpathSync(options.project);
-const templateDir = fs.realpathSync(options.template);
-const rootStat = fs.lstatSync(root);
-const templateStat = fs.lstatSync(templateDir);
-if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) die('--project 不是安全目錄');
-if (!templateStat.isDirectory() || templateStat.isSymbolicLink()) die('--template 不是安全目錄');
-const headerFile = path.join(templateDir, 'header.mjs');
-if (!fs.existsSync(headerFile)) die('template 找不到 header.mjs');
+const root = safePath(() => resolveExistingPath(options.project, '--project', 'directory'));
+const templateDir = safePath(() => resolveExistingPath(options.template, '--template', 'directory'));
+const headerFile = safePath(() => resolveExistingWithin(
+  templateDir,
+  'header.mjs',
+  'template/header.mjs',
+  'file',
+));
 const { renderHeader } = await import(pathToFileURL(headerFile).href);
 
 const readJsonFile = (file, label) => {
-  if (!fs.existsSync(file)) die(`找不到 ${label}`);
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { return die(`${label} 不是合法 JSON：${e.message}`); }
 };
-const readJson = (rel) => readJsonFile(path.join(root, rel), rel);
+const readJson = (rel) => readJsonFile(
+  safePath(() => resolveExistingWithin(root, rel, rel, 'file')),
+  rel,
+);
 const esc = (v) => String(v)
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -95,7 +105,13 @@ const n4 = (v) => Number(Number(v).toFixed(4));
 
 // ── 輸入 ───────────────────────────────────────────────────────────────────
 
-const L = readJsonFile(path.join(templateDir, 'layout.json'), 'template/layout.json');
+const layoutFile = safePath(() => resolveExistingWithin(
+  templateDir,
+  'layout.json',
+  'template/layout.json',
+  'file',
+));
+const L = readJsonFile(layoutFile, 'template/layout.json');
 const ledger = readJson('segment-ledger.json');
 const captionsRaw = readJson('caption-ledger.json');
 const captions = Array.isArray(captionsRaw) ? captionsRaw : captionsRaw.captions;
@@ -106,10 +122,14 @@ if (!Array.isArray(segments) || !segments.length) die('segment-ledger.json 沒�
 if (typeof ledger.durationSec !== 'number') die('segment-ledger.json 缺 durationSec');
 
 const cfgFile = path.join(root, 'main.config.json');
-const cfg = fs.existsSync(cfgFile) ? JSON.parse(fs.readFileSync(cfgFile, 'utf8')) : {};
+const cfg = fs.existsSync(cfgFile)
+  ? readJsonFile(safePath(() => resolveExistingWithin(root, 'main.config.json', 'main.config.json', 'file')), 'main.config.json')
+  : {};
 
-const pkg = fs.existsSync(path.join(root, 'package.json'))
-  ? JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) : {};
+const pkgFile = path.join(root, 'package.json');
+const pkg = fs.existsSync(pkgFile)
+  ? readJsonFile(safePath(() => resolveExistingWithin(root, 'package.json', 'package.json', 'file')), 'package.json')
+  : {};
 const compositionId = cfg.compositionId || `${pkg.name || 'main'}-main`;
 
 const TOP_BARS = new Set(['header', 'title-board', 'none']);
@@ -127,7 +147,13 @@ const brollAudio = cfg.brollAudio ?? Boolean(L.broll.audio?.enabled);
 function parseTitle() {
   const file = path.join(root, 'script', 'script.v1.txt');
   if (!fs.existsSync(file)) return { date: null, label: null, line2: null };
-  const parts = fs.readFileSync(file, 'utf8').split('===');
+  const safeFile = safePath(() => resolveExistingWithin(
+    root,
+    'script/script.v1.txt',
+    'script/script.v1.txt',
+    'file',
+  ));
+  const parts = fs.readFileSync(safeFile, 'utf8').split('===');
   const block = parts.length >= 3 ? (parts[parts.length - 2] || '') : (parts[0] || '');
   const lines = block.trim().split('\n').map((s) => s.trim()).filter(Boolean);
   const [first = '', second = ''] = lines;
@@ -158,9 +184,24 @@ if (topBar === 'title-board' && !title.line1)
 // 而且抄錯不會有人發現（放錯格的 B-roll 一樣 render 得出來）。改成用段號前綴去比對，
 // 命中 0 個或 2 個以上一律 fail closed。
 
+function visualMode(segment) {
+  const mode = segment.visual?.mode ?? 'broll';
+  if (!['broll', 'none'].includes(mode)) die(`段 ${segment.id} visual.mode 只能是 broll 或 none`);
+  return mode;
+}
+const visualSegments = segments.filter((segment) => visualMode(segment) === 'broll');
 const rendersDir = path.join(root, 'renders');
-if (!fs.existsSync(rendersDir)) die('找不到 renders/');
-const renderFiles = fs.readdirSync(rendersDir).filter((f) => f.toLowerCase().endsWith('.mp4'));
+let renderFiles = [];
+if (visualSegments.length) {
+  safePath(() => resolveExistingWithin(root, 'renders', 'renders/', 'directory'));
+  renderFiles = fs.readdirSync(rendersDir, { withFileTypes: true })
+    .filter((entry) => entry.name.toLowerCase().endsWith('.mp4'))
+    .map((entry) => {
+      if (!entry.isFile() || entry.isSymbolicLink()) die(`renders/${entry.name} 不是安全的一般檔案`);
+      safePath(() => resolveExistingWithin(root, `renders/${entry.name}`, `renders/${entry.name}`, 'file'));
+      return entry.name;
+    });
+}
 
 function resolveRender(segment) {
   if (segment.render) {
@@ -178,11 +219,13 @@ function resolveRender(segment) {
     + '請在 segment-ledger.json 的該段加上 "render" 欄位指定唯一檔名');
 }
 
-const shots = segments.map((s, i) => {
-  const duration = typeof s.durationSec === 'number'
-    ? s.durationSec : n4(s.endSec - s.startSec);
-  if (!(duration > 0)) die(`段 ${s.id} 的長度不是正數`);
-  return { id: s.id, index: i, start: s.startSec, duration, file: resolveRender(s) };
+const shots = visualSegments.map((segment, index) => {
+  const start = Number(segment.startSec);
+  const end = Number(segment.endSec);
+  const duration = n4(end - start);
+  if (![start, end].every(Number.isFinite) || !(duration > 0))
+    die(`段 ${segment.id} 的 startSec/endSec 不是正長度`);
+  return { id: segment.id, index, start, duration, file: resolveRender(segment) };
 });
 
 // ── 時間軸：開場卡會把所有東西往後推 ───────────────────────────────────────
@@ -194,31 +237,20 @@ const totalDur = n4(bodyDur + introSec);
 const shift = (t) => n4(Number(t) + introSec);
 
 function validateAudioSrc(src) {
-  if (!src || path.isAbsolute(src)) die(`segment audio.src 必須是 project 相對路徑：${src}`);
-  const file = path.resolve(root, src);
-  const relative = path.relative(root, file);
-  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
-    die(`segment audio.src 超出 project：${src}`);
-  let stat;
-  try { stat = fs.lstatSync(file); } catch { die(`segment audio.src 不存在：${src}`); }
-  if (!stat.isFile() || stat.isSymbolicLink()) die(`segment audio.src 不是一般檔案：${src}`);
+  if (!src || path.isAbsolute(src) || String(src).includes('\\'))
+    die(`segment audio.src 必須是 project 相對路徑：${src}`);
+  safePath(() => resolveExistingWithin(root, String(src), `segment audio.src ${src}`, 'file'));
   return String(src).split(path.sep).join('/');
 }
 
 let legacyAvatarAudio = false;
 let avatarClips;
-if (segments.every((segment) => segment.audio)) {
-  try {
-    avatarClips = mergeSegmentAudioClips(segments, {
-      durationSec: bodyDur,
-      toleranceSec: 0.02,
-      // Historical ledgers begin B-roll after the spoken greeting. When every segment points to
-      // one continuous all-avatar source, retain that source's leading greeting in the one clip.
-      extendSingleClipToDuration: true,
-    });
-  } catch (error) { die(error.message); }
+const segmentsWithAudio = segments.filter((segment) => segment.audio);
+if (segmentsWithAudio.length === segments.length) {
+  try { avatarClips = mergeSegmentAudioClips(segments, { toleranceSec: 0.02 }); }
+  catch (error) { die(error.message); }
   avatarClips = avatarClips.map((clip) => ({ ...clip, src: validateAudioSrc(clip.src) }));
-} else {
+} else if (segmentsWithAudio.length === 0) {
   legacyAvatarAudio = true;
   console.log('WARN legacy-ledger-no-audio');
   avatarClips = [{
@@ -229,6 +261,9 @@ if (segments.every((segment) => segment.audio)) {
     mediaEnd: bodyDur,
     segmentIds: segments.map((segment) => String(segment.id)),
   }];
+} else {
+  const missing = segments.filter((segment) => !segment.audio).map((segment) => String(segment.id));
+  die(`segment audio schema 混合；缺 audio 的段：${missing.join(', ')}`);
 }
 
 // ── CSS ───────────────────────────────────────────────────────────────────
@@ -339,6 +374,7 @@ if (useBgm) {
   if (!fs.existsSync(mixed))
     bgmDie(`缺 assets/${B.mixedFile}。BGM 來源只有 52.0 秒、成片 ${totalDur}s，`
       + '而 hyperframes 0.8.3 沒有 fade 屬性，所以 loop／fade／volume 要先用 ffmpeg 做進軌裡。');
+  safePath(() => resolveExistingWithin(root, `assets/${B.mixedFile}`, `assets/${B.mixedFile}`, 'file'));
 
   // 只檢查「檔案存在」會放行上面那種 0 byte 壞檔，出來的片就是靜音而且沒人會發現。
   // 所以這裡驗長度：ffprobe 在就驗秒數，不在就至少驗不是空檔並明講降級。
@@ -370,9 +406,7 @@ if (useBgm) {
 // 所以統一放後面，兩種形式都安全。
 // 開場卡放最後是因為它必須遮住第 0–1 秒的所有東西。
 
-const visualLayerEls = ledger.visualForm === 'fullframe'
-  ? [brollEls, hdr ? hdr.html : '', titleBoardHtml]
-  : [hdr ? hdr.html : '', titleBoardHtml, brollEls];
+const visualLayerEls = [brollEls, hdr ? hdr.html : '', titleBoardHtml];
 const body = [
   avatarEls,
   ...visualLayerEls,
@@ -407,7 +441,8 @@ ${capTweens}
 </html>
 `;
 
-fs.writeFileSync(path.join(root, 'index.html'), html);
+const outputFile = safePath(() => resolveOutputWithin(root, 'index.html', 'index.html'));
+fs.writeFileSync(outputFile, html);
 console.log(JSON.stringify({
   output: 'index.html',
   compositionId,
@@ -416,7 +451,8 @@ console.log(JSON.stringify({
   intro: useIntro ? introSec : false,
   bgm: useBgm,
   brollAudio,
-  segments: shots.length,
+  segments: segments.length,
+  visualSegments: shots.length,
   captions: captions.length,
   durationSec: totalDur,
   renders: shots.map((s) => `${s.id}→${s.file}`),

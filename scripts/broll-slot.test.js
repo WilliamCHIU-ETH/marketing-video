@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const test = require('node:test');
 
 const modulePromise = import('./broll-slot.mjs');
@@ -126,6 +127,59 @@ test('compareSlotHashes requires exactly one changed output and current prompt h
     () => compareSlotHashes(base, next, '05', 'wrong-prompt'),
     /promptSha256 與當前 prompt.txt 不符/,
   );
+});
+
+test('changed marker boundary updates slot duration, cards and staged provenance', async () => {
+  const {
+    visualSegmentsFromLedger,
+    deriveCardsFromStagedLedger,
+    createLedgerRenderInputManifest,
+    synchronizeCompositionDuration,
+  } = await modulePromise;
+  const visualSegments = visualSegmentsFromLedger({ segments: [
+    { id: '00', startSec: 0, endSec: 1.85, visual: { mode: 'none' } },
+    { id: '05', startSec: 20, endSec: 26, durationSec: 6,
+      charRange: [82, 108], visual: { mode: 'broll' } },
+  ] });
+  assert.deepEqual(visualSegments.map(({ id, startSec, endSec, durationSec }) => ({
+    id, startSec, endSec, durationSec,
+  })), [{ id: '05', startSec: 20, endSec: 26, durationSec: 6 }]);
+  const projectDir = path.join(path.parse(process.cwd()).root, 'project-fixture');
+  const cards = deriveCardsFromStagedLedger({
+    baseCards: [{ ordinal: 5, resolvedPlacement: { startSec: 19.52, endSec: 25.63 } }],
+    nextItems: [{ slotId: '05', source: path.join(projectDir, 'revision-artifacts/v007/renders/05.mp4'),
+      sha256: 'a'.repeat(64), size: 123 }],
+    visualSegments,
+    projectDir,
+  });
+  assert.deepEqual(cards[0].resolvedPlacement, { startSec: 20, endSec: 26 });
+  assert.deepEqual([cards[0].startCharIdx, cards[0].endCharIdx], [82, 108]);
+  const renderInput = createLedgerRenderInputManifest({
+    canonicalPath: 'segment-ledger.v2.json', canonicalSha256: 'b'.repeat(64),
+    canonicalVisualForm: 'fullframe',
+    stagedPath: 'revision-artifacts/v007/segment-ledger.json', stagedSha256: 'c'.repeat(64),
+    stagedVisualForm: 'card', targetSegment: visualSegments[0],
+  });
+  assert.equal(renderInput.manifest.stagedLedger.path, 'revision-artifacts/v007/segment-ledger.json');
+  assert.equal(renderInput.manifest.targetVisual.durationSec, 6);
+  assert.equal(renderInput.manifest.stagingTransform.visualForm.applied, true);
+  assert.match(renderInput.sha256, /^[0-9a-f]{64}$/);
+  const html = '<div id="root" data-duration="6.11"></div>';
+  assert.equal(synchronizeCompositionDuration(html, 6), '<div id="root" data-duration="6"></div>');
+});
+
+test('visual segment count, not a hard-coded twelve, owns hash comparison', async () => {
+  const { compareSlotHashes } = await modulePromise;
+  const base = [
+    { slotId: '01', promptSha256: 'p1', outputSha256: 'a' },
+    { slotId: '05', promptSha256: 'p5', outputSha256: 'b' },
+  ];
+  const next = structuredClone(base);
+  next[1] = { ...next[1], promptSha256: 'new-p5', outputSha256: 'changed' };
+  assert.deepEqual(compareSlotHashes(base, next, '05', 'new-p5'), [
+    { slotId: '01', result: 'same' },
+    { slotId: '05', result: 'diff' },
+  ]);
 });
 
 test('validateManifestIdentity matches summary, revision, outputs and file evidence', async () => {

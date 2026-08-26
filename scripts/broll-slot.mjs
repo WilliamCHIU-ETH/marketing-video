@@ -50,14 +50,39 @@ export function selectBaseRevision(project, requestedId = null) {
   return summary;
 }
 
+export function visualSegmentsFromLedger(ledger) {
+  if (!ledger || !Array.isArray(ledger.segments) || !ledger.segments.length)
+    throw new Error('segment ledger 沒有 segments');
+  const ids = new Set();
+  const visual = [];
+  for (const segment of ledger.segments) {
+    const mode = segment.visual?.mode ?? 'broll';
+    if (!['broll', 'none'].includes(mode))
+      throw new Error(`segment ${segment.id} visual.mode 只能是 broll 或 none`);
+    if (mode === 'none') continue;
+    const slotId = normalizeSlot(segment.id);
+    if (ids.has(slotId)) throw new Error(`visual segment id 重複：${slotId}`);
+    ids.add(slotId);
+    const startSec = Number(segment.startSec);
+    const endSec = Number(segment.endSec);
+    const durationSec = Number((endSec - startSec).toFixed(4));
+    if (![startSec, endSec].every(Number.isFinite) || !(durationSec > 0))
+      throw new Error(`visual segment ${slotId} 時間不合法`);
+    visual.push({ ...segment, id: slotId, startSec, endSec, durationSec });
+  }
+  if (!visual.length) throw new Error('segment ledger 沒有 visual segment');
+  return visual;
+}
+
 export function compareSlotHashes(baseSlots, nextSlots, changedSlot, currentPromptSha256) {
   const slot = normalizeSlot(changedSlot);
-  if (!Array.isArray(baseSlots) || !Array.isArray(nextSlots)
-      || baseSlots.length !== 12 || nextSlots.length !== 12)
-    throw new Error('B-roll provenance 必須正好 12 格');
+  if (!Array.isArray(baseSlots) || !Array.isArray(nextSlots) || baseSlots.length === 0
+      || baseSlots.length !== nextSlots.length)
+    throw new Error('B-roll provenance 格數不一致');
   const base = new Map(baseSlots.map((item) => [item.slotId, item]));
   const next = new Map(nextSlots.map((item) => [item.slotId, item]));
-  if (base.size !== 12 || next.size !== 12) throw new Error('B-roll provenance slotId 重複');
+  if (base.size !== baseSlots.length || next.size !== nextSlots.length)
+    throw new Error('B-roll provenance slotId 重複');
   const rows = [];
   for (const [slotId, before] of base) {
     const after = next.get(slotId);
@@ -133,8 +158,10 @@ export function resolveLineageSource({
   return null;
 }
 
-export function validatePromptSnapshotIdentity(rows) {
-  if (!Array.isArray(rows) || rows.length !== 12) throw new Error('prompt snapshot 必須正好 12 格');
+export function validatePromptSnapshotIdentity(rows, expectedCount = rows?.length) {
+  if (!Array.isArray(rows) || !Number.isInteger(expectedCount) || expectedCount < 1
+      || rows.length !== expectedCount)
+    throw new Error(`prompt snapshot 必須正好 ${expectedCount} 格`);
   const ids = new Set();
   for (const row of rows) {
     const slotId = normalizeSlot(row.slotId);
@@ -195,6 +222,10 @@ function hashFile(file) {
     fs.closeSync(fd);
   }
   return hash.digest('hex');
+}
+
+function hashJson(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
 function isInside(parent, child) {
@@ -271,7 +302,7 @@ function listRegularFiles(dir, extension) {
     .sort();
 }
 
-function detectLegacyLineage(projectDir, project) {
+function detectLegacyLineage(projectDir, project, expectedVisualCount) {
   const lineageFile = path.join(projectDir, 'revision-artifacts', 'lineage.json');
   let lineage = {};
   if (fs.existsSync(lineageFile)) {
@@ -293,8 +324,8 @@ function detectLegacyLineage(projectDir, project) {
     const renders = `${legacyRoot}/renders`;
     const compositionsDir = safeProjectPath(projectDir, compositions, `${summary.id} legacy compositions`);
     const rendersDir = safeProjectPath(projectDir, renders, `${summary.id} legacy renders`);
-    if (listRegularFiles(compositionsDir, '.html').length !== 12
-        || listRegularFiles(rendersDir, '.mp4').length !== 12) continue;
+    if (listRegularFiles(compositionsDir, '.html').length !== expectedVisualCount
+        || listRegularFiles(rendersDir, '.mp4').length !== expectedVisualCount) continue;
     lineage[summary.id] = { sourceRoot: legacyRoot, compositions, renders };
     changed = true;
   }
@@ -329,7 +360,7 @@ function loadRevisionLineage(projectDir, project, baseRevision) {
   return { revisions, chain };
 }
 
-function collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState) {
+function collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState, expectedVisualCount) {
   const { chain } = loadRevisionLineage(projectDir, project, base.revision);
   const sourcesByRevision = {};
   const fallbackSlotsByRevision = {};
@@ -354,9 +385,9 @@ function collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageS
       const legacyRenders = safeProjectPath(projectDir, legacy.renders, `${revisionId} lineage renders`);
       if (!isInside(sourceRoot, legacyCompositions) || !isInside(sourceRoot, legacyRenders))
         throw new Error(`${revisionId} lineage path 不在 sourceRoot`);
-      if (listRegularFiles(legacyCompositions, '.html').length !== 12
-          || listRegularFiles(legacyRenders, '.mp4').length !== 12)
-        throw new Error(`${revisionId} lineage legacy source 不再是 12 HTML／12 render`);
+      if (listRegularFiles(legacyCompositions, '.html').length !== expectedVisualCount
+          || listRegularFiles(legacyRenders, '.mp4').length !== expectedVisualCount)
+        throw new Error(`${revisionId} lineage legacy source 不再是 ${expectedVisualCount} HTML／render`);
       for (const file of listRegularFiles(legacyCompositions, '.html')) {
         sources.push({
           fileName: path.basename(file),
@@ -410,11 +441,13 @@ function collectWorkingPrompts(projectDir, provenance) {
         throw new Error(`slot ${slot.slotId} 工作 prompt 不等於 base provenance；先修正 canonical working copy`);
       return { slotId: slot.slotId, promptPath, sha256, size: stat.size };
     });
-  if (rows.length !== 12) throw new Error('working prompt 必須正好 12 格');
+  if (rows.length !== provenance.slots.length)
+    throw new Error(`working prompt 必須正好 ${provenance.slots.length} 格`);
   return rows;
 }
 
 function command(commandName, args, { cwd = APP_DIR, logFile = null, allowFailure = false } = {}) {
+  const startedAt = process.hrtime.bigint();
   const result = spawnSync(commandName, args, {
     cwd,
     encoding: 'utf8',
@@ -427,9 +460,16 @@ function command(commandName, args, { cwd = APP_DIR, logFile = null, allowFailur
     fs.writeFileSync(logFile, output, 'utf8');
   }
   if (result.error) throw result.error;
+  const wallTimeMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   if (!allowFailure && result.status !== 0)
     throw new Error(`${commandName} ${args.join(' ')} 失敗（exit ${result.status}）\n${output.slice(-4000)}`);
-  return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '', output };
+  return {
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+    output,
+    wallTimeMs: Number(wallTimeMs.toFixed(3)),
+  };
 }
 
 function parseJsonEnvelope(text, label) {
@@ -467,9 +507,11 @@ function loadBase(projectDir, project, requestedId) {
   const provenanceFile = safeProjectPath(projectDir, provenancePath, 'base provenance path');
   assertRegularFile(provenanceFile, 'base broll provenance');
   const provenance = readJson(provenanceFile);
-  if (provenance.schemaVersion !== 2 || provenance.slots?.length !== 12)
-    throw new Error('base broll provenance 必須是 schemaVersion 2、12 格');
-  if (revision.graphicBroll?.cards?.length !== 12) throw new Error('base Revision graphicBroll.cards 必須 12 格');
+  if (provenance.schemaVersion !== 2 || !Array.isArray(provenance.slots)
+      || provenance.slots.length < 1)
+    throw new Error('base broll provenance 必須是 schemaVersion 2 且至少一格');
+  if (revision.graphicBroll?.cards?.length !== provenance.slots.length)
+    throw new Error('base Revision graphicBroll.cards 與 provenance 格數不一致');
   return { summary, revision, revisionFile, provenance, provenanceFile };
 }
 
@@ -528,21 +570,36 @@ function prepare(options) {
   if (fs.existsSync(path.join(projectDir, 'outputs', `${targetRevisionId}-slot${options.slot}-final.mp4`)))
     throw new Error(`${targetRevisionId} output 已存在，拒絕覆寫`);
 
-  const artifacts = resolveBaseArtifacts(projectDir, base, options.slot);
-  const lineageState = detectLegacyLineage(projectDir, project);
-  const sourceLineage = collectSourceHtmlLineage(projectDir, project, base, artifacts, lineageState);
-  const workingPromptRows = collectWorkingPrompts(projectDir, base.provenance);
   const preferredSegmentLedger = path.join(projectDir, 'segment-ledger.v2.json');
   const segmentLedgerFile = fs.existsSync(preferredSegmentLedger)
     ? preferredSegmentLedger
     : path.join(projectDir, 'segment-ledger.json');
   assertRegularFile(segmentLedgerFile, 'segment ledger');
+  const canonicalLedger = readJson(segmentLedgerFile);
+  const visualSegments = visualSegmentsFromLedger(canonicalLedger);
+  const visualSegmentCount = visualSegments.length;
+  const targetSegment = visualSegments.find((segment) => segment.id === options.slot);
+  if (!targetSegment) throw new Error(`segment ledger 沒有 visual slot ${options.slot}`);
+  const baseSlotIds = [...base.provenance.slots].map((slot) => slot.slotId).sort();
+  const ledgerSlotIds = visualSegments.map((segment) => segment.id).sort();
+  if (JSON.stringify(baseSlotIds) !== JSON.stringify(ledgerSlotIds))
+    throw new Error('segment ledger visual slots 與 base provenance 不一致');
+
+  const artifacts = resolveBaseArtifacts(projectDir, base, options.slot);
+  const lineageState = detectLegacyLineage(projectDir, project, visualSegmentCount);
+  const sourceLineage = collectSourceHtmlLineage(
+    projectDir,
+    project,
+    base,
+    artifacts,
+    lineageState,
+    visualSegmentCount,
+  );
+  const workingPromptRows = collectWorkingPrompts(projectDir, base.provenance);
   const targetProbe = ffprobe(artifacts.target.source);
-  const expectedDurationSec = Number((
-    artifacts.target.card.resolvedPlacement.endSec - artifacts.target.card.resolvedPlacement.startSec
-  ).toFixed(4));
+  const expectedDurationSec = targetSegment.durationSec;
   if (Math.abs(targetProbe.duration - expectedDurationSec) > 0.11)
-    throw new Error(`slot ${options.slot} base render 時長與 placement 不一致`);
+    throw new Error(`slot ${options.slot} base render 時長與 staged-ledger placement 不一致`);
 
   for (const dir of ['compositions', 'renders', 'qa', 'slots', 'public', 'assets'])
     fs.mkdirSync(path.join(workdir, dir), { recursive: true });
@@ -608,6 +665,8 @@ function prepare(options) {
     baseMainSha256: hashFile(artifacts.mainFile),
     segmentLedgerFile: path.relative(projectDir, segmentLedgerFile).split(path.sep).join('/'),
     segmentLedgerSha256: hashFile(segmentLedgerFile),
+    visualSegmentCount,
+    visualSegmentIds: visualSegments.map((segment) => segment.id),
     baseFinalOutput: base.revision.outputs?.[0] || null,
     visualForm: base.revision.visualForm || null,
     expectedDurationSec,
@@ -646,8 +705,9 @@ function prepare(options) {
 }
 
 function materializeCompositionSnapshots(projectDir, workdir, state, artifacts, targetSlot) {
-  if (!Array.isArray(state.sourceHtmlRows) || state.sourceHtmlRows.length !== 12)
-    throw new Error('prepared state 缺 12 格 source HTML lineage');
+  if (!Array.isArray(state.sourceHtmlRows)
+      || state.sourceHtmlRows.length !== state.visualSegmentCount)
+    throw new Error(`prepared state 缺 ${state.visualSegmentCount} 格 source HTML lineage`);
   const compositionsDir = path.join(workdir, 'compositions');
   const fallbackSlots = [];
   for (const row of state.sourceHtmlRows) {
@@ -682,7 +742,8 @@ function materializeCompositionSnapshots(projectDir, workdir, state, artifacts, 
     fallbackSlots.push(row.slotId);
   }
   const files = listRegularFiles(compositionsDir, '.html');
-  if (files.length !== 12) throw new Error(`composition snapshot 不是 12 份：${files.length}`);
+  if (files.length !== state.visualSegmentCount)
+    throw new Error(`composition snapshot 不是 ${state.visualSegmentCount} 份：${files.length}`);
   const expectedNames = new Set(state.sourceHtmlRows.map((row) => row.fileName));
   for (const file of files) {
     if (!expectedNames.has(path.basename(file))) throw new Error(`composition snapshot 多出 ${file}`);
@@ -691,8 +752,9 @@ function materializeCompositionSnapshots(projectDir, workdir, state, artifacts, 
 }
 
 function snapshotWorkingPrompts(projectDir, workdir, state, base, targetSlot) {
-  if (!Array.isArray(state.workingPromptRows) || state.workingPromptRows.length !== 12)
-    throw new Error('prepared state 缺 12 格 working prompt identity');
+  if (!Array.isArray(state.workingPromptRows)
+      || state.workingPromptRows.length !== state.visualSegmentCount)
+    throw new Error(`prepared state 缺 ${state.visualSegmentCount} 格 working prompt identity`);
   const baseBySlot = new Map(base.provenance.slots.map((slot) => [slot.slotId, slot]));
   const evidence = state.workingPromptRows.map((before) => {
     const workingFile = safeProjectPath(projectDir, before.promptPath, `slot ${before.slotId} working prompt`);
@@ -720,10 +782,11 @@ function snapshotWorkingPrompts(projectDir, workdir, state, base, targetSlot) {
       promptSha256: hashFile(snapshotFile),
     };
   });
-  validatePromptSnapshotIdentity(evidence);
+  validatePromptSnapshotIdentity(evidence, state.visualSegmentCount);
   const snapshotFiles = evidence.map((row) => safeProjectPath(projectDir, row.snapshotPath, 'prompt snapshot'));
-  if (new Set(snapshotFiles).size !== 12 || snapshotFiles.some((file) => !fs.statSync(file).isFile()))
-    throw new Error('prompt snapshot 不是 12 份');
+  if (new Set(snapshotFiles).size !== state.visualSegmentCount
+      || snapshotFiles.some((file) => !fs.statSync(file).isFile()))
+    throw new Error(`prompt snapshot 不是 ${state.visualSegmentCount} 份`);
   return evidence;
 }
 
@@ -733,7 +796,7 @@ function revalidateWorkingPromptSnapshots(projectDir, evidence) {
     workingBytes: fs.readFileSync(safeProjectPath(projectDir, row.workingPath, 'working prompt')),
     snapshotBytes: fs.readFileSync(safeProjectPath(projectDir, row.snapshotPath, 'prompt snapshot')),
   }));
-  return validatePromptSnapshotIdentity(rows);
+  return validatePromptSnapshotIdentity(rows, evidence.length);
 }
 
 function copySlotFixture(workdir, htmlFile, slot) {
@@ -752,12 +815,13 @@ function runHyperframesCheck(projectDir, outputFile) {
   fs.writeFileSync(outputFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   if (result.stderr) fs.writeFileSync(`${outputFile}.err`, result.stderr, 'utf8');
   if (result.status !== 0 || !payload.ok) throw new Error(`HyperFrames check FAIL：${outputFile}`);
-  return payload;
+  return { ...payload, wallTimeMs: result.wallTimeMs };
 }
 
 function renderHyperframes(projectDir, outputFile, quality, logFile) {
-  command('npx', [...HF, 'render', projectDir, '-o', outputFile, '--quality', quality], { logFile });
+  const result = command('npx', [...HF, 'render', projectDir, '-o', outputFile, '--quality', quality], { logFile });
   assertRegularFile(outputFile, 'HyperFrames render output');
+  return result.wallTimeMs;
 }
 
 function inferMainConfig(baseHtml) {
@@ -775,15 +839,94 @@ function inferMainConfig(baseHtml) {
   };
 }
 
+export function synchronizeCompositionDuration(html, durationSec) {
+  const duration = Number(durationSec);
+  if (!(duration > 0)) throw new Error('composition duration 不是正數');
+  const rootTag = /<[^>]+\bid=["']root["'][^>]*>/i.exec(String(html));
+  if (!rootTag || !/\bdata-duration=["'][^"']+["']/i.test(rootTag[0]))
+    throw new Error('composition root 缺 data-duration');
+  const updatedTag = rootTag[0].replace(
+    /\bdata-duration=["'][^"']+["']/i,
+    `data-duration="${Number(duration.toFixed(4))}"`,
+  );
+  return `${String(html).slice(0, rootTag.index)}${updatedTag}${String(html).slice(rootTag.index + rootTag[0].length)}`;
+}
+
+export function deriveCardsFromStagedLedger({ baseCards, nextItems, visualSegments, projectDir }) {
+  if (!Array.isArray(baseCards) || !Array.isArray(nextItems) || !Array.isArray(visualSegments)
+      || baseCards.length !== visualSegments.length || nextItems.length !== visualSegments.length)
+    throw new Error('cards/items/staged visual segments 格數不一致');
+  const byId = new Map(visualSegments.map((segment) => [normalizeSlot(segment.id), segment]));
+  return baseCards.map((card) => {
+    const slotId = normalizeSlot(card.ordinal);
+    const segment = byId.get(slotId);
+    const item = nextItems.find((candidate) => candidate.slotId === slotId);
+    if (!segment || !item) throw new Error(`staged ledger/card 缺 slot ${slotId}`);
+    return {
+      ...card,
+      ...(Array.isArray(segment.charRange) ? {
+        startCharIdx: segment.charRange[0],
+        endCharIdx: segment.charRange[1],
+      } : {}),
+      resolvedPlacement: { startSec: segment.startSec, endSec: segment.endSec },
+      assetPath: path.relative(projectDir, item.source).split(path.sep).join('/'),
+      assetSha256: item.sha256,
+      assetSize: item.size,
+    };
+  });
+}
+
+export function createLedgerRenderInputManifest({
+  canonicalPath,
+  canonicalSha256,
+  canonicalVisualForm,
+  stagedPath,
+  stagedSha256,
+  stagedVisualForm,
+  targetSegment,
+}) {
+  const manifest = {
+    schemaVersion: 1,
+    kind: 'broll-slot-ledger-v1',
+    canonicalLedger: { path: canonicalPath, sha256: canonicalSha256 },
+    stagingTransform: {
+      visualForm: {
+        from: canonicalVisualForm || null,
+        to: stagedVisualForm || null,
+        applied: canonicalVisualForm !== stagedVisualForm,
+      },
+    },
+    stagedLedger: { path: stagedPath, sha256: stagedSha256 },
+    targetVisual: {
+      id: targetSegment.id,
+      startSec: targetSegment.startSec,
+      endSec: targetSegment.endSec,
+      durationSec: targetSegment.durationSec,
+    },
+    hyperframes: { version: '0.8.3' },
+  };
+  return { manifest, sha256: hashJson(manifest) };
+}
+
 function stageMainBuildInputs({ projectDir, workdir, state, base }) {
   const segmentSource = safeProjectPath(projectDir, state.segmentLedgerFile, 'segmentLedgerFile');
-  if (hashFile(segmentSource) !== state.segmentLedgerSha256)
+  const canonicalSha256 = hashFile(segmentSource);
+  if (canonicalSha256 !== state.segmentLedgerSha256)
     throw new Error('segment ledger 在 prepare 後改變');
   const ledger = readJson(segmentSource);
   if (!Array.isArray(ledger.segments) || !ledger.segments.length)
     throw new Error('segment ledger 沒有 segments');
+  const canonicalVisualForm = ledger.visualForm || null;
   if (base.revision.visualForm) ledger.visualForm = base.revision.visualForm;
-  writeJson(path.join(workdir, 'segment-ledger.json'), ledger);
+  const stagedFile = path.join(workdir, 'segment-ledger.json');
+  writeJson(stagedFile, ledger);
+  const stagedPath = path.relative(projectDir, stagedFile).split(path.sep).join('/');
+  const stagedSha256 = hashFile(stagedFile);
+  const visualSegments = visualSegmentsFromLedger(ledger);
+  if (visualSegments.length !== state.visualSegmentCount)
+    throw new Error('staged ledger visual segment 格數與 prepare 不一致');
+  const targetSegment = visualSegments.find((segment) => segment.id === state.slot);
+  if (!targetSegment) throw new Error(`staged ledger 缺 target slot ${state.slot}`);
   copyFile(
     path.join(projectDir, 'caption-ledger.json'),
     path.join(workdir, 'caption-ledger.json'),
@@ -795,10 +938,28 @@ function stageMainBuildInputs({ projectDir, workdir, state, base }) {
   const baseMainFile = safeProjectPath(projectDir, state.baseMainFile, 'baseMainFile');
   const config = inferMainConfig(fs.readFileSync(baseMainFile, 'utf8'));
   writeJson(path.join(workdir, 'main.config.json'), config);
+  const renderInput = createLedgerRenderInputManifest({
+    canonicalPath: state.segmentLedgerFile,
+    canonicalSha256,
+    canonicalVisualForm,
+    stagedPath,
+    stagedSha256,
+    stagedVisualForm: ledger.visualForm || null,
+    targetSegment,
+  });
   return {
-    segmentLedger: state.segmentLedgerFile,
+    segmentLedger: {
+      canonical: renderInput.manifest.canonicalLedger,
+      staged: renderInput.manifest.stagedLedger,
+    },
+    stagingTransform: renderInput.manifest.stagingTransform,
     visualForm: ledger.visualForm || 'card',
+    visualSegmentCount: visualSegments.length,
     config,
+    visualSegments,
+    targetSegment,
+    renderInputManifest: renderInput.manifest,
+    renderInputManifestSha256: renderInput.sha256,
   };
 }
 
@@ -839,6 +1000,7 @@ function rollbackDraft(store, projectId, revisionId) {
 }
 
 function finish(options) {
+  const finishStartedAt = process.hrtime.bigint();
   const { projectDir, project } = validateProjectDir(options.project);
   const targetNumber = Number(project.latestRevision) + 1;
   const targetRevisionId = `v${String(targetNumber).padStart(3, '0')}`;
@@ -861,6 +1023,9 @@ function finish(options) {
   }
   const baseMainFile = safeProjectPath(projectDir, state.baseMainFile, 'baseMainFile');
   if (hashFile(baseMainFile) !== state.baseMainSha256) throw new Error('base index.html 在 prepare 後改變');
+  const mainBuild = stageMainBuildInputs({ projectDir, workdir, state, base });
+  if (Math.abs(mainBuild.targetSegment.durationSec - state.expectedDurationSec) > 0.0001)
+    throw new Error('staged ledger target duration 與 prepare 不一致');
   const artifacts = resolveBaseArtifacts(projectDir, base, options.slot);
   const compositionSnapshots = materializeCompositionSnapshots(
     projectDir,
@@ -877,21 +1042,33 @@ function finish(options) {
     ? safeProjectPath(projectDir, state.anchorHtml, 'anchorHtml')
     : path.join(workdir, 'compositions', state.targetRenderName.replace(/\.mp4$/i, '.html'));
   assertRegularFile(htmlFile, '指定格新 HTML');
+  const synchronizedHtml = synchronizeCompositionDuration(
+    fs.readFileSync(htmlFile, 'utf8'),
+    mainBuild.targetSegment.durationSec,
+  );
+  fs.writeFileSync(htmlFile, synchronizedHtml, 'utf8');
 
+  const timings = { hyperframesVersion: '0.8.3', stages: {} };
+  const recordTiming = (name, wallTimeMs) => {
+    timings.stages[name] = { wallTimeMs };
+    console.log(`TIMING ${name} wallTimeMs=${wallTimeMs} hyperframes=0.8.3`);
+  };
   const quality = options.preview ? 'draft' : 'high';
   const fixture = copySlotFixture(workdir, htmlFile, options.slot);
   const slotCheckFile = path.join(workdir, 'qa', `check-slot${options.slot}.json`);
   const slotCheck = runHyperframesCheck(fixture, slotCheckFile);
+  recordTiming('slot-check', slotCheck.wallTimeMs);
   const targetRender = path.join(workdir, 'renders', state.targetRenderName);
-  renderHyperframes(
+  const slotRenderWallTimeMs = renderHyperframes(
     fixture,
     targetRender,
     quality,
     path.join(workdir, 'qa', `render-slot${options.slot}.log`),
   );
+  recordTiming('slot-render', slotRenderWallTimeMs);
   const slotProbe = ffprobe(targetRender);
-  if (Math.abs(slotProbe.duration - state.expectedDurationSec) > 0.11)
-    throw new Error(`指定格 render 時長 ${slotProbe.duration}s 不符合 ${state.expectedDurationSec}s`);
+  if (Math.abs(slotProbe.duration - mainBuild.targetSegment.durationSec) > 0.11)
+    throw new Error(`指定格 render 時長 ${slotProbe.duration}s 不符合 ${mainBuild.targetSegment.durationSec}s`);
   captureQaFrames(targetRender, path.join(workdir, 'qa', 'frames'), options.slot, slotProbe.duration);
 
   const nextItems = artifacts.resolved.map((item) => {
@@ -906,19 +1083,30 @@ function finish(options) {
   changed.source = targetRender;
   changed.sha256 = hashFile(targetRender);
   changed.size = fs.statSync(targetRender).size;
-  const mainBuild = stageMainBuildInputs({ projectDir, workdir, state, base });
-  command('node', [MORNING_TEMPLATE_BUILD, '--project', workdir], {
+  const mainBuildCommand = command('node', [MORNING_TEMPLATE_BUILD, '--project', workdir], {
     cwd: APP_DIR,
     logFile: path.join(workdir, 'qa', 'build-main.log'),
   });
+  recordTiming('template-build', mainBuildCommand.wallTimeMs);
   assertRegularFile(path.join(workdir, 'index.html'), 'template build-main output');
 
   const mainCheckFile = path.join(workdir, 'qa', 'check-main.json');
   const mainCheck = runHyperframesCheck(workdir, mainCheckFile);
+  recordTiming('main-check', mainCheck.wallTimeMs);
   const slug = `slot${options.slot}`;
   const finalFile = path.join(projectDir, 'outputs', `${targetRevisionId}-${slug}-final.mp4`);
   if (fs.existsSync(finalFile)) throw new Error(`output 已存在，拒絕覆寫：${finalFile}`);
-  renderHyperframes(workdir, finalFile, quality, path.join(workdir, 'qa', 'render-main.log'));
+  const mainRenderWallTimeMs = renderHyperframes(
+    workdir,
+    finalFile,
+    quality,
+    path.join(workdir, 'qa', 'render-main.log'),
+  );
+  recordTiming('main-render', mainRenderWallTimeMs);
+  timings.finishThroughRenderWallTimeMs = Number(
+    (Number(process.hrtime.bigint() - finishStartedAt) / 1e6).toFixed(3),
+  );
+  writeJson(path.join(workdir, 'qa', 'timings.json'), timings);
 
   const baseOutput = base.revision.outputs?.[0];
   if (!baseOutput?.archive) throw new Error('base Revision 缺 outputs[0].archive');
@@ -959,14 +1147,11 @@ function finish(options) {
     sha256: outputEvidence.sha256,
     archive: path.relative(APP_DIR, finalFile).split(path.sep).join('/'),
   };
-  const cards = base.revision.graphicBroll.cards.map((card) => {
-    const item = nextItems.find((candidate) => Number(candidate.card.ordinal) === Number(card.ordinal));
-    return {
-      ...card,
-      assetPath: path.relative(projectDir, item.source).split(path.sep).join('/'),
-      assetSha256: item.sha256,
-      assetSize: item.size,
-    };
+  const cards = deriveCardsFromStagedLedger({
+    baseCards: base.revision.graphicBroll.cards,
+    nextItems,
+    visualSegments: mainBuild.visualSegments,
+    projectDir,
   });
   revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
   const fallbackNote = compositionSnapshots.fallbackSlots.length > 0
@@ -974,8 +1159,9 @@ function finish(options) {
     : '';
 
   const revisionTitle = `${base.revision.title || project.name}（slot ${options.slot} 單格迭代）`;
+  const unchangedVisualCount = mainBuild.visualSegmentCount - 1;
   const revisionNote = [
-    `broll-slot：以 ${base.summary.id} 為 base，只重生 slot ${options.slot}，其餘 11 格逐 byte 沿用；未呼叫 HeyGen。`,
+    `broll-slot：以 ${base.summary.id} 為 base，只重生 slot ${options.slot}，其餘 ${unchangedVisualCount} 格逐 byte 沿用；未呼叫 HeyGen。`,
     fallbackNote,
     options.note ? String(options.note).trim() : '',
   ].filter(Boolean).join(' ');
@@ -1005,6 +1191,8 @@ function finish(options) {
       visualForm: base.revision.visualForm || null,
       paidProviderCalls: 0,
       note: revisionNote,
+      renderInputManifest: mainBuild.renderInputManifest,
+      renderInputManifestSha256: mainBuild.renderInputManifestSha256,
       graphicBroll: {
         ...base.revision.graphicBroll,
         style: `${base.revision.graphicBroll.style || 'composition-v1'}-slot-${options.slot}`,
@@ -1012,10 +1200,11 @@ function finish(options) {
         provenance: {
           ...(base.revision.graphicBroll.provenance || {}),
           level: `broll-slot-${targetRevisionId}`,
+          plan: mainBuild.segmentLedger.staged,
           prompts: {
             path: path.relative(projectDir, provenanceFile).split(path.sep).join('/'),
             schemaVersion: 2,
-            slotCount: 12,
+            slotCount: mainBuild.visualSegmentCount,
           },
           renderEvidence: path.relative(projectDir, path.join(workdir, 'qa')).split(path.sep).join('/'),
         },
@@ -1051,7 +1240,7 @@ function finish(options) {
         slotCheck: path.relative(projectDir, slotCheckFile).split(path.sep).join('/'),
         mainCheck: path.relative(projectDir, mainCheckFile).split(path.sep).join('/'),
         slotFrames: path.relative(projectDir, path.join(workdir, 'qa', 'frames')).split(path.sep).join('/'),
-        brollProvenance: `12/12; 11 same as ${base.summary.id}; slot ${options.slot} different`,
+        brollProvenance: `${mainBuild.visualSegmentCount}/${mainBuild.visualSegmentCount}; ${unchangedVisualCount} same as ${base.summary.id}; slot ${options.slot} different`,
       },
     });
     if (!updated) throw new Error('Revision done state 無法寫入');
@@ -1081,6 +1270,8 @@ function finish(options) {
       focusstockBrollMode: updated.options?.focusstockBrollMode || 'disabled',
       archived: updated.archived || [],
       graphicBroll: updated.graphicBroll || null,
+      renderInputManifest: mainBuild.renderInputManifest,
+      renderInputManifestSha256: mainBuild.renderInputManifestSha256,
     };
     jobStore.saveJob(job, { projectStore: store });
     revalidateWorkingPromptSnapshots(projectDir, promptSnapshots);
@@ -1090,7 +1281,11 @@ function finish(options) {
     if (!savedJob || savedJob.projectId !== project.id || savedJob.revisionId !== targetRevisionId
         || savedJob.revisionNumber !== targetNumber || savedJob.id !== savedRevision.jobId
         || savedRevision.runId !== savedJob.id
-        || JSON.stringify(savedJob.outputs) !== JSON.stringify(savedRevision.outputs))
+        || JSON.stringify(savedJob.outputs) !== JSON.stringify(savedRevision.outputs)
+        || savedJob.renderInputManifestSha256 !== mainBuild.renderInputManifestSha256
+        || savedRevision.renderInputManifestSha256 !== mainBuild.renderInputManifestSha256
+        || JSON.stringify(savedJob.renderInputManifest) !== JSON.stringify(mainBuild.renderInputManifest)
+        || JSON.stringify(savedRevision.renderInputManifest) !== JSON.stringify(mainBuild.renderInputManifest))
       throw new Error('Project／Revision／Job identity 驗證失敗');
     validateManifestIdentity({
       project: savedProject,
@@ -1119,6 +1314,7 @@ function finish(options) {
         durationDiffSec: media.durationDiffSec,
       },
       checks: { slot: slotCheck.ok, main: mainCheck.ok },
+      timings,
       mainBuild,
       sourceHtml: {
         count: compositionSnapshots.count,

@@ -21,7 +21,7 @@ const {
   getTitleText,
   cleanBodyWithIndex,
 } = require('./script-utils');
-const { imagePattern } = require('./segment-utils');
+const { imagePattern, parseImageOptions } = require('./segment-utils');
 
 // 這支腳本寫進全域路徑（src/*.generated.json、public/），兩個 session 同時跑會靜默互蓋。
 // 跟 run.js 共用同一把鎖（app/.run.lock）。
@@ -137,6 +137,8 @@ overlayMatches.sort((a, b) => a.index - b.index);
 function buildImageOverlay(m) {
   const n = m[1];
   const optsRaw = m[2];
+  const markerOptions = parseImageOptions(optsRaw, n);
+  if (markerOptions.visual === 'none') return null;
   const contentBodyStart = m.index + m[0].indexOf(m[3]);
   const contentBodyEnd = contentBodyStart + m[3].length;
   const range = bodyRangeToCleanedRange(contentBodyStart, contentBodyEnd);

@@ -20,6 +20,7 @@
     "test:graphic-broll": "node --test scripts/graphic-broll-plan.test.js scripts/focusstock-broll-plan.test.js scripts/focusstock-header-contract.test.js server/broll-composition-evidence.test.js server/broll-prompt-provenance.test.js server/focusstock-broll-carry-forward.test.js server/render-input-manifest.test.js",
     "test:broll-slot": "node --test scripts/broll-slot.test.js",
     "test:segments": "node --test scripts/segment-utils.test.js",
+    "test:build-main": "node --test scripts/build-main.test.js",
     "test:job-store": "node --test server/job-store.test.js",
     "test:chipk-provider-compat": "node scripts/chipk-provider-compatibility.js",
     "cleanup:plan": "node scripts/cleanup-plan.js",

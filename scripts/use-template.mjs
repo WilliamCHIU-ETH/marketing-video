@@ -114,6 +114,9 @@ for (const p of plan) {
 
 console.log(`✅ ${templateName} → ${path.relative(process.cwd(), projectDir) || projectDir}`);
 for (const c of copied) console.log(`   ${c}`);
+if (fs.existsSync(path.join(projectDir, 'scripts', 'build-main.mjs'))) {
+  console.log(`ℹ️ 本 Project 的 scripts/build-main.mjs 是歷史副本；正典是 app/config/templates/${templateName}/build-main.mjs。`);
+}
 if (backedUp.length) {
   console.log('\n覆蓋前的備份：');
   for (const b of backedUp) console.log(`   ${b}`);
